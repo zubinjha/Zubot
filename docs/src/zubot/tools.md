@@ -3,6 +3,14 @@
 This document defines the initial tools scaffold in `src/zubot/tools/`.
 
 ## Kernel Modules
+- `src/zubot/tools/kernel/filesystem.py`
+  - `read_file(path)`
+  - `list_dir(path=".")`
+  - `path_exists(path)`
+  - `stat_path(path)`
+  - `write_file(path, content, ...)`
+  - `append_file(path, content, ...)`
+  - Enforces filesystem policy through `src/zubot/core/path_policy.py`.
 - `src/zubot/tools/kernel/location.py`
   - `get_location()`
   - Returns normalized location fields (`lat`, `lon`, `city`, `region`, `country`, `timezone`, `source`).
@@ -31,9 +39,18 @@ This document defines the initial tools scaffold in `src/zubot/tools/`.
 - Tools should return normalized dictionaries to keep prompt assembly stable.
 - Tools should retrieve settings through `src/zubot/core/config_loader.py` (for example, timezone and home location).
 - Keep personal baseline tools in `src/zubot/tools/kernel/` to avoid clutter as more specialized tool groups are added.
+- Data-aware helpers live in `src/zubot/tools/data/`:
+  - `read_json(path)`
+  - `write_json(path, obj, ...)`
+  - `search_text(query, ...)`
 - Weather config lives in `config/config.json` under `weather`:
   - `base_url`
   - `temperature_unit`
   - `wind_speed_unit`
   - `precipitation_unit`
   - `timeout_sec`
+- Filesystem config lives in `config/config.json` under `filesystem`:
+  - `default_access`
+  - `allow_read`
+  - `allow_write`
+  - `deny`

@@ -32,3 +32,20 @@ Current helper surface:
 
 Design note:
 - Runtime code should call this loader instead of reading `config/config.json` directly.
+
+## Path Policy
+
+Primary module:
+- `src/zubot/core/path_policy.py`
+
+Responsibilities:
+- repository-root path normalization (`normalize_repo_path`)
+- safe path resolution (`resolve_repo_path`)
+- filesystem policy parsing (`get_filesystem_policy`)
+- access checks (`check_access`, `can_read`, `can_write`)
+
+Filesystem policy fields (from config):
+- `default_access`: `allow` or `deny`
+- `allow_read`: list of glob patterns
+- `allow_write`: list of glob patterns
+- `deny`: denylist patterns (always takes precedence)

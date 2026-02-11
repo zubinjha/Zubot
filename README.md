@@ -13,9 +13,13 @@ Deeper architectural documentation lives in [docs/README.md](docs/README.md).
 - Architecture-first project with core context contracts in `context/`.
 - Config-driven runtime setup via `config/config.json` (local, ignored) and `config/example_config.json` (tracked schema).
 - Kernel tool scaffolding implemented in `src/zubot/tools/kernel/`:
+  - filesystem (policy-enforced read/list/write primitives)
   - location
   - time
   - weather (Open-Meteo integration)
+- Data-aware helper tools in `src/zubot/tools/data/`:
+  - JSON read/write
+  - text search
 - Automated tests in `tests/` with `pytest`.
 
 ## Agent Resume Checklist

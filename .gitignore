@@ -14,3 +14,4 @@ context/*
 config/config.json
 personal_notes/
 dev_docs/
+outputs/

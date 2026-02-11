@@ -16,6 +16,21 @@
         "precipitation_unit": "inch",
         "timeout_sec": 10
     },
+    "filesystem": {
+        "default_access": "deny",
+        "allow_read": [
+            "**"
+        ],
+        "allow_write": [
+            "memory/**",
+            "outputs/**"
+        ],
+        "deny": [
+            "config/config.json",
+            ".git/**",
+            ".venv/**"
+        ]
+    },
     "default_model_alias": "medium",
     "model_providers":{
         "openrouter":{
