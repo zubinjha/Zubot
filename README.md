@@ -17,6 +17,8 @@ Deeper architectural documentation lives in [docs/README.md](docs/README.md).
   - location
   - time
   - weather (Open-Meteo integration)
+  - web search (Brave API integration)
+  - web fetch (page content extraction for URLs)
 - Data-aware helper tools in `src/zubot/tools/data/`:
   - JSON read/write
   - text search

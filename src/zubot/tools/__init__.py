@@ -5,6 +5,7 @@ These are lightweight scaffolds. Provider-specific integrations are added later.
 
 from .kernel import (
     append_file,
+    fetch_url,
     get_current_time,
     get_future_weather,
     get_location,
@@ -16,12 +17,14 @@ from .kernel import (
     path_exists,
     read_file,
     stat_path,
+    web_search,
     write_file,
 )
 from .data import read_json, search_text, write_json
 
 __all__ = [
     "append_file",
+    "fetch_url",
     "get_current_time",
     "get_future_weather",
     "get_location",
@@ -35,6 +38,7 @@ __all__ = [
     "read_json",
     "search_text",
     "stat_path",
+    "web_search",
     "write_file",
     "write_json",
 ]

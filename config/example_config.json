@@ -16,6 +16,17 @@
         "precipitation_unit": "inch",
         "timeout_sec": 10
     },
+    "web_search": {
+        "provider": "brave",
+        "base_url": "https://api.search.brave.com/res/v1/web/search",
+        "brave_api_key": "XXXXXX",
+        "timeout_sec": 10
+    },
+    "web_fetch": {
+        "timeout_sec": 10,
+        "max_chars": 20000,
+        "user_agent": "Zubot/0.1 (+local-first-agent)"
+    },
     "filesystem": {
         "default_access": "deny",
         "allow_read": [

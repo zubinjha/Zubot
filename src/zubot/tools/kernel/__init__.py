@@ -3,6 +3,7 @@
 from .filesystem import append_file, list_dir, path_exists, read_file, stat_path, write_file
 from .location import get_location
 from .time import get_current_time
+from .web_fetch import fetch_url
 from .weather import (
     get_future_weather,
     get_today_weather,
@@ -10,9 +11,11 @@ from .weather import (
     get_weather_24hr,
     get_week_outlook,
 )
+from .web_search import web_search
 
 __all__ = [
     "append_file",
+    "fetch_url",
     "get_current_time",
     "get_future_weather",
     "get_location",
@@ -24,5 +27,6 @@ __all__ = [
     "path_exists",
     "read_file",
     "stat_path",
+    "web_search",
     "write_file",
 ]

@@ -21,6 +21,20 @@ This document defines the initial tools scaffold in `src/zubot/tools/`.
     - `iso_local` converted using location/config timezone when available
     - `human_utc` and `human_local` for display-friendly timestamps
     - `timezone` and `timezone_source` for fallback transparency
+- `src/zubot/tools/kernel/web_search.py`
+  - `web_search(query, count=5, country="US", search_lang="en")`
+  - Uses Brave Search API and returns normalized web results (`title`, `url`, `description`, `age`, `language`).
+  - Returns `source` values:
+    - `brave_api`
+    - `config_missing`
+    - `brave_api_error`
+- `src/zubot/tools/kernel/web_fetch.py`
+  - `fetch_url(url)`
+  - Fetches an `http/https` URL and extracts readable text.
+  - Handles both `text/html` and `text/plain`.
+  - Returns `source` values:
+    - `web_fetch`
+    - `web_fetch_error`
 - `src/zubot/tools/kernel/weather.py`
   - `get_weather(location=None)`
   - `get_future_weather(location=None, horizon="daily", hours=24, days=7)`
@@ -54,3 +68,12 @@ This document defines the initial tools scaffold in `src/zubot/tools/`.
   - `allow_read`
   - `allow_write`
   - `deny`
+- Web search config lives in `config/config.json` under `web_search`:
+  - `provider` (`brave`)
+  - `base_url`
+  - `brave_api_key`
+  - `timeout_sec`
+- Web fetch config lives in `config/config.json` under `web_fetch`:
+  - `timeout_sec`
+  - `max_chars`
+  - `user_agent`
