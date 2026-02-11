@@ -1,4 +1,21 @@
 {
+    "timezone": "America/New_York",
+    "home_location": {
+        "lat": 40.0931,
+        "lon": -83.0170,
+        "city": "Worthington",
+        "region": "Ohio",
+        "country": "USA",
+        "timezone": "America/New_York"
+    },
+    "weather": {
+        "provider": "open-meteo",
+        "base_url": "https://api.open-meteo.com/v1/forecast",
+        "temperature_unit": "fahrenheit",
+        "wind_speed_unit": "mph",
+        "precipitation_unit": "inch",
+        "timeout_sec": 10
+    },
     "default_model_alias": "medium",
     "model_providers":{
         "openrouter":{
