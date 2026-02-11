@@ -7,4 +7,4 @@ Initial intended use cases:
 - todo management
 - future job automation
 
-Deeper architectural documentation lives in `docs/README.md`.
+Deeper architectural documentation lives in [docs/README.md](docs/README.md).
