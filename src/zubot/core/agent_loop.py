@@ -5,8 +5,9 @@ from __future__ import annotations
 from time import monotonic
 from typing import Any, Callable
 
-from .agent_types import SessionEvent
+from .agent_types import SessionEvent, TaskEnvelope
 from .session_store import append_session_events
+from .sub_agent_runner import SubAgentRunner
 from .token_estimator import compute_budget, estimate_payload_tokens, get_model_token_limits
 
 Planner = Callable[[dict[str, Any]], dict[str, Any]]
@@ -16,9 +17,16 @@ Executor = Callable[[dict[str, Any]], dict[str, Any]]
 class AgentLoop:
     """Single-turn loop runner for a user-facing main agent."""
 
-    def __init__(self, *, planner: Planner, action_executor: Executor) -> None:
+    def __init__(
+        self,
+        *,
+        planner: Planner,
+        action_executor: Executor,
+        sub_agent_runner: SubAgentRunner | None = None,
+    ) -> None:
         self._planner = planner
         self._execute = action_executor
+        self._sub_agent_runner = sub_agent_runner
 
     def ingest_user_input(self, session_id: str, text: str) -> SessionEvent:
         return SessionEvent(
@@ -47,6 +55,36 @@ class AgentLoop:
 
     def execute_action(self, action: dict[str, Any]) -> dict[str, Any]:
         return self._execute(action)
+
+    @staticmethod
+    def _build_task_from_action(action: dict[str, Any]) -> TaskEnvelope:
+        task_payload = action.get("task")
+        instructions = ""
+        if isinstance(task_payload, str):
+            instructions = task_payload
+        elif isinstance(task_payload, dict):
+            txt = task_payload.get("instructions")
+            if isinstance(txt, str):
+                instructions = txt
+        if not instructions:
+            txt = action.get("instructions")
+            if isinstance(txt, str):
+                instructions = txt
+        if not instructions:
+            raise ValueError("spawn_sub_agent action requires task instructions.")
+
+        model_tier = action.get("model_tier", "medium")
+        if model_tier not in {"low", "medium", "high"}:
+            model_tier = "medium"
+
+        return TaskEnvelope.create(
+            instructions=instructions,
+            model_tier=model_tier,  # type: ignore[arg-type]
+            requested_by="main_agent",
+            tool_access=list(action.get("tool_access") or []),
+            skill_access=list(action.get("skill_access") or []),
+            metadata={"origin_action": action},
+        )
 
     def observe_result(self, session_id: str, result: dict[str, Any]) -> SessionEvent:
         event_type = "tool_result"
@@ -178,7 +216,27 @@ class AgentLoop:
                     )
                 )
 
-            result = self.execute_action(action)
+            if action_kind == "spawn_sub_agent" and self._sub_agent_runner is not None:
+                task = self._build_task_from_action(action)
+                worker_out = self._sub_agent_runner.run_task(task)
+                worker_result = worker_out.get("result", {})
+                if not isinstance(worker_result, dict):
+                    worker_result = {}
+                status = worker_result.get("status")
+                result = {
+                    "type": "worker_result",
+                    "task_id": worker_result.get("task_id", task.task_id),
+                    "status": status,
+                    "summary": worker_result.get("summary"),
+                    "artifacts": worker_result.get("artifacts", []),
+                    "error": worker_result.get("error"),
+                    "trace": worker_result.get("trace", []),
+                    "needs_user_input": status == "needs_user_input",
+                    "final_response": worker_result.get("summary") if status == "success" else None,
+                    "worker_ok": bool(worker_out.get("ok")),
+                }
+            else:
+                result = self.execute_action(action)
             events.append(self.observe_result(session_id, result))
             should_stop, response, stop_reason = self.respond_or_continue(result)
             if should_stop:

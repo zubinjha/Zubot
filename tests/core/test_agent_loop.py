@@ -1,4 +1,5 @@
 from src.zubot.core.agent_loop import AgentLoop
+from src.zubot.core.sub_agent_runner import SubAgentRunner
 
 
 def test_agent_loop_stops_on_final_response():
@@ -89,3 +90,37 @@ def test_agent_loop_persists_events(tmp_path):
     assert result["stop_reason"] == "final_response"
     log = (tmp_path / "sessions" / "sess_store.jsonl")
     assert log.exists()
+
+
+def test_agent_loop_spawn_sub_agent_with_runner_success():
+    def planner(_context):
+        return {"kind": "spawn_sub_agent", "task": "do work", "model_tier": "low"}
+
+    def executor(_action):
+        return {"progress": "unused"}
+
+    def fake_llm(*, messages, model=None, **_kwargs):
+        assert isinstance(messages, list)
+        return {"ok": True, "text": "worker finished"}
+
+    sub_runner = SubAgentRunner(llm_caller=fake_llm)
+    loop = AgentLoop(planner=planner, action_executor=executor, sub_agent_runner=sub_runner)
+    result = loop.run_turn(session_id="sess_1", user_text="hi")
+    assert result["stop_reason"] == "final_response"
+    assert result["response"] == "worker finished"
+
+
+def test_agent_loop_spawn_sub_agent_with_runner_needs_user_input():
+    def planner(_context):
+        return {"kind": "spawn_sub_agent", "task": "clarify task"}
+
+    def worker_planner(_context):
+        return {"kind": "respond", "text": "Need clarification", "needs_user_input": True}
+
+    def executor(_action):
+        return {"progress": "unused"}
+
+    sub_runner = SubAgentRunner(planner=worker_planner, llm_caller=lambda **_: {"ok": True, "text": "unused"})
+    loop = AgentLoop(planner=planner, action_executor=executor, sub_agent_runner=sub_runner)
+    result = loop.run_turn(session_id="sess_1", user_text="hi")
+    assert result["stop_reason"] == "needs_user_input"

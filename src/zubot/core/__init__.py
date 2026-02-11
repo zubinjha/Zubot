@@ -3,7 +3,10 @@
 from .agent_loop import AgentLoop
 from .agent_types import SessionEvent, TaskEnvelope, WorkerResult
 from .context_assembler import assemble_messages
+from .context_policy import score_context_item, select_items_for_budget
 from .context_loader import load_base_context, load_context_bundle, select_supplemental_context_files
+from .context_state import ContextItem, ContextState, fingerprint_text
+from .fact_memory import extract_facts_from_events, extract_facts_from_text
 from .config_loader import (
     clear_config_cache,
     get_default_model,
@@ -27,6 +30,8 @@ from .path_policy import (
     resolve_repo_path,
 )
 from .session_store import append_session_events, load_session_events, session_log_path
+from .sub_agent_runner import SubAgentRunner
+from .summary_memory import build_rolling_summary, summarize_events
 from .token_estimator import (
     compute_budget,
     estimate_messages_tokens,
@@ -45,12 +50,17 @@ __all__ = [
     "can_read",
     "can_write",
     "compute_budget",
+    "ContextItem",
+    "ContextState",
     "check_access",
     "clear_config_cache",
     "call_llm",
     "estimate_messages_tokens",
     "estimate_payload_tokens",
     "estimate_text_tokens",
+    "extract_facts_from_events",
+    "extract_facts_from_text",
+    "fingerprint_text",
     "get_default_model",
     "get_filesystem_policy",
     "get_home_location",
@@ -68,6 +78,11 @@ __all__ = [
     "repo_root",
     "resolve_config_path",
     "resolve_repo_path",
+    "score_context_item",
+    "select_items_for_budget",
     "select_supplemental_context_files",
     "session_log_path",
+    "SubAgentRunner",
+    "build_rolling_summary",
+    "summarize_events",
 ]
