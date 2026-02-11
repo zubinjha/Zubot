@@ -22,6 +22,12 @@ Deeper architectural documentation lives in [docs/README.md](docs/README.md).
 - Data-aware helper tools in `src/zubot/tools/data/`:
   - JSON read/write
   - text search
+- Core agent runtime scaffolding in `src/zubot/core/`:
+  - agent loop + event schemas
+  - config-driven LLM client (OpenRouter adapter)
+  - context loading/assembly pipeline
+  - token estimation + budget checks
+  - session event persistence
 - Automated tests in `tests/` with `pytest`.
 
 ## Agent Resume Checklist
@@ -37,3 +43,10 @@ For new agents or fresh sessions, use this order:
 ## Security Notes
 - Never commit secrets from `config/config.json`.
 - Use `config/example_config.json` as the committed schema reference.
+
+## Local Web Chat (Test UI)
+- Minimal local app lives in `app/`.
+- Run:
+  - `source .venv/bin/activate`
+  - `python -m uvicorn app.main:app --reload --port 8000`
+- Open: `http://127.0.0.1:8000`

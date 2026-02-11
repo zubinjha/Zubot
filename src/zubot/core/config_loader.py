@@ -97,3 +97,42 @@ def get_default_model(config: dict[str, Any] | None = None) -> tuple[str, dict[s
     if not isinstance(alias, str) or not alias:
         raise ValueError("Config requires non-empty string `default_model_alias`.")
     return get_model_by_alias(alias, config=payload)
+
+
+def get_model_by_id(model_id: str, config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return model payload for a model id."""
+    payload = config or load_config()
+    models = payload.get("models")
+    if not isinstance(models, dict):
+        raise ValueError("Config models must be a JSON object keyed by model id.")
+
+    model = models.get(model_id)
+    if not isinstance(model, dict):
+        raise ValueError(f"Model id '{model_id}' is not defined.")
+    return model
+
+
+def get_model_config(model_ref: str | None = None, config: dict[str, Any] | None = None) -> tuple[str, dict[str, Any]]:
+    """Resolve model config by id, alias, or default alias when model_ref is None."""
+    payload = config or load_config()
+    if model_ref is None:
+        return get_default_model(payload)
+
+    models = payload.get("models")
+    if isinstance(models, dict) and isinstance(models.get(model_ref), dict):
+        return model_ref, models[model_ref]
+
+    return get_model_by_alias(model_ref, payload)
+
+
+def get_provider_config(provider_name: str, config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return provider config from `model_providers`."""
+    payload = config or load_config()
+    providers = payload.get("model_providers")
+    if not isinstance(providers, dict):
+        raise ValueError("Config model_providers must be a JSON object.")
+
+    provider = providers.get(provider_name)
+    if not isinstance(provider, dict):
+        raise ValueError(f"Model provider '{provider_name}' is not defined.")
+    return provider

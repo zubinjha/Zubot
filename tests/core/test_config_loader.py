@@ -6,8 +6,11 @@ import pytest
 from src.zubot.core.config_loader import (
     clear_config_cache,
     get_default_model,
+    get_model_config,
+    get_model_by_id,
     get_home_location,
     get_model_by_alias,
+    get_provider_config,
     get_timezone,
     load_config,
     resolve_config_path,
@@ -51,8 +54,9 @@ def test_helpers_resolve_default_model_and_location():
         "timezone": "America/New_York",
         "home_location": {"city": "Worthington"},
         "default_model_alias": "medium",
+        "model_providers": {"openrouter": {"apikey": "x"}},
         "models": {
-            "gpt5_mini": {"alias": "medium", "endpoint": "openai/gpt-5-mini"},
+            "gpt5_mini": {"alias": "medium", "endpoint": "openai/gpt-5-mini", "provider": "openrouter"},
             "gpt5": {"alias": "high", "endpoint": "openai/gpt-5"},
         },
     }
@@ -63,3 +67,6 @@ def test_helpers_resolve_default_model_and_location():
     default_model_id, default_model = get_default_model(config)
     assert default_model_id == "gpt5_mini"
     assert default_model["endpoint"] == "openai/gpt-5-mini"
+    assert get_model_by_id("gpt5_mini", config)["alias"] == "medium"
+    assert get_model_config("gpt5_mini", config)[0] == "gpt5_mini"
+    assert get_provider_config("openrouter", config)["apikey"] == "x"

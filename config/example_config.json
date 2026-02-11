@@ -25,7 +25,7 @@
     "web_fetch": {
         "timeout_sec": 10,
         "max_chars": 20000,
-        "user_agent": "Zubot/0.1 (+local-first-agent)"
+        "user_agent": "Zubot/0.1"
     },
     "filesystem": {
         "default_access": "deny",
@@ -46,7 +46,11 @@
     "model_providers":{
         "openrouter":{
             "alias": "openrouter",
-            "apikey": "XXXXXX"
+            "apikey": "XXXXXX",
+            "base_url": "https://openrouter.ai/api/v1/chat/completions",
+            "timeout_sec": 30,
+            "referer": "https://your-app.example",
+            "app_title": "Zubot"
         }
     },
     "models":{

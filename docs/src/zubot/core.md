@@ -8,6 +8,49 @@ This area will eventually define:
 - context assembly pipeline
 - model/tool routing and safety checks
 
+## Agent Contracts
+
+Primary module:
+- `src/zubot/core/agent_types.py`
+
+Schemas:
+- `TaskEnvelope`:
+  - `task_id`
+  - `requested_by`
+  - `instructions`
+  - `model_tier`
+  - `tool_access` / `skill_access`
+  - `deadline_iso`
+- `WorkerResult`:
+  - `task_id`
+  - `status`
+  - `summary`
+  - `artifacts`
+  - `error`
+  - `trace`
+- `SessionEvent`:
+  - event timeline entries for user/assistant/tool/worker/system events
+
+## Agent Loop
+
+Primary module:
+- `src/zubot/core/agent_loop.py`
+
+Current scaffold responsibilities:
+- ingest user input events
+- assemble working context from base + recent events
+- plan next action via pluggable planner
+- execute action via pluggable executor
+- optional token-budget stop checks per turn
+- optional session event persistence to JSONL
+- emit deterministic stop reasons:
+  - `final_response`
+  - `needs_user_input`
+  - `step_budget_exhausted`
+  - `tool_call_budget_exhausted`
+  - `timeout_budget_exhausted`
+  - `context_budget_exhausted`
+
 ## Config Loader
 
 Primary module:
@@ -27,6 +70,9 @@ Current helper surface:
 - `get_timezone()`
 - `get_home_location()`
 - `get_model_by_alias()`
+- `get_model_by_id()`
+- `get_model_config()`
+- `get_provider_config()`
 - `get_default_model()`
 - `clear_config_cache()`
 
@@ -49,3 +95,47 @@ Filesystem policy fields (from config):
 - `allow_read`: list of glob patterns
 - `allow_write`: list of glob patterns
 - `deny`: denylist patterns (always takes precedence)
+
+## LLM Client
+
+Primary modules:
+- `src/zubot/core/llm_client.py`
+- `src/zubot/core/providers/openrouter.py`
+
+Responsibilities:
+- resolve model + provider from config
+- map model endpoint for provider calls
+- execute provider request
+- normalize response payload shape (`text`, `tool_calls`, `usage`, `error`)
+
+## Token Budgeting
+
+Primary module:
+- `src/zubot/core/token_estimator.py`
+
+Responsibilities:
+- estimate text/message token usage
+- load per-model limits from config
+- compute fill ratio and remaining input budget
+- drive context-budget stop checks in `AgentLoop`
+
+## Context Pipeline
+
+Primary modules:
+- `src/zubot/core/context_loader.py`
+- `src/zubot/core/context_assembler.py`
+
+Responsibilities:
+- always-load base context (`AGENT`, `SOUL`, `USER`)
+- optionally select and load situational supplemental context
+- assemble ordered model messages from context + session events
+- apply optional budget-aware trimming of supplemental context
+
+## Session Persistence
+
+Primary module:
+- `src/zubot/core/session_store.py`
+
+Responsibilities:
+- append session events to `memory/sessions/<session_id>.jsonl`
+- load persisted event timelines for replay/debugging
