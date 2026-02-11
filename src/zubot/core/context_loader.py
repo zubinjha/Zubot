@@ -11,6 +11,7 @@ DEFAULT_BASE_CONTEXT_FILES = [
     "context/AGENT.md",
     "context/SOUL.md",
     "context/USER.md",
+    "context/more-about-human/README.md",
 ]
 
 DEFAULT_SUPPLEMENTAL_GLOBS = [
