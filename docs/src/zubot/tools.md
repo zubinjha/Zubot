@@ -35,6 +35,17 @@ This document defines the initial tools scaffold in `src/zubot/tools/`.
   - Returns `source` values:
     - `web_fetch`
     - `web_fetch_error`
+- `src/zubot/tools/kernel/hasdata_indeed.py`
+  - `get_indeed_jobs(keyword, location)`
+  - `get_indeed_job_detail(url)`
+  - Uses HasData API endpoints for Indeed listing/detail retrieval.
+  - Listing tool behavior is fixed internally to:
+    - `domain = www.indeed.com`
+    - `sort = date`
+  - Returns normalized payloads with:
+    - `provider` (`hasdata`)
+    - `source` (`hasdata_indeed_listing`, `hasdata_indeed_job`, or `*_error`)
+    - `error` when request/parsing fails
 - `src/zubot/tools/kernel/weather.py`
   - `get_weather(location=None)`
   - `get_future_weather(location=None, horizon="daily", hours=24, days=7)`
@@ -77,6 +88,10 @@ This document defines the initial tools scaffold in `src/zubot/tools/`.
   - `timeout_sec`
   - `max_chars`
   - `user_agent`
+- HasData config lives in `config/config.json` under `has_data`:
+  - `api_key`
+  - `base_url` (default `https://api.hasdata.com`)
+  - `timeout_sec`
 
 ## Registry
 
@@ -111,6 +126,8 @@ Current registered tools:
   - `append_file`
   - `web_search`
   - `fetch_url`
+  - `get_indeed_jobs`
+  - `get_indeed_job_detail`
 - Data:
   - `read_json`
   - `write_json`

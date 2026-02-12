@@ -74,6 +74,7 @@ For new agents or fresh sessions, use this order:
 - UI now includes:
   - chat-style message timeline
   - live in-flight progress states (thinking/context/tool-check phases)
+  - post-response tool-chain summary in Progress (exact tool names + status)
   - worker status panel (up to 3 shown) with per-worker kill control
   - runtime panel with route, tool-call record, and last reply snapshot
   - auto session initialization on page load/session change

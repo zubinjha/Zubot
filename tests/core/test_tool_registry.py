@@ -8,6 +8,8 @@ def test_list_tools_contains_expected_names():
         "fetch_url",
         "get_current_time",
         "get_future_weather",
+        "get_indeed_job_detail",
+        "get_indeed_jobs",
         "get_location",
         "get_today_weather",
         "get_weather",
@@ -61,6 +63,11 @@ def test_registry_get_returns_spec():
     spec = get_tool_registry().get("get_location")
     assert spec.name == "get_location"
     assert spec.category == "kernel"
+
+
+def test_indeed_jobs_contract_is_keyword_and_location_only():
+    spec = get_tool_registry().get("get_indeed_jobs")
+    assert set(spec.parameters.keys()) == {"keyword", "location"}
 
 
 def test_invoke_time_tool_uses_default_location(monkeypatch):

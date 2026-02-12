@@ -25,7 +25,9 @@
     },
     "has_data": {
         "api_key": "XXXXXX",
-        "site": "https://hasdata.com/"
+        "site": "https://hasdata.com/",
+        "base_url": "https://api.hasdata.com",
+        "timeout_sec": 15
     },
     "web_fetch": {
         "timeout_sec": 10,

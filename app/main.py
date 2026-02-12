@@ -194,6 +194,9 @@ def index() -> str:
       border: 1px solid var(--line);
       line-height: 1.35;
       white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      hyphens: auto;
       animation: rise .16s ease-out;
     }
 
@@ -285,6 +288,7 @@ def index() -> str:
       font-size: 0.8rem;
       line-height: 1.45;
       color: var(--muted);
+      white-space: pre-wrap;
     }
 
     pre {
@@ -470,6 +474,21 @@ def index() -> str:
       lastResponseEl.textContent = JSON.stringify(payload, null, 2);
     }
 
+    function setProgressFromResponse(data) {
+      const route = data?.route || 'unknown route';
+      const tools = extractToolCalls(data);
+      if (!tools.length) {
+        progressEl.textContent = `Completed (${route})\nTools: none`;
+        return;
+      }
+      const chain = tools.map((tool) => {
+        const name = tool?.name || 'unknown_tool';
+        const status = typeof tool?.ok === 'boolean' ? (tool.ok ? 'ok' : 'error') : 'attempted';
+        return `${name} (${status})`;
+      }).join(' -> ');
+      progressEl.textContent = `Completed (${route})\nTools: ${chain}`;
+    }
+
     function renderWorkers(data) {
       const workers = Array.isArray(data?.workers) ? data.workers : [];
       const runtime = data?.runtime || {};
@@ -578,7 +597,7 @@ def index() -> str:
         appendMessage('bot', data.reply || '(No reply)');
         setLastResponsePanel(data);
         setRuntimeFromResponse(data, session_id);
-        progressEl.textContent = `Completed (${data.route || 'unknown route'})`;
+        setProgressFromResponse(data);
         await refreshWorkers();
       } catch (err) {
         appendMessage('bot', 'Request failed.');

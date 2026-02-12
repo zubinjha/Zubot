@@ -8,6 +8,7 @@ from typing import Any, Callable
 from src.zubot.tools.data.json_tools import read_json, write_json
 from src.zubot.tools.data.text_search import search_text
 from src.zubot.tools.kernel.filesystem import append_file, list_dir, path_exists, read_file, stat_path, write_file
+from src.zubot.tools.kernel.hasdata_indeed import get_indeed_job_detail, get_indeed_jobs
 from src.zubot.tools.kernel.location import get_location
 from src.zubot.tools.kernel.time import get_current_time
 from src.zubot.tools.kernel.weather import (
@@ -197,6 +198,27 @@ def _create_default_registry() -> ToolRegistry:
             category="orchestration",
             description="List worker events to forward through main agent.",
             parameters={"consume": {"type": "boolean", "required": False}},
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="get_indeed_jobs",
+            handler=get_indeed_jobs,
+            category="kernel",
+            description="Get Indeed job listings via HasData (fixed: domain=www.indeed.com, sort=date).",
+            parameters={
+                "keyword": {"type": "string", "required": True},
+                "location": {"type": "string", "required": True},
+            },
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="get_indeed_job_detail",
+            handler=get_indeed_job_detail,
+            category="kernel",
+            description="Get detailed Indeed job info via HasData job endpoint.",
+            parameters={"url": {"type": "string", "required": True}},
         )
     )
     registry.register(
