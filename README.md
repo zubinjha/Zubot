@@ -37,7 +37,7 @@ Deeper architectural documentation lives in [docs/README.md](docs/README.md).
 ## Agent Resume Checklist
 For new agents or fresh sessions, use this order:
 1. Read `AGENTS.md` (repo-level execution rules and startup contract).
-2. Read `context/AGENT.md`, `context/SOUL.md`, and `context/USER.md`.
+2. Read `context/KERNEL.md`, `context/AGENT.md`, `context/SOUL.md`, and `context/USER.md`.
 3. Read `docs/README.md` and relevant docs under `docs/src/zubot/`.
 4. Load runtime config from `config/config.json` via `src/zubot/core/config_loader.py`.
 5. Run tests before and after edits:

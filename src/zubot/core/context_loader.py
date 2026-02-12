@@ -8,6 +8,7 @@ from typing import Any
 from .path_policy import repo_root
 
 DEFAULT_BASE_CONTEXT_FILES = [
+    "context/KERNEL.md",
     "context/AGENT.md",
     "context/SOUL.md",
     "context/USER.md",

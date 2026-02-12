@@ -13,12 +13,14 @@ def _write(path: Path, content: str) -> None:
 
 
 def test_load_base_context(tmp_path: Path):
+    _write(tmp_path / "context/KERNEL.md", "kernel assumptions")
     _write(tmp_path / "context/AGENT.md", "agent rules")
     _write(tmp_path / "context/SOUL.md", "soul principles")
     _write(tmp_path / "context/USER.md", "user profile")
     _write(tmp_path / "context/more-about-human/README.md", "index of user profile details")
 
     bundle = load_base_context(root=tmp_path)
+    assert "context/KERNEL.md" in bundle
     assert "context/AGENT.md" in bundle
     assert "context/SOUL.md" in bundle
     assert "context/USER.md" in bundle
@@ -35,6 +37,7 @@ def test_select_supplemental_context_files_by_query(tmp_path: Path):
 
 
 def test_load_context_bundle(tmp_path: Path):
+    _write(tmp_path / "context/KERNEL.md", "kernel")
     _write(tmp_path / "context/AGENT.md", "agent")
     _write(tmp_path / "context/SOUL.md", "soul")
     _write(tmp_path / "context/USER.md", "user")
@@ -44,5 +47,6 @@ def test_load_context_bundle(tmp_path: Path):
     bundle = load_context_bundle(query="resume", root=tmp_path, max_supplemental_files=2)
     assert "base" in bundle
     assert "supplemental" in bundle
+    assert "context/KERNEL.md" in bundle["base"]
     assert "context/AGENT.md" in bundle["base"]
     assert "context/more-about-human/README.md" in bundle["base"]

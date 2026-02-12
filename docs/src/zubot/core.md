@@ -1,7 +1,7 @@
 # Zubot Core
 
 Core runtime assumptions and invariants live in:
-- `src/zubot/core/KERNEL.md`
+- `context/KERNEL.md`
 
 This area will eventually define:
 - agent loop orchestration
@@ -146,7 +146,7 @@ Primary modules:
 - `src/zubot/core/fact_memory.py`
 
 Responsibilities:
-- always-load base context (`AGENT`, `SOUL`, `USER`)
+- always-load base context (`KERNEL`, `AGENT`, `SOUL`, `USER`)
 - optionally select and load situational supplemental context
 - assemble ordered model messages from context + session events
 - apply budget-aware trimming with deterministic context priority rules
