@@ -25,6 +25,7 @@ from src.zubot.core.memory_index import (
 from src.zubot.core.session_store import append_session_events
 from src.zubot.core.tool_registry import invoke_tool, list_tools
 from src.zubot.core.config_loader import load_config
+from src.zubot.core.worker_manager import get_worker_manager
 
 MAX_RECENT_EVENTS = 60
 DAILY_MEMORY_FLUSH_EVERY_TURNS = 30
@@ -279,6 +280,21 @@ def _persist_session_turn(session_id: str, *, user_text: str, reply: str, route:
 
 def _tool_schemas_for_llm() -> list[dict[str, Any]]:
     """Convert registry metadata into OpenAI-compatible tool schemas."""
+    def _param_schema(meta: dict[str, Any] | None) -> dict[str, Any]:
+        kind = "string"
+        if isinstance(meta, dict) and isinstance(meta.get("type"), str):
+            kind = meta["type"]
+        if kind == "array":
+            items_type = "string"
+            if isinstance(meta, dict) and isinstance(meta.get("items_type"), str):
+                items_type = meta["items_type"]
+            return {"type": "array", "items": {"type": items_type}}
+        if kind == "object":
+            return {"type": "object", "additionalProperties": True}
+        if kind in {"string", "number", "integer", "boolean", "null"}:
+            return {"type": kind}
+        return {"type": "string"}
+
     schemas: list[dict[str, Any]] = []
     for tool in list_tools():
         properties: dict[str, Any] = {}
@@ -288,10 +304,8 @@ def _tool_schemas_for_llm() -> list[dict[str, Any]]:
             for name, meta in params.items():
                 if not isinstance(name, str) or not name:
                     continue
-                kind = "string"
-                if isinstance(meta, dict) and isinstance(meta.get("type"), str):
-                    kind = meta["type"]
-                properties[name] = {"type": kind}
+                meta_dict = meta if isinstance(meta, dict) else None
+                properties[name] = _param_schema(meta_dict)
                 if isinstance(meta, dict) and bool(meta.get("required")):
                     required.append(name)
 
@@ -314,6 +328,55 @@ def _tool_schemas_for_llm() -> list[dict[str, Any]]:
             }
         )
     return schemas
+
+
+def _worker_runtime_snapshot_text() -> str:
+    try:
+        payload = get_worker_manager().list_workers()
+    except Exception:
+        return "workers unavailable"
+    if not payload.get("ok"):
+        return "workers unavailable"
+    workers = payload.get("workers")
+    runtime = payload.get("runtime")
+    if not isinstance(workers, list) or not isinstance(runtime, dict):
+        return "workers unavailable"
+
+    lines = [
+        (
+            "workers_runtime "
+            f"running={runtime.get('running_count', 0)} "
+            f"queued={runtime.get('queued_count', 0)} "
+            f"max={runtime.get('max_concurrent_workers', 3)}"
+        )
+    ]
+    for worker in workers[:3]:
+        if not isinstance(worker, dict):
+            continue
+        lines.append(
+            (
+                f"- {worker.get('worker_id', 'worker?')} "
+                f"title={worker.get('title', 'untitled')} "
+                f"status={worker.get('status', 'unknown')} "
+                f"cancel_requested={worker.get('cancel_requested', False)}"
+            )
+        )
+    return "\n".join(lines)
+
+
+def _load_forwardable_worker_events() -> list[dict[str, Any]]:
+    try:
+        payload = get_worker_manager().list_forward_events(consume=True)
+    except Exception:
+        return []
+    events = payload.get("events")
+    if not isinstance(events, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for event in events:
+        if isinstance(event, dict):
+            out.append(event)
+    return out
 
 
 def _parse_tool_call(tool_call: dict[str, Any], idx: int) -> tuple[str | None, dict[str, Any], str]:
@@ -459,7 +522,15 @@ def handle_chat_message(
         if runtime.facts:
             context_bundle["facts"] = dict(runtime.facts)
 
-        turn_events = [*runtime.recent_events, {"event_type": "user_message", "payload": {"text": text}}]
+        turn_events = [
+            *runtime.recent_events,
+            {"event_type": "system", "payload": {"worker_runtime": _worker_runtime_snapshot_text()}},
+            *[
+                {"event_type": "system", "payload": {"worker_event": event}}
+                for event in _load_forwardable_worker_events()
+            ],
+            {"event_type": "user_message", "payload": {"text": text}},
+        ]
         assembled = assemble_messages(
             context_bundle=context_bundle,
             recent_events=turn_events,
@@ -491,6 +562,13 @@ def handle_chat_message(
                         "session_id": session_id,
                         "kept_recent_message_count": assembled.get("kept_recent_message_count"),
                         "dropped_recent_event_count": assembled.get("dropped_recent_event_count"),
+                        "forwarded_worker_events_injected": sum(
+                            1
+                            for evt in turn_events
+                            if evt.get("event_type") == "system"
+                            and isinstance(evt.get("payload"), dict)
+                            and "worker_event" in evt["payload"]
+                        ),
                     },
                 },
                 "error": None,

@@ -136,3 +136,14 @@ def get_provider_config(provider_name: str, config: dict[str, Any] | None = None
     if not isinstance(provider, dict):
         raise ValueError(f"Model provider '{provider_name}' is not defined.")
     return provider
+
+
+def get_max_concurrent_workers(config: dict[str, Any] | None = None) -> int:
+    """Return configured max concurrent workers with safe fallback."""
+    payload = config or load_config()
+    loop_cfg = payload.get("agent_loop")
+    if isinstance(loop_cfg, dict):
+        value = loop_cfg.get("max_concurrent_workers")
+        if isinstance(value, int) and value > 0:
+            return value
+    return 3

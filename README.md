@@ -25,6 +25,7 @@ Deeper architectural documentation lives in [docs/README.md](docs/README.md).
 - Core agent runtime scaffolding in `src/zubot/core/`:
   - agent loop + event schemas
   - sub-agent runner scaffold + delegation path
+  - worker manager (cap=3, queueing, lifecycle state, worker context reset)
   - config-driven LLM client (OpenRouter adapter)
   - centralized tool registry and dispatch helpers
   - context loading/assembly pipeline
@@ -56,13 +57,24 @@ For new agents or fresh sessions, use this order:
 - Open: `http://127.0.0.1:8000`
 - Supports `session_id` scoping and session reset via `/api/session/reset`.
 - Supports explicit session initialization via `/api/session/init`.
+- Worker control endpoints:
+  - `POST /api/workers/spawn`
+  - `POST /api/workers/{id}/cancel`
+  - `POST /api/workers/{id}/reset-context`
+  - `POST /api/workers/{id}/message`
+  - `GET /api/workers/{id}`
+  - `GET /api/workers`
 - Session reset clears chat working context but preserves local daily memory files.
 - Daily memory is split into raw logs and summary snapshots under `memory/daily/`.
 - Session JSONL logging is optional (`memory.session_event_logging_enabled`) and disabled by default.
 - LLM-routed queries run through a registry-backed tool-call loop (tool schema -> tool execution -> final response).
+- Tool registry includes orchestration tools for worker management:
+  - `spawn_worker`, `message_worker`, `cancel_worker`
+  - `reset_worker_context`, `get_worker`, `list_workers`, `list_worker_events`
 - UI now includes:
   - chat-style message timeline
   - live in-flight progress states (thinking/context/tool-check phases)
+  - worker status panel (up to 3 shown) with per-worker kill control
   - runtime panel with route, tool-call record, and last reply snapshot
   - auto session initialization on page load/session change
 - App chat uses unified LLM + registry tool loop (no keyword-based direct routing).

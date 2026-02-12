@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -16,8 +17,25 @@ def _post_json(url: str, headers: dict[str, str], payload: dict[str, Any], timeo
         headers=headers,
         method="POST",
     )
-    with urlopen(req, timeout=timeout_sec) as response:
-        body = response.read().decode("utf-8")
+    try:
+        with urlopen(req, timeout=timeout_sec) as response:
+            body = response.read().decode("utf-8")
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        detail = body.strip() or str(exc)
+        try:
+            parsed = json.loads(body)
+            if isinstance(parsed, dict):
+                err = parsed.get("error")
+                if isinstance(err, dict):
+                    detail = str(err.get("message") or err.get("code") or detail)
+                elif isinstance(err, str):
+                    detail = err
+                elif isinstance(parsed.get("message"), str):
+                    detail = parsed["message"]
+        except json.JSONDecodeError:
+            pass
+        raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
     parsed = json.loads(body)
     if not isinstance(parsed, dict):
         raise ValueError("Provider response must be a JSON object.")

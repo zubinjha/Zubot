@@ -252,3 +252,84 @@ def test_daily_summary_fallback_prefers_signal_turns(monkeypatch):
     )
     assert "Signal turns: 1 of 3" in out
     assert "implemented weather tool wiring" in out
+
+
+def test_handle_chat_message_injects_forwarded_worker_events(monkeypatch):
+    class _FakeManager:
+        def list_workers(self):
+            return {
+                "ok": True,
+                "workers": [],
+                "runtime": {"running_count": 0, "queued_count": 0, "max_concurrent_workers": 3},
+            }
+
+        def list_forward_events(self, consume=True):
+            _ = consume
+            return {
+                "ok": True,
+                "events": [
+                    {
+                        "event_id": "wevt_1",
+                        "worker_id": "worker_1",
+                        "worker_title": "Research",
+                        "type": "worker_completed",
+                        "timestamp": "2026-01-01T00:00:00+00:00",
+                        "payload": {"summary": "done"},
+                    }
+                ],
+            }
+
+    monkeypatch.setattr(chat_logic, "get_worker_manager", lambda: _FakeManager())
+    monkeypatch.setattr(chat_logic, "call_llm", lambda **kwargs: {"ok": True, "text": "ack"})
+    monkeypatch.setattr(
+        chat_logic,
+        "load_context_bundle",
+        lambda **kwargs: {"base": {"context/AGENT.md": "x"}, "supplemental": {}},
+    )
+    result = handle_chat_message("status?", allow_llm_fallback=True, session_id="worker-forward")
+    assert result["ok"] is True
+    assert result["data"]["context_debug"]["forwarded_worker_events_injected"] == 1
+
+
+def test_handle_chat_message_keeps_worker_context_isolated(monkeypatch):
+    captured = {"messages": None}
+    secret = "WORKER_INTERNAL_SECRET_SHOULD_NOT_LEAK"
+
+    class _FakeManager:
+        def list_workers(self):
+            return {
+                "ok": True,
+                "workers": [
+                    {
+                        "worker_id": "worker_1",
+                        "title": "Research Task",
+                        "status": "running",
+                        "cancel_requested": False,
+                        # Simulate accidental internal fields in manager output.
+                        "context_session_dump": secret,
+                        "facts_raw": {"internal": secret},
+                    }
+                ],
+                "runtime": {"running_count": 1, "queued_count": 0, "max_concurrent_workers": 3},
+            }
+
+        def list_forward_events(self, consume=True):
+            _ = consume
+            return {"ok": True, "events": []}
+
+    def fake_call_llm(**kwargs):
+        captured["messages"] = kwargs.get("messages")
+        return {"ok": True, "text": "ok"}
+
+    monkeypatch.setattr(chat_logic, "get_worker_manager", lambda: _FakeManager())
+    monkeypatch.setattr(chat_logic, "call_llm", fake_call_llm)
+    monkeypatch.setattr(
+        chat_logic,
+        "load_context_bundle",
+        lambda **kwargs: {"base": {"context/AGENT.md": "x"}, "supplemental": {}},
+    )
+    result = handle_chat_message("check status", allow_llm_fallback=True, session_id="worker-isolation")
+    assert result["ok"] is True
+
+    all_content = " ".join(str(msg.get("content", "")) for msg in (captured["messages"] or []))
+    assert secret not in all_content

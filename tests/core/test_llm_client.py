@@ -5,6 +5,7 @@ import pytest
 
 from src.zubot.core.config_loader import clear_config_cache
 from src.zubot.core.llm_client import call_llm
+from urllib.error import URLError
 
 
 def _write_config(path: Path, payload: dict) -> None:
@@ -38,7 +39,7 @@ def test_call_llm_resolves_and_invokes_provider(configured_openrouter, monkeypat
     def fake_call_openrouter(**kwargs):
         assert kwargs["model"] == "openai/gpt-5-mini"
         assert kwargs["api_key"] == "KEY_123"
-        assert kwargs["max_output_tokens"] == 128000
+        assert kwargs["max_output_tokens"] is None
         return {
             "ok": True,
             "provider": "openrouter",
@@ -74,3 +75,46 @@ def test_call_llm_unsupported_provider(monkeypatch: pytest.MonkeyPatch, tmp_path
     result = call_llm(messages=[{"role": "user", "content": "Hi"}])
     assert not result["ok"]
     assert "Unsupported provider" in result["error"]
+
+
+def test_call_llm_retries_transient_openrouter_error(configured_openrouter, monkeypatch):
+    attempts = {"n": 0}
+
+    def flaky_call_openrouter(**kwargs):
+        _ = kwargs
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise URLError("temporary failure in name resolution")
+        return {
+            "ok": True,
+            "provider": "openrouter",
+            "model": "openai/gpt-5-mini",
+            "text": "hello",
+            "tool_calls": None,
+            "finish_reason": "stop",
+            "usage": {"total_tokens": 10},
+            "raw": {},
+            "error": None,
+        }
+
+    monkeypatch.setattr("src.zubot.core.llm_client.call_openrouter", flaky_call_openrouter)
+    monkeypatch.setattr("src.zubot.core.llm_client.sleep", lambda _s: None)
+    result = call_llm(messages=[{"role": "user", "content": "Hi"}])
+    assert result["ok"] is True
+    assert attempts["n"] == 3
+
+
+def test_call_llm_does_not_retry_non_retryable_error(configured_openrouter, monkeypatch):
+    attempts = {"n": 0}
+
+    def bad_request_openrouter(**kwargs):
+        _ = kwargs
+        attempts["n"] += 1
+        raise ValueError("invalid payload")
+
+    monkeypatch.setattr("src.zubot.core.llm_client.call_openrouter", bad_request_openrouter)
+    monkeypatch.setattr("src.zubot.core.llm_client.sleep", lambda _s: None)
+    result = call_llm(messages=[{"role": "user", "content": "Hi"}])
+    assert result["ok"] is False
+    assert "invalid payload" in result["error"]
+    assert attempts["n"] == 1

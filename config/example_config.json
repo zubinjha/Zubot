@@ -36,6 +36,9 @@
         "session_event_logging_enabled": false,
         "autoload_summary_days": 2
     },
+    "agent_loop": {
+        "max_concurrent_workers": 3
+    },
     "filesystem": {
         "default_access": "deny",
         "allow_read": [
@@ -59,6 +62,8 @@
             "site": "https://openrouter.ai/",
             "base_url": "https://openrouter.ai/api/v1/chat/completions",
             "timeout_sec": 30,
+            "retry_attempts": 3,
+            "retry_backoff_ms": 400,
             "referer": "https://your-app.example",
             "app_title": "Zubot"
         }

@@ -74,6 +74,7 @@ Current helper surface:
 - `get_model_config()`
 - `get_provider_config()`
 - `get_default_model()`
+- `get_max_concurrent_workers()`
 - `clear_config_cache()`
 
 Design note:
@@ -107,6 +108,7 @@ Responsibilities:
 - map model endpoint for provider calls
 - execute provider request
 - normalize response payload shape (`text`, `tool_calls`, `usage`, `error`)
+- retry transient provider network failures (DNS/timeouts/5xx/429) with bounded backoff
 
 ## Tool Registry
 
@@ -218,3 +220,30 @@ Responsibilities:
 - reuse context assembly/token budgeting/memory primitives
 - return normalized `WorkerResult` payloads
 - support stateless worker behavior between tasks
+- default worker path supports LLM tool-loop execution using tool schemas from registry
+- worker tool access can be restricted per-task via `TaskEnvelope.tool_access`
+- orchestration-category tools are excluded from worker loop by default (no recursive worker spawn)
+
+## Worker Manager
+
+Primary modules:
+- `src/zubot/core/worker_manager.py`
+- `src/zubot/core/worker_policy.py`
+
+Responsibilities:
+- enforce hard concurrency cap (`max_concurrent_workers`, default 3)
+- queue worker tasks when active slots are full
+- maintain worker registry state:
+  - `worker_id`, `title`, `status`
+  - `task_envelope`, `started_at`, `finished_at`
+  - `error`, `result`
+- own worker control surface:
+  - spawn
+  - message/enqueue task
+  - cancel
+  - reset worker context
+  - get/list worker status
+- keep per-worker scoped context session (summary + facts + preload bundle)
+- emit worker lifecycle events with forwarding policy hook:
+  - `should_forward_worker_event_to_user(...)` (v1: always `True`)
+- expose forwardable worker event feed (`list_forward_events`) for main-agent context injection

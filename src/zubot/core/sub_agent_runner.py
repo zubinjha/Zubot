@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from time import monotonic
 from typing import Any, Callable
 
@@ -165,23 +166,31 @@ class SubAgentRunner:
                     }
                 )
             else:
-                llm_result = self._llm(messages=assembled["messages"], model=effective_model)
-                if not llm_result.get("ok"):
+                llm_result, final_text, executed_tools, loop_error = self._run_llm_with_tools(
+                    messages=assembled["messages"],
+                    model=effective_model,
+                    max_steps=max_steps,
+                    max_tool_calls=max_tool_calls,
+                    allowed_tools=envelope.tool_access,
+                )
+                if loop_error is not None:
                     result = WorkerResult(
                         task_id=envelope.task_id,
                         status="failed",
                         summary="Worker LLM call failed.",
-                        error=str(llm_result.get("error") or "llm_error"),
+                        error=loop_error,
                         trace=trace,
                     )
                     return {"ok": False, "result": result.to_dict(), "events": recent_events}
 
-                text = str(llm_result.get("text") or "").strip()
                 result = WorkerResult(
                     task_id=envelope.task_id,
                     status="success",
-                    summary=text or "(No summary returned.)",
-                    artifacts=[{"type": "llm_output", "data": llm_result}],
+                    summary=final_text or "(No summary returned.)",
+                    artifacts=[
+                        {"type": "llm_output", "data": llm_result},
+                        {"type": "tool_execution", "data": executed_tools},
+                    ],
                     trace=trace,
                 )
                 return {
@@ -292,3 +301,185 @@ class SubAgentRunner:
             trace=trace,
         )
         return {"ok": False, "result": result.to_dict(), "events": recent_events}
+
+    @staticmethod
+    def _tool_schemas_for_worker(allowed_tools: list[str]) -> tuple[list[dict[str, Any]], set[str]]:
+        from .tool_registry import list_tools
+
+        def _param_schema(meta: dict[str, Any] | None) -> dict[str, Any]:
+            kind = "string"
+            if isinstance(meta, dict) and isinstance(meta.get("type"), str):
+                kind = meta["type"]
+            if kind == "array":
+                items_type = "string"
+                if isinstance(meta, dict) and isinstance(meta.get("items_type"), str):
+                    items_type = meta["items_type"]
+                return {"type": "array", "items": {"type": items_type}}
+            if kind == "object":
+                return {"type": "object", "additionalProperties": True}
+            if kind in {"string", "number", "integer", "boolean", "null"}:
+                return {"type": kind}
+            return {"type": "string"}
+
+        allowed_set = {name for name in allowed_tools if isinstance(name, str) and name.strip()}
+        schemas: list[dict[str, Any]] = []
+        registered_names: set[str] = set()
+        for tool in list_tools():
+            if not isinstance(tool, dict):
+                continue
+            name = tool.get("name")
+            category = tool.get("category")
+            if not isinstance(name, str) or not name:
+                continue
+            if category == "orchestration":
+                continue
+            if allowed_set and name not in allowed_set:
+                continue
+            registered_names.add(name)
+
+            properties: dict[str, Any] = {}
+            required: list[str] = []
+            params = tool.get("parameters")
+            if isinstance(params, dict):
+                for param_name, meta in params.items():
+                    if not isinstance(param_name, str) or not param_name:
+                        continue
+                    meta_dict = meta if isinstance(meta, dict) else None
+                    properties[param_name] = _param_schema(meta_dict)
+                    if isinstance(meta, dict) and bool(meta.get("required")):
+                        required.append(param_name)
+
+            parameters_schema: dict[str, Any] = {
+                "type": "object",
+                "properties": properties,
+                "additionalProperties": False,
+            }
+            if required:
+                parameters_schema["required"] = required
+
+            schemas.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": str(tool.get("description") or ""),
+                        "parameters": parameters_schema,
+                    },
+                }
+            )
+        return schemas, registered_names
+
+    @staticmethod
+    def _parse_tool_call(tool_call: dict[str, Any], idx: int) -> tuple[str | None, dict[str, Any], str]:
+        call_id = str(tool_call.get("id") or f"tool_call_{idx}")
+        fn = tool_call.get("function")
+        if not isinstance(fn, dict):
+            return None, {}, call_id
+
+        name = fn.get("name")
+        if not isinstance(name, str) or not name:
+            return None, {}, call_id
+
+        raw_args = fn.get("arguments")
+        if isinstance(raw_args, dict):
+            return name, raw_args, call_id
+        if isinstance(raw_args, str) and raw_args.strip():
+            try:
+                parsed = json.loads(raw_args)
+            except json.JSONDecodeError:
+                return name, {"_raw_arguments": raw_args}, call_id
+            if isinstance(parsed, dict):
+                return name, parsed, call_id
+        return name, {}, call_id
+
+    def _run_llm_with_tools(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        model: str,
+        max_steps: int,
+        max_tool_calls: int,
+        allowed_tools: list[str],
+    ) -> tuple[dict[str, Any], str, list[dict[str, Any]], str | None]:
+        from .tool_registry import invoke_tool
+
+        tool_schemas, registered_names = self._tool_schemas_for_worker(allowed_tools)
+        working_messages = list(messages)
+        executed_tools: list[dict[str, Any]] = []
+        tool_calls_used = 0
+        last_result: dict[str, Any] | None = None
+
+        for _ in range(max_steps):
+            llm_result = self._llm(messages=working_messages, model=model, tools=tool_schemas)
+            last_result = llm_result
+            if not llm_result.get("ok"):
+                return llm_result, "", executed_tools, str(llm_result.get("error") or "llm_error")
+
+            tool_calls = llm_result.get("tool_calls")
+            if not isinstance(tool_calls, list) or not tool_calls:
+                text = llm_result.get("text")
+                if isinstance(text, str):
+                    return llm_result, text.strip(), executed_tools, None
+                return llm_result, "", executed_tools, None
+
+            working_messages.append(
+                {
+                    "role": "assistant",
+                    "content": llm_result.get("text") or "",
+                    "tool_calls": tool_calls,
+                }
+            )
+
+            for idx, call in enumerate(tool_calls):
+                if tool_calls_used >= max_tool_calls:
+                    return llm_result, "", executed_tools, "tool_call_budget_exhausted"
+                tool_calls_used += 1
+
+                if not isinstance(call, dict):
+                    continue
+                tool_name, tool_args, tool_call_id = self._parse_tool_call(call, idx=idx)
+                if tool_name is None:
+                    tool_payload = {
+                        "ok": False,
+                        "error": "Malformed tool call: missing function name.",
+                        "source": "worker_tool_loop",
+                    }
+                    tool_name = "unknown_tool"
+                elif "_raw_arguments" in tool_args:
+                    tool_payload = {
+                        "ok": False,
+                        "error": f"Invalid JSON arguments for `{tool_name}`.",
+                        "source": "worker_tool_loop",
+                    }
+                elif tool_name not in registered_names:
+                    tool_payload = {
+                        "ok": False,
+                        "error": f"Tool `{tool_name}` is not available to this worker.",
+                        "source": "worker_tool_loop",
+                    }
+                else:
+                    tool_payload = invoke_tool(tool_name, **tool_args)
+
+                executed_tools.append(
+                    {
+                        "name": tool_name,
+                        "args": tool_args,
+                        "result_ok": bool(tool_payload.get("ok", True)),
+                        "error": tool_payload.get("error"),
+                    }
+                )
+                working_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "name": tool_name,
+                        "content": json.dumps(tool_payload, ensure_ascii=False),
+                    }
+                )
+
+        if isinstance(last_result, dict):
+            text = last_result.get("text")
+            if isinstance(text, str):
+                return last_result, text.strip(), executed_tools, None
+            return last_result, "", executed_tools, "worker_tool_loop_step_budget_exhausted"
+        return {"ok": False}, "", executed_tools, "worker_tool_loop_step_budget_exhausted"

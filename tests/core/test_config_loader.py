@@ -6,6 +6,7 @@ import pytest
 from src.zubot.core.config_loader import (
     clear_config_cache,
     get_default_model,
+    get_max_concurrent_workers,
     get_model_config,
     get_model_by_id,
     get_home_location,
@@ -53,6 +54,7 @@ def test_helpers_resolve_default_model_and_location():
     config = {
         "timezone": "America/New_York",
         "home_location": {"city": "Worthington"},
+        "agent_loop": {"max_concurrent_workers": 3},
         "default_model_alias": "medium",
         "model_providers": {"openrouter": {"apikey": "x"}},
         "models": {
@@ -70,3 +72,4 @@ def test_helpers_resolve_default_model_and_location():
     assert get_model_by_id("gpt5_mini", config)["alias"] == "medium"
     assert get_model_config("gpt5_mini", config)[0] == "gpt5_mini"
     assert get_provider_config("openrouter", config)["apikey"] == "x"
+    assert get_max_concurrent_workers(config) == 3

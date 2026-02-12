@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .chat_logic import handle_chat_message, initialize_session_context, reset_session_context
+from src.zubot.core.worker_manager import get_worker_manager
 
 app = FastAPI(title="Zubot Local Chat")
 
@@ -21,6 +22,20 @@ class ResetRequest(BaseModel):
 
 class InitRequest(BaseModel):
     session_id: str = "default"
+
+class SpawnWorkerRequest(BaseModel):
+    title: str
+    instructions: str
+    model_tier: str = "medium"
+    tool_access: list[str] = Field(default_factory=list)
+    skill_access: list[str] = Field(default_factory=list)
+    preload_files: list[str] = Field(default_factory=list)
+    metadata: dict = Field(default_factory=dict)
+
+
+class WorkerMessageRequest(BaseModel):
+    message: str
+    model_tier: str = "medium"
 
 
 @app.get("/health")
@@ -41,6 +56,48 @@ def reset_session(req: ResetRequest) -> dict:
 @app.post("/api/session/init")
 def init_session(req: InitRequest) -> dict:
     return initialize_session_context(req.session_id)
+
+
+@app.post("/api/workers/spawn")
+def spawn_worker(req: SpawnWorkerRequest) -> dict:
+    return get_worker_manager().spawn_worker(
+        title=req.title,
+        instructions=req.instructions,
+        model_tier=req.model_tier,
+        tool_access=req.tool_access,
+        skill_access=req.skill_access,
+        preload_files=req.preload_files,
+        metadata=req.metadata,
+    )
+
+
+@app.post("/api/workers/{worker_id}/cancel")
+def cancel_worker(worker_id: str) -> dict:
+    return get_worker_manager().cancel_worker(worker_id)
+
+
+@app.post("/api/workers/{worker_id}/reset-context")
+def reset_worker_context(worker_id: str) -> dict:
+    return get_worker_manager().reset_worker_context(worker_id)
+
+
+@app.post("/api/workers/{worker_id}/message")
+def message_worker(worker_id: str, req: WorkerMessageRequest) -> dict:
+    return get_worker_manager().message_worker(
+        worker_id=worker_id,
+        message=req.message,
+        model_tier=req.model_tier,
+    )
+
+
+@app.get("/api/workers/{worker_id}")
+def get_worker(worker_id: str) -> dict:
+    return get_worker_manager().get_worker(worker_id)
+
+
+@app.get("/api/workers")
+def list_workers() -> dict:
+    return get_worker_manager().list_workers()
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -201,7 +258,7 @@ def index() -> str:
 
     .side {
       display: grid;
-      grid-template-rows: auto auto 1fr;
+      grid-template-rows: auto auto auto 1fr;
       gap: 12px;
       padding: 12px;
     }
@@ -252,6 +309,52 @@ def index() -> str:
       font-size: 0.75rem;
     }
 
+    .workers {
+      display: grid;
+      gap: 8px;
+    }
+
+    .worker-row {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fffdfa;
+      padding: 8px;
+      display: grid;
+      gap: 6px;
+    }
+
+    .worker-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .worker-title {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.78rem;
+      color: var(--ink);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 220px;
+    }
+
+    .worker-meta {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.73rem;
+      color: var(--muted);
+      word-break: break-word;
+    }
+
+    .btn-kill {
+      border-color: #f3b6b6;
+      background: #ffecec;
+      color: #862c2c;
+      padding: 5px 8px;
+      font-size: 0.74rem;
+    }
+
     @media (max-width: 900px) {
       .app {
         grid-template-columns: 1fr;
@@ -297,6 +400,10 @@ def index() -> str:
         <h3>Progress</h3>
         <div id="progress" class="body">Idle</div>
       </div>
+      <div class="card">
+        <h3>Workers</h3>
+        <div id="workers" class="body workers">Loading worker status...</div>
+      </div>
       <div class="card" style="min-height: 0;">
         <h3>Last Response</h3>
         <pre id="last-response">{
@@ -316,6 +423,8 @@ def index() -> str:
     const routePill = document.getElementById('route-pill');
     const sessionPill = document.getElementById('session-pill');
     const msgCountPill = document.getElementById('msgcount-pill');
+    const workersEl = document.getElementById('workers');
+    let workerPollTimer = null;
 
     function appendMessage(role, text) {
       const div = document.createElement('div');
@@ -361,6 +470,78 @@ def index() -> str:
       lastResponseEl.textContent = JSON.stringify(payload, null, 2);
     }
 
+    function renderWorkers(data) {
+      const workers = Array.isArray(data?.workers) ? data.workers : [];
+      const runtime = data?.runtime || {};
+      const running = runtime.running_count ?? 0;
+      const queued = runtime.queued_count ?? 0;
+      const max = runtime.max_concurrent_workers ?? 3;
+
+      if (!workers.length) {
+        workersEl.innerHTML = `<div class="worker-meta">No workers yet. Capacity: ${running}/${max} running, ${queued} queued.</div>`;
+        return;
+      }
+
+      const rows = workers.slice(0, 3).map((worker) => {
+        const workerId = worker.worker_id || 'worker?';
+        const title = worker.title || 'Untitled worker';
+        const status = worker.status || 'unknown';
+        const disableKill = status === 'done' || status === 'failed' || status === 'cancelled';
+        return `
+          <div class="worker-row">
+            <div class="worker-top">
+              <div class="worker-title" title="${title}">${title}</div>
+              <button class="btn-kill" data-worker-id="${workerId}" ${disableKill ? 'disabled' : ''}>Kill</button>
+            </div>
+            <div class="worker-meta">id=${workerId}</div>
+            <div class="worker-meta">status=${status}</div>
+          </div>
+        `;
+      }).join('');
+
+      workersEl.innerHTML = `
+        <div class="worker-meta">Capacity: ${running}/${max} running, ${queued} queued.</div>
+        ${rows}
+      `;
+
+      workersEl.querySelectorAll('.btn-kill').forEach((btn) => {
+        btn.addEventListener('click', async (evt) => {
+          const id = evt.currentTarget?.getAttribute('data-worker-id');
+          if (!id) return;
+          await killWorker(id);
+        });
+      });
+    }
+
+    async function refreshWorkers() {
+      try {
+        const res = await fetch('/api/workers');
+        const data = await res.json();
+        if (data?.ok) renderWorkers(data);
+      } catch (_err) {
+        workersEl.textContent = 'Worker status unavailable.';
+      }
+    }
+
+    async function killWorker(workerId) {
+      setBusyStatus(true, `Killing ${workerId}...`);
+      try {
+        const res = await fetch(`/api/workers/${workerId}/cancel`, { method: 'POST' });
+        const data = await res.json();
+        if (data?.ok) {
+          appendMessage('bot', `Worker ${workerId} cancelled.`);
+          progressEl.textContent = `Cancelled ${workerId}.`;
+        } else {
+          appendMessage('bot', data?.error || `Failed to cancel ${workerId}.`);
+        }
+      } catch (_err) {
+        appendMessage('bot', `Failed to cancel ${workerId}.`);
+      } finally {
+        setBusyStatus(false, '');
+        await refreshWorkers();
+      }
+    }
+
     function startProgressTicker() {
       const phases = [
         'Thinking...',
@@ -398,6 +579,7 @@ def index() -> str:
         setLastResponsePanel(data);
         setRuntimeFromResponse(data, session_id);
         progressEl.textContent = `Completed (${data.route || 'unknown route'})`;
+        await refreshWorkers();
       } catch (err) {
         appendMessage('bot', 'Request failed.');
         progressEl.textContent = 'Request failed.';
@@ -430,6 +612,7 @@ def index() -> str:
         });
         setRuntimeFromResponse({ route: 'session.reset', data: {} }, session_id);
         progressEl.textContent = 'Session context reset.';
+        await refreshWorkers();
       } finally {
         setBusyStatus(false, '');
       }
@@ -455,6 +638,7 @@ def index() -> str:
         });
         setRuntimeFromResponse({ route: 'session.init', data: { context_debug: {} } }, session_id);
         progressEl.textContent = `Session initialized (${session_id}).`;
+        await refreshWorkers();
       } finally {
         setBusyStatus(false, '');
       }
@@ -468,6 +652,7 @@ def index() -> str:
       initSession(true);
     });
 
+    workerPollTimer = setInterval(refreshWorkers, 1200);
     initSession(true);
   </script>
 </body>

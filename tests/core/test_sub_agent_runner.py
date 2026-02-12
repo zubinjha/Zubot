@@ -63,3 +63,84 @@ def test_sub_agent_runner_tool_action_uses_executor():
     out = runner.run_task(task, max_steps=1)
     assert out["ok"] is False
     assert out["result"]["error"] == "step_budget_exhausted"
+
+
+def test_sub_agent_runner_default_tool_loop_executes_registry_tool(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_llm(*, messages, model=None, tools=None, **_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            assert isinstance(tools, list)
+            return {
+                "ok": True,
+                "text": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "get_current_time", "arguments": "{}"},
+                    }
+                ],
+            }
+        return {"ok": True, "text": "done with tools", "tool_calls": None}
+
+    monkeypatch.setattr(
+        "src.zubot.core.tool_registry.list_tools",
+        lambda **_kwargs: [
+            {
+                "name": "get_current_time",
+                "category": "kernel",
+                "description": "time",
+                "parameters": {},
+            }
+        ],
+    )
+    monkeypatch.setattr("src.zubot.core.tool_registry.invoke_tool", lambda name, **kwargs: {"ok": True, "name": name, "value": "10:00"})
+
+    runner = SubAgentRunner(llm_caller=fake_llm)
+    task = TaskEnvelope.create(instructions="use tools")
+    out = runner.run_task(task, max_steps=3)
+    assert out["ok"] is True
+    assert out["result"]["status"] == "success"
+    assert out["result"]["summary"] == "done with tools"
+    artifacts = out["result"]["artifacts"]
+    assert any(item.get("type") == "tool_execution" for item in artifacts)
+
+
+def test_sub_agent_runner_tool_access_blocks_unallowed_tool(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_llm(*, messages, model=None, tools=None, **_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {
+                "ok": True,
+                "text": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "get_week_outlook", "arguments": "{}"},
+                    }
+                ],
+            }
+        return {"ok": True, "text": "completed", "tool_calls": None}
+
+    monkeypatch.setattr(
+        "src.zubot.core.tool_registry.list_tools",
+        lambda **_kwargs: [
+            {
+                "name": "get_current_time",
+                "category": "kernel",
+                "description": "time",
+                "parameters": {},
+            }
+        ],
+    )
+    runner = SubAgentRunner(llm_caller=fake_llm)
+    task = TaskEnvelope.create(instructions="restricted", tool_access=["get_current_time"])
+    out = runner.run_task(task, max_steps=3)
+    assert out["ok"] is True
+    tool_artifact = next(item for item in out["result"]["artifacts"] if item.get("type") == "tool_execution")
+    assert tool_artifact["data"][0]["result_ok"] is False

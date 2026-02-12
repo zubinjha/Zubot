@@ -19,6 +19,7 @@ from src.zubot.tools.kernel.weather import (
 )
 from src.zubot.tools.kernel.web_fetch import fetch_url
 from src.zubot.tools.kernel.web_search import web_search
+from src.zubot.core.worker_manager import get_worker_manager
 
 ToolHandler = Callable[..., dict[str, Any]]
 _TOOLS_WITH_DEFAULT_LOCATION = {
@@ -109,6 +110,95 @@ class ToolRegistry:
 def _create_default_registry() -> ToolRegistry:
     registry = ToolRegistry()
 
+    registry.register(
+        ToolSpec(
+            name="spawn_worker",
+            handler=lambda **kwargs: get_worker_manager().spawn_worker(
+                title=str(kwargs.get("title") or ""),
+                instructions=str(kwargs.get("instructions") or ""),
+                model_tier=str(kwargs.get("model_tier") or "medium"),
+                tool_access=list(kwargs.get("tool_access") or []),
+                skill_access=list(kwargs.get("skill_access") or []),
+                preload_files=list(kwargs.get("preload_files") or []),
+                metadata=dict(kwargs.get("metadata") or {}),
+            ),
+            category="orchestration",
+            description="Spawn a worker task with title + instructions (max 3 concurrent).",
+            parameters={
+                "title": {"type": "string", "required": True},
+                "instructions": {"type": "string", "required": True},
+                "model_tier": {"type": "string", "required": False},
+                "tool_access": {"type": "array", "required": False},
+                "skill_access": {"type": "array", "required": False},
+                "preload_files": {"type": "array", "required": False},
+                "metadata": {"type": "object", "required": False},
+            },
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="message_worker",
+            handler=lambda **kwargs: get_worker_manager().message_worker(
+                worker_id=str(kwargs.get("worker_id") or ""),
+                message=str(kwargs.get("message") or ""),
+                model_tier=str(kwargs.get("model_tier") or "medium"),
+            ),
+            category="orchestration",
+            description="Queue a follow-up message/task for an existing worker.",
+            parameters={
+                "worker_id": {"type": "string", "required": True},
+                "message": {"type": "string", "required": True},
+                "model_tier": {"type": "string", "required": False},
+            },
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="cancel_worker",
+            handler=lambda **kwargs: get_worker_manager().cancel_worker(str(kwargs.get("worker_id") or "")),
+            category="orchestration",
+            description="Cancel a queued/running worker and clear pending tasks.",
+            parameters={"worker_id": {"type": "string", "required": True}},
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="reset_worker_context",
+            handler=lambda **kwargs: get_worker_manager().reset_worker_context(str(kwargs.get("worker_id") or "")),
+            category="orchestration",
+            description="Reset a non-running worker's scoped context session.",
+            parameters={"worker_id": {"type": "string", "required": True}},
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="get_worker",
+            handler=lambda **kwargs: get_worker_manager().get_worker(str(kwargs.get("worker_id") or "")),
+            category="orchestration",
+            description="Get state for one worker by id.",
+            parameters={"worker_id": {"type": "string", "required": True}},
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="list_workers",
+            handler=lambda **_kwargs: get_worker_manager().list_workers(),
+            category="orchestration",
+            description="List all workers and runtime queue counts.",
+            parameters={},
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="list_worker_events",
+            handler=lambda **kwargs: get_worker_manager().list_forward_events(
+                consume=bool(kwargs.get("consume", True))
+            ),
+            category="orchestration",
+            description="List worker events to forward through main agent.",
+            parameters={"consume": {"type": "boolean", "required": False}},
+        )
+    )
     registry.register(
         ToolSpec(
             name="get_location",
