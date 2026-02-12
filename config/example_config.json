@@ -20,12 +20,17 @@
         "provider": "brave",
         "base_url": "https://api.search.brave.com/res/v1/web/search",
         "brave_api_key": "XXXXXX",
+        "site": "https://api.search.brave.com/",
         "timeout_sec": 10
+    },
+    "has_data": {
+        "api_key": "XXXXXX",
+        "site": "https://hasdata.com/"
     },
     "web_fetch": {
         "timeout_sec": 10,
         "max_chars": 20000,
-        "user_agent": "Zubot/0.1"
+        "user_agent": "Zubot"
     },
     "memory": {
         "session_event_logging_enabled": false,
@@ -51,6 +56,7 @@
         "openrouter":{
             "alias": "openrouter",
             "apikey": "XXXXXX",
+            "site": "https://openrouter.ai/",
             "base_url": "https://openrouter.ai/api/v1/chat/completions",
             "timeout_sec": 30,
             "referer": "https://your-app.example",
