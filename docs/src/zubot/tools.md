@@ -77,3 +77,52 @@ This document defines the initial tools scaffold in `src/zubot/tools/`.
   - `timeout_sec`
   - `max_chars`
   - `user_agent`
+
+## Registry
+
+Primary module:
+- `src/zubot/core/tool_registry.py`
+
+Behavior:
+- all kernel + data tools are registered in one place via `ToolSpec`
+- registry exposes metadata as a machine-readable tool contract for model calls
+- runtime dispatch should go through `invoke_tool(name, **kwargs)` instead of importing tool handlers ad hoc
+- weather/time tools auto-inject `get_location()` when `location` is omitted or explicitly `null`
+
+LLM integration:
+- `app/chat_logic.py` builds OpenAI-style tool schemas from registry metadata each turn
+- model tool calls are parsed and executed through `invoke_tool(...)`
+- tool outputs are injected back as `role="tool"` messages before final response generation
+
+Current registered tools:
+- Kernel:
+  - `get_location`
+  - `get_current_time`
+  - `get_weather`
+  - `get_future_weather`
+  - `get_today_weather`
+  - `get_weather_24hr`
+  - `get_week_outlook`
+  - `read_file`
+  - `list_dir`
+  - `path_exists`
+  - `stat_path`
+  - `write_file`
+  - `append_file`
+  - `web_search`
+  - `fetch_url`
+- Data:
+  - `read_json`
+  - `write_json`
+  - `search_text`
+
+## Chat Tool Routing
+
+Primary module:
+- `app/chat_logic.py`
+
+Behavior rules:
+- no keyword-based direct routing
+- every chat request uses the LLM + tool loop
+- model sees registry-backed tool schemas each turn and chooses tool calls
+- runtime executes selected tools through `invoke_tool(...)` and feeds outputs back before final answer

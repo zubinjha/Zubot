@@ -269,7 +269,7 @@ def index() -> str:
         <div class="sub">Session-based chat with context + daily memory refresh</div>
       </div>
       <div id="messages" class="messages">
-        <div class="msg bot">Try: "time", "today weather", "24 hour weather", "week weather".</div>
+        <div class="msg bot">Try: "what time is it?", "weather tomorrow", or "sunrise today".</div>
       </div>
       <div class="composer">
         <div class="row">
@@ -338,12 +338,16 @@ def index() -> str:
     }
 
     function extractToolCalls(data) {
+      if (Array.isArray(data?.data?.tool_execution) && data.data.tool_execution.length) {
+        return data.data.tool_execution.map((item) => ({
+          name: item?.name || 'unknown_tool',
+          source: 'tool_registry',
+          ok: !!item?.result_ok,
+          error: item?.error || null,
+        }));
+      }
       if (Array.isArray(data?.data?.tool_calls)) {
         return data.data.tool_calls;
-      }
-      const route = data?.route || '';
-      if (route.startsWith('direct_tool.')) {
-        return [{ name: route.replace('direct_tool.', ''), source: 'direct_route' }];
       }
       return [];
     }
@@ -393,9 +397,7 @@ def index() -> str:
         appendMessage('bot', data.reply || '(No reply)');
         setLastResponsePanel(data);
         setRuntimeFromResponse(data, session_id);
-        progressEl.textContent = data.route && data.route.startsWith('direct_tool')
-          ? `Tool call completed (${data.route})`
-          : `Completed (${data.route || 'unknown route'})`;
+        progressEl.textContent = `Completed (${data.route || 'unknown route'})`;
       } catch (err) {
         appendMessage('bot', 'Request failed.');
         progressEl.textContent = 'Request failed.';

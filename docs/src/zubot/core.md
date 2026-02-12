@@ -108,6 +108,22 @@ Responsibilities:
 - execute provider request
 - normalize response payload shape (`text`, `tool_calls`, `usage`, `error`)
 
+## Tool Registry
+
+Primary module:
+- `src/zubot/core/tool_registry.py`
+
+Responsibilities:
+- maintain one canonical registry of callable tool contracts
+- expose metadata (`name`, `category`, `description`, `parameters`) for planner/UI use
+- provide deterministic runtime dispatch (`invoke_tool(name, **kwargs)`)
+- normalize unknown-tool and bad-argument errors into stable payloads
+
+Current surface:
+- `get_tool_registry()`
+- `list_tools(category=None)`
+- `invoke_tool(name, **kwargs)`
+
 ## Token Budgeting
 
 Primary module:
@@ -147,16 +163,29 @@ Responsibilities:
 - load persisted event timelines for replay/debugging
 - cleanup old session logs via retention helper (`cleanup_session_logs_older_than`)
 
+## Memory Index
+
+Primary module:
+- `src/zubot/core/memory_index.py`
+
+Responsibilities:
+- maintain per-day summary counters and status in SQLite
+- track `messages_since_last_summary` and finalization state
+- support pending-day queries for startup finalization workflows
+
 ## Daily Memory
 
 Primary module:
 - `src/zubot/core/daily_memory.py`
 
 Responsibilities:
-- create and write local daily memory files (`memory/daily/YYYY-MM-DD.md`)
-- append turn-level log entries for completed interactions
-- load recent daily memory (today + yesterday) and refresh before turn assembly
-- support compact summary writes for buffered turn batches (instead of per-turn raw logging)
+- create and write day-scoped raw/summary memory files:
+  - `memory/daily/raw/YYYY-MM-DD.md`
+  - `memory/daily/summary/YYYY-MM-DD.md`
+- append turn-level raw log entries for completed interactions
+- load recent summary files (today + yesterday by default) and refresh before turn assembly
+- write summary snapshots for buffered turn batches (replace summary file content per update)
+- support writing to explicit day IDs for finalization/backfill cases
 
 Behavior note:
 - daily memory persists across session resets
@@ -173,6 +202,11 @@ Responsibilities:
 - refresh recent daily memory before each chat turn
 - append completed-turn entries to the current daily memory file
 - expose session reset that clears in-memory state while preserving persisted daily memory
+- execute an iterative model/tool loop for LLM-routed requests:
+  - include tool schemas from `tool_registry`
+  - execute model tool calls through `invoke_tool(...)`
+  - append tool outputs back into the model message stream
+  - stop on final assistant text or max tool-loop step guard
 
 ## Sub-Agent Runtime
 

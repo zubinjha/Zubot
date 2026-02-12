@@ -11,6 +11,7 @@ from .daily_memory import (
     daily_memory_path,
     ensure_daily_memory_file,
     load_recent_daily_memory,
+    write_daily_summary_snapshot,
 )
 from .fact_memory import extract_facts_from_events, extract_facts_from_text
 from .config_loader import (
@@ -26,6 +27,15 @@ from .config_loader import (
     resolve_config_path,
 )
 from .llm_client import call_llm
+from .memory_index import (
+    ensure_memory_index_schema,
+    get_day_status,
+    get_days_pending_summary,
+    increment_day_message_count,
+    mark_day_finalized,
+    mark_day_summarized,
+    memory_index_path,
+)
 from .path_policy import (
     can_read,
     can_write,
@@ -50,6 +60,7 @@ from .token_estimator import (
     estimate_text_tokens,
     get_model_token_limits,
 )
+from .tool_registry import get_tool_registry, invoke_tool, list_tools
 
 __all__ = [
     "AgentLoop",
@@ -78,6 +89,8 @@ __all__ = [
     "ensure_daily_memory_file",
     "get_default_model",
     "get_filesystem_policy",
+    "get_day_status",
+    "get_days_pending_summary",
     "get_home_location",
     "get_model_config",
     "get_model_by_id",
@@ -89,7 +102,11 @@ __all__ = [
     "load_config",
     "load_context_bundle",
     "load_recent_daily_memory",
+    "write_daily_summary_snapshot",
     "load_session_events",
+    "mark_day_finalized",
+    "mark_day_summarized",
+    "memory_index_path",
     "normalize_repo_path",
     "repo_root",
     "resolve_config_path",
@@ -99,6 +116,11 @@ __all__ = [
     "select_supplemental_context_files",
     "session_log_path",
     "SubAgentRunner",
+    "get_tool_registry",
+    "list_tools",
+    "invoke_tool",
     "build_rolling_summary",
     "summarize_events",
+    "ensure_memory_index_schema",
+    "increment_day_message_count",
 ]

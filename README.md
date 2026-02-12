@@ -26,10 +26,12 @@ Deeper architectural documentation lives in [docs/README.md](docs/README.md).
   - agent loop + event schemas
   - sub-agent runner scaffold + delegation path
   - config-driven LLM client (OpenRouter adapter)
+  - centralized tool registry and dispatch helpers
   - context loading/assembly pipeline
   - context state/policy + rolling summary + fact extraction
   - token estimation + budget checks
   - session event persistence + daily memory helpers
+  - SQLite-backed day-status index for summary/finalization tracking
 - Automated tests in `tests/` with `pytest`.
 
 ## Agent Resume Checklist
@@ -55,8 +57,12 @@ For new agents or fresh sessions, use this order:
 - Supports `session_id` scoping and session reset via `/api/session/reset`.
 - Supports explicit session initialization via `/api/session/init`.
 - Session reset clears chat working context but preserves local daily memory files.
+- Daily memory is split into raw logs and summary snapshots under `memory/daily/`.
+- Session JSONL logging is optional (`memory.session_event_logging_enabled`) and disabled by default.
+- LLM-routed queries run through a registry-backed tool-call loop (tool schema -> tool execution -> final response).
 - UI now includes:
   - chat-style message timeline
   - live in-flight progress states (thinking/context/tool-check phases)
   - runtime panel with route, tool-call record, and last reply snapshot
   - auto session initialization on page load/session change
+- App chat uses unified LLM + registry tool loop (no keyword-based direct routing).

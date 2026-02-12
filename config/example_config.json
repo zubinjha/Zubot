@@ -27,6 +27,10 @@
         "max_chars": 20000,
         "user_agent": "Zubot/0.1"
     },
+    "memory": {
+        "session_event_logging_enabled": false,
+        "autoload_summary_days": 2
+    },
     "filesystem": {
         "default_access": "deny",
         "allow_read": [
