@@ -231,8 +231,10 @@ def test_daily_summary_prompt_prioritizes_conceptual_progress(monkeypatch):
     monkeypatch.setattr(chat_logic, "call_llm", fake_call_llm)
     out = chat_logic._summarize_turns_with_low_model(
         [
-            {"route": "llm.main_agent", "user": "implemented tool loop", "reply": "added tests and docs"},
-            {"route": "llm.main_agent", "user": "thanks", "reply": "ok"},
+            {"route": "llm.main_agent", "speaker": "user", "text": "implemented tool loop"},
+            {"route": "llm.main_agent", "speaker": "main_agent", "text": "added tests and docs"},
+            {"route": "llm.main_agent", "speaker": "user", "text": "thanks"},
+            {"route": "llm.main_agent", "speaker": "main_agent", "text": "ok"},
         ],
     )
     assert "Summary bullets." in out
@@ -245,13 +247,15 @@ def test_daily_summary_fallback_prefers_signal_turns(monkeypatch):
     monkeypatch.setattr(chat_logic, "call_llm", lambda **kwargs: {"ok": False, "text": None})
     out = chat_logic._summarize_turns_with_low_model(
         [
-            {"route": "llm.main_agent", "user": "thanks", "reply": "ok"},
-            {"route": "llm.main_agent", "user": "implemented weather tool wiring", "reply": "added parser and tests"},
-            {"route": "llm.error_fallback", "user": "hi", "reply": "provider unavailable"},
+            {"route": "llm.main_agent", "speaker": "user", "text": "thanks"},
+            {"route": "llm.main_agent", "speaker": "main_agent", "text": "ok"},
+            {"route": "llm.main_agent", "speaker": "user", "text": "implemented weather tool wiring"},
+            {"route": "llm.main_agent", "speaker": "main_agent", "text": "added parser and tests"},
+            {"route": "llm.error_fallback", "speaker": "main_agent", "text": "provider unavailable"},
         ],
     )
-    assert "Signal turns: 1 of 3" in out
-    assert "implemented weather tool wiring" in out
+    assert "Signal entries" in out
+    assert "implemented weather tool wiring" in out or "added parser and tests" in out
 
 
 def test_handle_chat_message_injects_forwarded_worker_events(monkeypatch):

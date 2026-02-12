@@ -16,6 +16,7 @@ from src.zubot.core.daily_memory import (
     write_daily_summary_snapshot,
 )
 from src.zubot.core.llm_client import call_llm
+from src.zubot.core.token_estimator import estimate_text_tokens
 from src.zubot.core.memory_index import (
     ensure_memory_index_schema,
     get_days_pending_summary,
@@ -31,6 +32,8 @@ MAX_RECENT_EVENTS = 60
 DAILY_MEMORY_FLUSH_EVERY_TURNS = 30
 DAILY_MEMORY_MAX_BUFFER_ITEMS = 24
 MAX_TOOL_LOOP_STEPS = 4
+SUMMARY_MAX_INPUT_TOKENS = 4000
+SUMMARY_MAX_RECURSION_DEPTH = 6
 
 
 @dataclass
@@ -39,7 +42,7 @@ class SessionRuntime:
     session_summary: str | None = None
     facts: dict[str, str] = field(default_factory=dict)
     preloaded_daily_context: dict[str, str] = field(default_factory=dict)
-    daily_turn_buffer: list[dict[str, str]] = field(default_factory=list)
+    daily_turn_buffer: list[dict[str, Any]] = field(default_factory=list)
     turns_since_daily_flush: int = 0
 
 
@@ -127,26 +130,110 @@ def _append_session_event(runtime: SessionRuntime, event: dict[str, Any]) -> Non
         runtime.recent_events = runtime.recent_events[-MAX_RECENT_EVENTS:]
 
 
-def _log_daily_turn(session_id: str, *, route: str, user_text: str, reply: str) -> None:
-    runtime = _get_session(session_id)
-    day = local_day_str()
-    trimmed_user = " ".join(user_text.strip().split())[:280]
-    trimmed_reply = " ".join(reply.strip().split())[:280]
-    runtime.daily_turn_buffer.append(
-        {
-            "day": day,
-            "route": route,
-            "user": trimmed_user,
-            "reply": trimmed_reply,
-        }
-    )
+def _clean_text(value: str, *, max_chars: int = 2000) -> str:
+    return " ".join(value.strip().split())[:max_chars]
+
+
+def _log_daily_transcript_event(
+    *,
+    session_id: str,
+    day: str,
+    speaker: str,
+    text: str,
+    route: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    clean = _clean_text(text)
+    if not clean:
+        return
+    route_txt = f" route={route}" if route else ""
+    meta_txt = ""
+    if isinstance(metadata, dict) and metadata:
+        pairs: list[str] = []
+        for key in sorted(metadata):
+            value = metadata.get(key)
+            if value is None:
+                continue
+            pairs.append(f"{key}={value}")
+        if pairs:
+            meta_txt = " " + " ".join(pairs)
+
     append_daily_memory_entry(
         day_str=day,
         session_id=session_id,
-        kind="turn",
-        text=f"route={route} user={trimmed_user} reply={trimmed_reply}",
+        kind=speaker,
+        text=f"{clean}{route_txt}{meta_txt}",
         layer="raw",
     )
+
+
+def _log_daily_turn(
+    session_id: str,
+    *,
+    route: str,
+    user_text: str,
+    reply: str,
+    tool_execution: list[dict[str, Any]] | None = None,
+    worker_events: list[dict[str, Any]] | None = None,
+) -> None:
+    runtime = _get_session(session_id)
+    day = local_day_str()
+    trimmed_user = _clean_text(user_text)
+    trimmed_reply = _clean_text(reply)
+
+    user_entry: dict[str, Any] = {"day": day, "speaker": "user", "route": route, "text": trimmed_user}
+    assistant_entry: dict[str, Any] = {"day": day, "speaker": "main_agent", "route": route, "text": trimmed_reply}
+
+    runtime.daily_turn_buffer.append(user_entry)
+    runtime.daily_turn_buffer.append(assistant_entry)
+
+    _log_daily_transcript_event(
+        session_id=session_id,
+        day=day,
+        speaker="user",
+        text=trimmed_user,
+        route=route,
+    )
+
+    tools_used = [
+        str(item.get("name"))
+        for item in (tool_execution or [])
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    ]
+    _log_daily_transcript_event(
+        session_id=session_id,
+        day=day,
+        speaker="main_agent",
+        text=trimmed_reply,
+        route=route,
+        metadata={"tools": ",".join(tools_used) if tools_used else None},
+    )
+
+    for event in worker_events or []:
+        if not isinstance(event, dict):
+            continue
+        worker_id = str(event.get("worker_id") or "worker?")
+        event_type = str(event.get("type") or "worker_event")
+        payload = event.get("payload")
+        payload_text = json.dumps(payload, ensure_ascii=False) if payload is not None else "{}"
+        worker_text = f"{event_type} from {worker_id}: {payload_text}"
+        runtime.daily_turn_buffer.append(
+            {
+                "day": day,
+                "speaker": "worker_event",
+                "route": route,
+                "text": _clean_text(worker_text),
+            }
+        )
+        _log_daily_transcript_event(
+            session_id=session_id,
+            day=day,
+            speaker="worker_event",
+            text=worker_text,
+            route=route,
+            metadata={"worker_id": worker_id, "event_type": event_type},
+        )
+
     increment_day_message_count(day=day, amount=1)
     if len(runtime.daily_turn_buffer) > DAILY_MEMORY_MAX_BUFFER_ITEMS:
         runtime.daily_turn_buffer = runtime.daily_turn_buffer[-DAILY_MEMORY_MAX_BUFFER_ITEMS:]
@@ -184,16 +271,34 @@ def _flush_daily_summary(runtime: SessionRuntime, *, session_id: str, reason: st
     return {"ok": all(bool(w.get("ok")) for w in writes), "writes": writes}
 
 
-def _summarize_turns_with_low_model(turns: list[dict[str, str]]) -> str:
-    def _is_low_signal(turn: dict[str, str]) -> bool:
-        route = str(turn.get("route", "")).strip().lower()
-        user = " ".join(str(turn.get("user", "")).strip().lower().split())
-        reply = " ".join(str(turn.get("reply", "")).strip().lower().split())
-        combined = f"{user} {reply}"
+def _entry_to_line(entry: dict[str, Any]) -> str:
+    speaker = str(entry.get("speaker", "unknown"))
+    route = str(entry.get("route", "unknown"))
+    text = str(entry.get("text", ""))
+    return f"- [{speaker}] route={route} text={text}"
+
+
+def _entries_token_estimate(entries: list[dict[str, Any]]) -> int:
+    text = "\n".join(_entry_to_line(entry) for entry in entries)
+    return estimate_text_tokens(text)
+
+
+def _split_entries_recursive(entries: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    mid = max(1, len(entries) // 2)
+    return entries[:mid], entries[mid:]
+
+
+def _summarize_entries_batch(entries: list[dict[str, Any]]) -> str:
+    def _is_low_signal(entry: dict[str, Any]) -> bool:
+        route = str(entry.get("route", "")).strip().lower()
+        speaker = str(entry.get("speaker", "")).strip().lower()
+        text = " ".join(str(entry.get("text", "")).strip().lower().split())
 
         if route.startswith("llm.error_fallback"):
             return True
-        if len(combined) < 24:
+        if speaker == "worker_event" and len(text) < 40:
+            return True
+        if len(text) < 24:
             return True
 
         low_signal_markers = {
@@ -208,29 +313,33 @@ def _summarize_turns_with_low_model(turns: list[dict[str, str]]) -> str:
             "sounds good",
             "got it",
         }
-        return any(marker in combined for marker in low_signal_markers)
+        return any(marker in text for marker in low_signal_markers)
 
-    signal_turns = [turn for turn in turns if not _is_low_signal(turn)]
-    turns_for_summary = signal_turns or turns
+    signal_entries = [entry for entry in entries if not _is_low_signal(entry)]
+    entries_for_summary = signal_entries or entries
 
     route_counts: dict[str, int] = {}
-    for turn in turns_for_summary:
-        route = turn.get("route", "unknown")
+    for entry in entries_for_summary:
+        route = str(entry.get("route", "unknown"))
         route_counts[route] = route_counts.get(route, 0) + 1
 
     raw_lines = "\n".join(
-        f"- route={turn.get('route','unknown')} user={turn.get('user','')} reply={turn.get('reply','')}"
-        for turn in turns_for_summary
+        _entry_to_line(entry) for entry in entries_for_summary
     )[:12000]
     prompt = (
-        "Summarize these chat turns into compact daily memory bullets.\n"
+        "Summarize this raw daily transcript into compact daily memory bullets.\n"
+        "Transcript format:\n"
+        "- [user] text from human\n"
+        "- [main_agent] assistant reply\n"
+        "- [worker_event] worker-to-main event payload\n\n"
         "Requirements:\n"
         "- Focus on meaningful work only: what was done conceptually, how it was done, and the outcome.\n"
         "- Do not include idle chat, acknowledgments, or repetitive low-signal exchanges.\n"
         "- Include decisions, design choices, and concrete progress state.\n"
+        "- Mention worker activity only when it materially changed progress.\n"
         "- Include next step only if explicit.\n"
         "- Keep it concise and factual.\n\n"
-        f"Turns:\n{raw_lines}"
+        f"Transcript:\n{raw_lines}"
     )
     llm = call_llm(
         model="low",
@@ -246,9 +355,40 @@ def _summarize_turns_with_low_model(turns: list[dict[str, str]]) -> str:
 
     route_summary = ", ".join(f"{route} x{count}" for route, count in sorted(route_counts.items()))
     highlights = "; ".join(
-        f"user='{turn.get('user', '')[:90]}' -> {turn.get('route', 'unknown')}" for turn in turns_for_summary[-3:]
+        f"{entry.get('speaker', 'unknown')}='{str(entry.get('text', ''))[:90]}' -> {entry.get('route', 'unknown')}"
+        for entry in entries_for_summary[-3:]
     )
-    return f"- Signal turns: {len(turns_for_summary)} of {len(turns)}\n- Routes: {route_summary}\n- Highlights: {highlights}"
+    return (
+        f"- Signal entries: {len(entries_for_summary)} of {len(entries)}\n"
+        f"- Routes: {route_summary}\n"
+        f"- Highlights: {highlights}"
+    )
+
+
+def _summarize_turns_recursive(entries: list[dict[str, Any]], *, depth: int = 0) -> str:
+    if not entries:
+        return "- No daily transcript entries to summarize."
+    if depth >= SUMMARY_MAX_RECURSION_DEPTH:
+        return _summarize_entries_batch(entries)
+
+    estimated = _entries_token_estimate(entries)
+    if estimated <= SUMMARY_MAX_INPUT_TOKENS or len(entries) <= 4:
+        return _summarize_entries_batch(entries)
+
+    left, right = _split_entries_recursive(entries)
+    left_summary = _summarize_turns_recursive(left, depth=depth + 1)
+    right_summary = _summarize_turns_recursive(right, depth=depth + 1)
+
+    merge_entries = [
+        {"speaker": "segment_summary", "route": "summary.segment", "text": f"segment_left: {left_summary}"},
+        {"speaker": "segment_summary", "route": "summary.segment", "text": f"segment_right: {right_summary}"},
+    ]
+    return _summarize_entries_batch(merge_entries)
+
+
+def _summarize_turns_with_low_model(turns: list[dict[str, Any]]) -> str:
+    """Compatibility wrapper for tests/callers."""
+    return _summarize_turns_recursive(turns)
 
 
 def _persist_session_turn(session_id: str, *, user_text: str, reply: str, route: str) -> None:
@@ -522,12 +662,13 @@ def handle_chat_message(
         if runtime.facts:
             context_bundle["facts"] = dict(runtime.facts)
 
+        forwarded_worker_events = _load_forwardable_worker_events()
         turn_events = [
             *runtime.recent_events,
             {"event_type": "system", "payload": {"worker_runtime": _worker_runtime_snapshot_text()}},
             *[
                 {"event_type": "system", "payload": {"worker_event": event}}
-                for event in _load_forwardable_worker_events()
+                for event in forwarded_worker_events
             ],
             {"event_type": "user_message", "payload": {"text": text}},
         ]
@@ -545,7 +686,14 @@ def handle_chat_message(
         if llm_result.get("ok"):
             _append_session_event(runtime, {"event_type": "user_message", "payload": {"text": text}})
             _append_session_event(runtime, {"event_type": "assistant_message", "payload": {"text": reply}})
-            _log_daily_turn(session_id, route="llm.main_agent", user_text=text, reply=reply)
+            _log_daily_turn(
+                session_id,
+                route="llm.main_agent",
+                user_text=text,
+                reply=reply,
+                tool_execution=executed_tools,
+                worker_events=forwarded_worker_events,
+            )
             _persist_session_turn(session_id, user_text=text, reply=reply, route="llm.main_agent")
             return {
                 "ok": True,

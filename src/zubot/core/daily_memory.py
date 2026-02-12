@@ -63,6 +63,7 @@ def append_daily_memory_entry(
     kind: str = "note",
     day: datetime | None = None,
     day_str: str | None = None,
+    event_time: datetime | None = None,
     root: Path | None = None,
     layer: str = "raw",
 ) -> dict[str, Any]:
@@ -72,8 +73,9 @@ def append_daily_memory_entry(
     now = day or _now_local()
     if day_str:
         now = datetime.strptime(day_str, "%Y-%m-%d")
+    stamp_dt = event_time or day or _now_local()
     path = ensure_daily_memory_file(day=now, root=root, layer=layer)
-    timestamp = now.strftime("%H:%M:%S")
+    timestamp = stamp_dt.strftime("%H:%M:%S")
     sid = f" ({session_id})" if session_id else ""
     line = f"- [{timestamp}] [{kind}]{sid} {text.strip()}\n"
     with path.open("a", encoding="utf-8") as fh:
@@ -87,6 +89,7 @@ def write_daily_summary_snapshot(
     session_id: str | None = None,
     day: datetime | None = None,
     day_str: str | None = None,
+    event_time: datetime | None = None,
     root: Path | None = None,
 ) -> dict[str, Any]:
     """Replace the daily summary file with the latest concise summary snapshot."""
@@ -96,9 +99,10 @@ def write_daily_summary_snapshot(
     now = day or _now_local()
     if day_str:
         now = datetime.strptime(day_str, "%Y-%m-%d")
+    stamp_dt = event_time or day or _now_local()
 
     path = ensure_daily_memory_file(day=now, root=root, layer="summary")
-    timestamp = now.strftime("%H:%M:%S")
+    timestamp = stamp_dt.strftime("%H:%M:%S")
     sid = f" ({session_id})" if session_id else ""
     body = text.strip()
     if not body.startswith("-"):

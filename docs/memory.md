@@ -6,11 +6,16 @@ Current implementation:
 - Daily memory is split into:
   - raw per-day logs: `memory/daily/raw/YYYY-MM-DD.md`
   - summary snapshot files: `memory/daily/summary/YYYY-MM-DD.md`
-- Chat turns are appended to raw logs as lightweight structured lines.
+- Raw logs are transcript-style entries:
+  - `[user]` for human messages
+  - `[main_agent]` for assistant replies
+  - `[worker_event]` for forwarded worker-to-main events (when present)
 - Summary files are rewritten as snapshots on flush (not endlessly appended).
 - Default flush policy:
   - periodic flush every 30 turns
   - forced flush on session reset
+- Daily summarization prompt is explicitly transcript-aware (it knows the entry types above).
+- If a summary batch is too large for safe model input, summarization recursively splits the batch into segments, summarizes each segment, then merges summaries.
 - Chat context autoloads summary files only (default: today + yesterday) each turn before LLM assembly.
 - Resetting a chat session clears in-memory conversation context only; daily files remain.
 - Full-fidelity event logs in `memory/sessions/*.jsonl` are optional and disabled by default via config.
@@ -19,6 +24,7 @@ Current implementation:
   - summary/finalization status
   - pending count resets to 0 on successful summary flush to avoid drift
 - Daily summary generation attempts the `low` model alias first, with deterministic fallback summarization if unavailable.
+- Raw/summary timestamps reflect event time (no forced midnight timestamps when writing with `day_str`).
 
 Planned direction:
 - improve summarization quality and retrieval of older daily notes
