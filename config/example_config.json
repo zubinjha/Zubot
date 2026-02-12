@@ -23,12 +23,6 @@
         "site": "https://api.search.brave.com/",
         "timeout_sec": 10
     },
-    "has_data": {
-        "api_key": "XXXXXX",
-        "site": "https://hasdata.com/",
-        "base_url": "https://api.hasdata.com",
-        "timeout_sec": 15
-    },
     "web_fetch": {
         "timeout_sec": 10,
         "max_chars": 20000,
@@ -96,16 +90,30 @@
             "max_output_tokens": 128000
         }
     },
-    "google_oauth": {
-        "credentials_path": "personal_notes/google_auth_kjha2025_credentials.json",
-        "token_path": "config/google_token.json",
-        "client_id": "XXXXXX",
-        "client_secret": "XXXXXX",
-        "refresh_token": "XXXXXX",
-        "scopes": [
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive.metadata.readonly"
-        ],
-        "token_uri": "https://oauth2.googleapis.com/token"
+    "tool_profiles": {
+        "kernel": {},
+        "user_specific": {
+            "has_data": {
+                "api_key": "XXXXXX",
+                "site": "https://hasdata.com/",
+                "base_url": "https://api.hasdata.com",
+                "timeout_sec": 15
+            },
+            "google_oauth": {
+                "credentials_path": "personal_notes/google_auth_kjha2025_credentials.json",
+                "token_path": "config/google_token.json",
+                "client_id": "XXXXXX",
+                "client_secret": "XXXXXX",
+                "refresh_token": "XXXXXX",
+                "scopes": [
+                    "https://www.googleapis.com/auth/spreadsheets",
+                    "https://www.googleapis.com/auth/drive.metadata.readonly"
+                ],
+                "token_uri": "https://oauth2.googleapis.com/token"
+            },
+            "google_drive": {
+                "job_application_spreadsheet_id": "XXXXXX"
+            }
+        }
     }
 }

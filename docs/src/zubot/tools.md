@@ -88,7 +88,7 @@ This document defines the initial tools scaffold in `src/zubot/tools/`.
   - `timeout_sec`
   - `max_chars`
   - `user_agent`
-- HasData config lives in `config/config.json` under `has_data`:
+- HasData config lives in `config/config.json` under `tool_profiles.user_specific.has_data`:
   - `api_key`
   - `base_url` (default `https://api.hasdata.com`)
   - `timeout_sec`
@@ -97,9 +97,12 @@ This document defines the initial tools scaffold in `src/zubot/tools/`.
 
 Primary module:
 - `src/zubot/core/tool_registry.py`
+- user-specific registry layer: `src/zubot/core/tool_registry_user.py`
 
 Behavior:
-- all kernel + data tools are registered in one place via `ToolSpec`
+- core registry composes:
+  - base kernel/data/orchestration tools in `tool_registry.py`
+  - user-specific tools in `tool_registry_user.py`
 - registry exposes metadata as a machine-readable tool contract for model calls
 - runtime dispatch should go through `invoke_tool(name, **kwargs)` instead of importing tool handlers ad hoc
 - weather/time tools auto-inject `get_location()` when `location` is omitted or explicitly `null`

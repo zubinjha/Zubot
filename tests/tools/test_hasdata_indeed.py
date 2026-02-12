@@ -16,10 +16,14 @@ def configured_hasdata(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     config_path.write_text(
         json.dumps(
             {
-                "has_data": {
-                    "api_key": "HASDATA_TEST_KEY",
-                    "base_url": "https://api.hasdata.com",
-                    "timeout_sec": 12,
+                "tool_profiles": {
+                    "user_specific": {
+                        "has_data": {
+                            "api_key": "HASDATA_TEST_KEY",
+                            "base_url": "https://api.hasdata.com",
+                            "timeout_sec": 12,
+                        }
+                    }
                 }
             }
         ),
@@ -39,7 +43,7 @@ def test_get_indeed_jobs_validates_inputs(configured_hasdata):
 
 def test_get_indeed_jobs_missing_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     path = tmp_path / "config.json"
-    path.write_text(json.dumps({"has_data": {}}), encoding="utf-8")
+    path.write_text(json.dumps({"tool_profiles": {"user_specific": {"has_data": {}}}}), encoding="utf-8")
     monkeypatch.setenv("ZUBOT_CONFIG_PATH", str(path))
     clear_config_cache()
 
@@ -47,6 +51,39 @@ def test_get_indeed_jobs_missing_key(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     assert out["ok"] is False
     assert out["source"] == "hasdata_indeed_listing"
     assert "api_key" in out["error"]
+
+
+def test_get_indeed_jobs_supports_legacy_top_level_has_data(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "has_data": {
+                    "api_key": "HASDATA_TEST_KEY",
+                    "base_url": "https://api.hasdata.com",
+                    "timeout_sec": 12,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ZUBOT_CONFIG_PATH", str(path))
+    clear_config_cache()
+
+    def fake_fetch_json(url: str, headers: dict[str, str], timeout_sec: int):
+        assert "keyword=software+engineer" in url
+        assert headers["x-api-key"] == "HASDATA_TEST_KEY"
+        assert timeout_sec == 12
+        return {
+            "requestMetadata": {"status": "ok"},
+            "searchInformation": {},
+            "jobs": [],
+            "pagination": {},
+        }
+
+    monkeypatch.setattr(module, "_fetch_json", fake_fetch_json)
+    out = get_indeed_jobs(keyword="software engineer", location="Columbus, OH")
+    assert out["ok"] is True
 
 
 def test_get_indeed_jobs_success(configured_hasdata, monkeypatch):

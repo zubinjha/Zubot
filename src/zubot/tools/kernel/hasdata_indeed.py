@@ -20,8 +20,19 @@ def _hasdata_settings() -> dict[str, Any]:
     except (FileNotFoundError, ValueError):
         payload = {}
 
-    block = payload.get("has_data")
-    config = block if isinstance(block, dict) else {}
+    config: dict[str, Any] = {}
+    profiles = payload.get("tool_profiles")
+    if isinstance(profiles, dict):
+        user_specific = profiles.get("user_specific")
+        if isinstance(user_specific, dict):
+            nested = user_specific.get("has_data")
+            if isinstance(nested, dict):
+                config = nested
+    if not config:
+        # Backward compatibility for pre-profile configs.
+        block = payload.get("has_data")
+        if isinstance(block, dict):
+            config = block
     api_key = config.get("api_key")
 
     return {
@@ -46,7 +57,7 @@ def _missing_key_payload(source: str) -> dict[str, Any]:
         "ok": False,
         "provider": "hasdata",
         "source": source,
-        "error": "Missing `has_data.api_key` in config.",
+        "error": "Missing `tool_profiles.user_specific.has_data.api_key` in config.",
     }
 
 

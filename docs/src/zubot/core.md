@@ -114,9 +114,11 @@ Responsibilities:
 
 Primary module:
 - `src/zubot/core/tool_registry.py`
+- user-specific registration layer: `src/zubot/core/tool_registry_user.py`
 
 Responsibilities:
 - maintain one canonical registry of callable tool contracts
+- compose base/core tools with a second-level user-specific registry module
 - expose metadata (`name`, `category`, `description`, `parameters`) for planner/UI use
 - provide deterministic runtime dispatch (`invoke_tool(name, **kwargs)`)
 - normalize unknown-tool and bad-argument errors into stable payloads
