@@ -16,6 +16,7 @@ This file defines how agents should operate inside this repository.
 - Runtime config: `config/config.json` (ignored, local only).
 - Config schema reference: `config/example_config.json` (tracked).
 - Kernel assumptions: `src/zubot/core/KERNEL.md`.
+- Config structure rule: keep `config/config.json` and `config/example_config.json` schema-aligned in the same change set (example file uses placeholders only).
 
 ## Tooling Conventions
 - Kernel tools live in `src/zubot/tools/kernel/`.
@@ -31,6 +32,7 @@ This file defines how agents should operate inside this repository.
 
 ## Safety Rules
 - Never expose or commit secrets from `config/config.json`.
+- Never print secret values from `tool_profiles.user_specific.*` (for example API keys, OAuth secrets, refresh tokens) in agent responses, logs, or docs.
 - Prefer non-destructive operations unless the user explicitly requests destructive actions.
 - Validate and test changes before claiming completion.
 
@@ -44,3 +46,4 @@ This file defines how agents should operate inside this repository.
   - `AGENTS.md` for operational rules and startup/resume behavior
   - `README.md` for current project status and entrypoint guidance
   - relevant files in `docs/` for component contracts and structure
+  - `docs/src/zubot/tools.md` whenever tool config paths or registry layering changes

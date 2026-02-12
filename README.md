@@ -22,6 +22,9 @@ Deeper architectural documentation lives in [docs/README.md](docs/README.md).
 - Data-aware helper tools in `src/zubot/tools/data/`:
   - JSON read/write
   - text search
+- Tool registration is layered:
+  - base/core tools in `src/zubot/core/tool_registry.py`
+  - user-specific tools in `src/zubot/core/tool_registry_user.py`
 - Core agent runtime scaffolding in `src/zubot/core/`:
   - agent loop + event schemas
   - sub-agent runner scaffold + delegation path
@@ -48,6 +51,8 @@ For new agents or fresh sessions, use this order:
 ## Security Notes
 - Never commit secrets from `config/config.json`.
 - Use `config/example_config.json` as the committed schema reference.
+- User-specific tool secrets/config now live under:
+  - `tool_profiles.user_specific.*`
 
 ## Local Web Chat (Test UI)
 - Minimal local app lives in `app/`.

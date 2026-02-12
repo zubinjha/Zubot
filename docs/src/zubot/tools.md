@@ -92,6 +92,9 @@ This document defines the initial tools scaffold in `src/zubot/tools/`.
   - `api_key`
   - `base_url` (default `https://api.hasdata.com`)
   - `timeout_sec`
+- Google auth/drive config (for upcoming Google tools) lives under:
+  - `tool_profiles.user_specific.google_oauth`
+  - `tool_profiles.user_specific.google_drive`
 
 ## Registry
 
