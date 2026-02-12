@@ -5,12 +5,12 @@ __pycache__/
 node_modules/
 dist/
 .env
-config/secrets.env
+config/*
+!config/example_config.json
 tasks/
 memory/*
 context/*
 !context/README.md
-config/config.json
 personal_notes/
 dev_docs/
 outputs/

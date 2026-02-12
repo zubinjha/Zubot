@@ -2,7 +2,7 @@
     "timezone": "America/New_York",
     "home_location": {
         "lat": 40.0931,
-        "lon": -83.0170,
+        "lon": -83.017,
         "city": "Worthington",
         "region": "Ohio",
         "country": "USA",
@@ -57,8 +57,8 @@
         ]
     },
     "default_model_alias": "medium",
-    "model_providers":{
-        "openrouter":{
+    "model_providers": {
+        "openrouter": {
             "alias": "openrouter",
             "apikey": "XXXXXX",
             "site": "https://openrouter.ai/",
@@ -70,7 +70,7 @@
             "app_title": "Zubot"
         }
     },
-    "models":{
+    "models": {
         "gpt5_nano": {
             "name": "GPT-5 Nano",
             "alias": "low",
@@ -95,5 +95,17 @@
             "max_context_tokens": 400000,
             "max_output_tokens": 128000
         }
+    },
+    "google_oauth": {
+        "credentials_path": "personal_notes/google_auth_kjha2025_credentials.json",
+        "token_path": "config/google_token.json",
+        "client_id": "XXXXXX",
+        "client_secret": "XXXXXX",
+        "refresh_token": "XXXXXX",
+        "scopes": [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive.metadata.readonly"
+        ],
+        "token_uri": "https://oauth2.googleapis.com/token"
     }
 }
