@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -54,3 +55,35 @@ def load_session_events(
         if isinstance(parsed, dict):
             events.append(parsed)
     return events
+
+
+def cleanup_session_logs_older_than(
+    *,
+    days: int,
+    base_dir: str = "memory/sessions",
+    root: Path | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    if days < 0:
+        raise ValueError("days must be >= 0")
+
+    path = _sessions_dir(base_dir, root=root)
+    reference = now or datetime.now(timezone.utc)
+    cutoff = reference - timedelta(days=days)
+    removed: list[str] = []
+    scanned = 0
+
+    for file_path in path.glob("*.jsonl"):
+        scanned += 1
+        modified = datetime.fromtimestamp(file_path.stat().st_mtime, tz=timezone.utc)
+        if modified < cutoff:
+            file_path.unlink(missing_ok=True)
+            removed.append(file_path.name)
+
+    return {
+        "ok": True,
+        "scanned": scanned,
+        "removed_count": len(removed),
+        "removed_files": sorted(removed),
+        "cutoff_iso_utc": cutoff.isoformat(),
+    }

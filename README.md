@@ -24,10 +24,12 @@ Deeper architectural documentation lives in [docs/README.md](docs/README.md).
   - text search
 - Core agent runtime scaffolding in `src/zubot/core/`:
   - agent loop + event schemas
+  - sub-agent runner scaffold + delegation path
   - config-driven LLM client (OpenRouter adapter)
   - context loading/assembly pipeline
+  - context state/policy + rolling summary + fact extraction
   - token estimation + budget checks
-  - session event persistence
+  - session event persistence + daily memory helpers
 - Automated tests in `tests/` with `pytest`.
 
 ## Agent Resume Checklist
@@ -50,3 +52,11 @@ For new agents or fresh sessions, use this order:
   - `source .venv/bin/activate`
   - `python -m uvicorn app.main:app --reload --port 8000`
 - Open: `http://127.0.0.1:8000`
+- Supports `session_id` scoping and session reset via `/api/session/reset`.
+- Supports explicit session initialization via `/api/session/init`.
+- Session reset clears chat working context but preserves local daily memory files.
+- UI now includes:
+  - chat-style message timeline
+  - live in-flight progress states (thinking/context/tool-check phases)
+  - runtime panel with route, tool-call record, and last reply snapshot
+  - auto session initialization on page load/session change

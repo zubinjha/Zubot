@@ -124,12 +124,18 @@ Responsibilities:
 Primary modules:
 - `src/zubot/core/context_loader.py`
 - `src/zubot/core/context_assembler.py`
+- `src/zubot/core/context_state.py`
+- `src/zubot/core/context_policy.py`
+- `src/zubot/core/summary_memory.py`
+- `src/zubot/core/fact_memory.py`
 
 Responsibilities:
 - always-load base context (`AGENT`, `SOUL`, `USER`)
 - optionally select and load situational supplemental context
 - assemble ordered model messages from context + session events
-- apply optional budget-aware trimming of supplemental context
+- apply budget-aware trimming with deterministic context priority rules
+- compact older recent events into rolling summary content
+- extract and carry forward durable user/task facts
 
 ## Session Persistence
 
@@ -139,3 +145,42 @@ Primary module:
 Responsibilities:
 - append session events to `memory/sessions/<session_id>.jsonl`
 - load persisted event timelines for replay/debugging
+- cleanup old session logs via retention helper (`cleanup_session_logs_older_than`)
+
+## Daily Memory
+
+Primary module:
+- `src/zubot/core/daily_memory.py`
+
+Responsibilities:
+- create and write local daily memory files (`memory/daily/YYYY-MM-DD.md`)
+- append turn-level log entries for completed interactions
+- load recent daily memory (today + yesterday) and refresh before turn assembly
+- support compact summary writes for buffered turn batches (instead of per-turn raw logging)
+
+Behavior note:
+- daily memory persists across session resets
+- session reset clears in-memory chat context only
+
+## Local App Runtime Behavior
+
+Primary module:
+- `app/chat_logic.py`
+
+Responsibilities:
+- maintain per-session runtime state (`recent_events`, rolling summary, facts)
+- provide explicit session initialization API behavior (preload before first message)
+- refresh recent daily memory before each chat turn
+- append completed-turn entries to the current daily memory file
+- expose session reset that clears in-memory state while preserving persisted daily memory
+
+## Sub-Agent Runtime
+
+Primary module:
+- `src/zubot/core/sub_agent_runner.py`
+
+Responsibilities:
+- execute scoped worker tasks from `TaskEnvelope`
+- reuse context assembly/token budgeting/memory primitives
+- return normalized `WorkerResult` payloads
+- support stateless worker behavior between tasks
