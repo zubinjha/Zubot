@@ -7,6 +7,7 @@ This document describes the v1 central runtime scaffold for scheduled task-agent
 - `src/zubot/core/task_scheduler_store.py`
 - `src/zubot/core/task_agent_runner.py`
 - `src/zubot/core/memory_manager.py`
+- `src/zubot/core/memory_summary_worker.py`
 
 ## Runtime Model (v1)
 - single-process scheduler + queue consumer
@@ -61,8 +62,13 @@ Indexes:
 5. Write completion status (`done`/`failed`/`blocked`) and schedule last-run metadata.
 6. Run housekeeping:
   - prune old completed run history rows
-  - run debounced/periodic memory finalization sweeps for prior non-finalized days
+  - run debounced/periodic memory finalization sweeps for prior non-finalized days (full raw-day replay summary)
   - emit structured memory-manager sweep events for observability
+7. Memory ingestion behavior for task-agent events:
+  - append raw memory events (`task_agent_event`)
+  - increment day-memory counters
+  - enqueue day-summary jobs with dedupe
+  - kick background summary worker for non-blocking summary updates
 
 ## Check-In Contract
 

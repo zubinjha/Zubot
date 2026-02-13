@@ -50,6 +50,17 @@ def configured_central(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     )
     monkeypatch.setenv("ZUBOT_CONFIG_PATH", str(cfg_path))
     clear_config_cache()
+    class _FakeMemoryWorker:
+        def start(self):
+            return {"ok": True}
+
+        def kick(self):
+            return {"ok": True}
+
+        def stop(self):
+            return {"ok": True}
+
+    monkeypatch.setattr("src.zubot.core.central_service.get_memory_summary_worker", lambda: _FakeMemoryWorker())
     return {"db_path": db_path}
 
 
@@ -176,6 +187,7 @@ def test_central_service_concurrency_respects_setting(configured_central):
     assert observed is not None
     assert active["peak"] <= 2
     gate.set()
+    service.stop()
 
 
 def test_summarize_task_agent_check_in_text():
@@ -273,4 +285,5 @@ def test_status_emits_queue_pressure_warning(configured_central):
         time.sleep(0.02)
 
     gate.set()
+    service.stop()
     assert warned is True

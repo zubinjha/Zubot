@@ -58,10 +58,22 @@ class _FakeWorker:
         return {"ok": True, "workers": [], "runtime": {"running_count": 0, "queued_count": 0}}
 
 
+class _FakeMemoryWorker:
+    def start(self) -> dict[str, Any]:
+        return {"ok": True}
+
+    def stop(self) -> dict[str, Any]:
+        return {"ok": True}
+
+    def kick(self) -> dict[str, Any]:
+        return {"ok": True}
+
+
 def test_runtime_service_start_respects_central_enable_flag(monkeypatch):
     central = _FakeCentral(enabled=True, running=False)
     monkeypatch.setattr("src.zubot.runtime.service.get_central_service", lambda: central)
     monkeypatch.setattr("src.zubot.runtime.service.get_worker_manager", lambda: _FakeWorker())
+    monkeypatch.setattr("src.zubot.runtime.service.get_memory_summary_worker", lambda: _FakeMemoryWorker())
 
     svc = RuntimeService()
     out = svc.start(start_central_if_enabled=True, source="daemon")
@@ -74,6 +86,7 @@ def test_runtime_service_start_in_client_mode_does_not_start_central(monkeypatch
     central = _FakeCentral(enabled=True, running=False)
     monkeypatch.setattr("src.zubot.runtime.service.get_central_service", lambda: central)
     monkeypatch.setattr("src.zubot.runtime.service.get_worker_manager", lambda: _FakeWorker())
+    monkeypatch.setattr("src.zubot.runtime.service.get_memory_summary_worker", lambda: _FakeMemoryWorker())
 
     svc = RuntimeService()
     out = svc.start(start_central_if_enabled=False, source="app")
@@ -86,6 +99,7 @@ def test_runtime_service_stop_stops_running_central(monkeypatch):
     central = _FakeCentral(enabled=True, running=True)
     monkeypatch.setattr("src.zubot.runtime.service.get_central_service", lambda: central)
     monkeypatch.setattr("src.zubot.runtime.service.get_worker_manager", lambda: _FakeWorker())
+    monkeypatch.setattr("src.zubot.runtime.service.get_memory_summary_worker", lambda: _FakeMemoryWorker())
 
     svc = RuntimeService()
     out = svc.stop(source="daemon")
@@ -115,6 +129,7 @@ def test_runtime_service_delegates_chat_module(monkeypatch):
 
     monkeypatch.setattr("src.zubot.runtime.service.get_central_service", lambda: _FakeCentral())
     monkeypatch.setattr("src.zubot.runtime.service.get_worker_manager", lambda: _FakeWorker())
+    monkeypatch.setattr("src.zubot.runtime.service.get_memory_summary_worker", lambda: _FakeMemoryWorker())
     monkeypatch.setattr(RuntimeService, "_chat_logic_module", staticmethod(lambda: _FakeChat))
 
     svc = RuntimeService()

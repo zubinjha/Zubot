@@ -1,5 +1,21 @@
 import app.chat_logic as chat_logic
+import pytest
 from app.chat_logic import handle_chat_message, initialize_session_context, reset_session_context
+
+
+@pytest.fixture(autouse=True)
+def _fake_summary_worker(monkeypatch):
+    class _Worker:
+        def start(self):
+            return {"ok": True}
+
+        def kick(self):
+            return {"ok": True}
+
+        def stop(self):
+            return {"ok": True}
+
+    monkeypatch.setattr(chat_logic, "get_memory_summary_worker", lambda: _Worker())
 
 
 def test_handle_chat_message_empty():
@@ -47,18 +63,16 @@ def test_initialize_session_context_auto_finalizes_prior_days(monkeypatch):
         "get_days_pending_summary",
         lambda **kwargs: [{"day": "2026-02-10", "messages_since_last_summary": 4}],
     )
-    writes = []
-    marks = []
-    monkeypatch.setattr(chat_logic, "write_daily_summary_snapshot", lambda **kwargs: writes.append(kwargs) or {"ok": True})
+    summaries = []
     monkeypatch.setattr(
         chat_logic,
-        "mark_day_summarized",
-        lambda **kwargs: marks.append(kwargs) or {"day": kwargs["day"]},
+        "summarize_day_from_raw",
+        lambda **kwargs: summaries.append(kwargs) or {"ok": True},
     )
     out = initialize_session_context("auto-fin")
     assert out["preload"]["auto_finalized_days"] == ["2026-02-10"]
-    assert writes[0]["day_str"] == "2026-02-10"
-    assert marks[0]["finalize"] is True
+    assert summaries[0]["day"] == "2026-02-10"
+    assert summaries[0]["finalize"] is True
 
 
 def test_handle_chat_message_llm_session_id_in_debug(monkeypatch):
@@ -134,14 +148,33 @@ def test_handle_chat_message_refreshes_daily_memory_each_turn(monkeypatch):
     assert calls["n"] >= 2
 
 
-def test_daily_memory_flushes_on_interval_not_every_turn(monkeypatch):
-    writes = []
+def test_daily_memory_enqueues_summary_job_when_threshold_reached(monkeypatch):
+    enqueued = []
+    kicked = {"n": 0}
+    monkeypatch.setattr(chat_logic, "_realtime_summary_turn_threshold", lambda: 1)
+    monkeypatch.setattr(
+        chat_logic,
+        "increment_day_message_count",
+        lambda **kwargs: {"ok": True, "messages_since_last_summary": 1},
+    )
+    monkeypatch.setattr(
+        chat_logic,
+        "enqueue_day_summary_job",
+        lambda **kwargs: enqueued.append(kwargs) or {"ok": True, "enqueued": True},
+    )
 
-    def fake_write(**kwargs):
-        writes.append(kwargs)
-        return {"ok": True}
+    class _Worker:
+        def start(self):
+            return {"ok": True}
 
-    monkeypatch.setattr(chat_logic, "write_daily_summary_snapshot", fake_write)
+        def kick(self):
+            kicked["n"] += 1
+            return {"ok": True}
+
+        def stop(self):
+            return {"ok": True}
+
+    monkeypatch.setattr(chat_logic, "get_memory_summary_worker", lambda: _Worker())
     monkeypatch.setattr(chat_logic, "call_llm", lambda **kwargs: {"ok": True, "text": "ok"})
     monkeypatch.setattr(
         chat_logic,
@@ -149,23 +182,15 @@ def test_daily_memory_flushes_on_interval_not_every_turn(monkeypatch):
         lambda **kwargs: {"base": {"context/AGENT.md": "x"}, "supplemental": {}},
     )
     session_id = "daily-interval"
-    for _ in range(29):
-        handle_chat_message("time", allow_llm_fallback=True, session_id=session_id)
-    assert len(writes) == 0
-
     handle_chat_message("time", allow_llm_fallback=True, session_id=session_id)
-    assert len(writes) == 1
-    assert "Summary reason: interval" in writes[0]["text"]
+    assert len(enqueued) == 1
+    assert enqueued[0]["reason"].startswith("chat_turn:")
+    assert kicked["n"] == 1
 
 
 def test_daily_memory_flushes_on_session_reset(monkeypatch):
-    writes = []
-
-    def fake_write(**kwargs):
-        writes.append(kwargs)
-        return {"ok": True}
-
-    monkeypatch.setattr(chat_logic, "write_daily_summary_snapshot", fake_write)
+    summaries = []
+    monkeypatch.setattr(chat_logic, "summarize_day_from_raw", lambda **kwargs: summaries.append(kwargs) or {"ok": True})
     monkeypatch.setattr(chat_logic, "call_llm", lambda **kwargs: {"ok": True, "text": "ok"})
     monkeypatch.setattr(
         chat_logic,
@@ -175,8 +200,8 @@ def test_daily_memory_flushes_on_session_reset(monkeypatch):
     session_id = "daily-reset"
     handle_chat_message("time", allow_llm_fallback=True, session_id=session_id)
     reset_session_context(session_id)
-    assert len(writes) == 1
-    assert "Summary reason: session_reset" in writes[0]["text"]
+    assert len(summaries) == 1
+    assert summaries[0]["reason"] == "session_reset"
 
 
 def test_daily_memory_summary_attempts_low_model(monkeypatch):
@@ -187,15 +212,12 @@ def test_daily_memory_summary_attempts_low_model(monkeypatch):
         return {"ok": True, "text": "Summary: completed weather checks."}
 
     monkeypatch.setattr(chat_logic, "call_llm", fake_call_llm)
-    monkeypatch.setattr(chat_logic, "append_session_events", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        chat_logic,
-        "load_context_bundle",
-        lambda **kwargs: {"base": {"context/AGENT.md": "x"}, "supplemental": {}},
+    chat_logic._summarize_turns_with_low_model(
+        [
+            {"route": "llm.main_agent", "speaker": "user", "text": "implemented parser"},
+            {"route": "llm.main_agent", "speaker": "main_agent", "text": "added tests"},
+        ]
     )
-    session_id = "summary-low-model"
-    for _ in range(30):
-        handle_chat_message("time", allow_llm_fallback=True, session_id=session_id)
     assert "low" in calls["models"]
 
 
@@ -465,6 +487,7 @@ def test_daily_memory_ingests_worker_task_tool_and_system_events(monkeypatch):
         "load_context_bundle",
         lambda **kwargs: {"base": {"context/AGENT.md": "x"}, "supplemental": {}},
     )
+    monkeypatch.setattr(chat_logic, "_realtime_summary_turn_threshold", lambda: 1000)
     monkeypatch.setattr(chat_logic, "append_daily_memory_entry", lambda **kwargs: captured.append(kwargs) or {"ok": True})
     monkeypatch.setattr(chat_logic, "increment_day_message_count", lambda **kwargs: {"ok": True})
 
@@ -475,5 +498,61 @@ def test_daily_memory_ingests_worker_task_tool_and_system_events(monkeypatch):
     assert "main_agent" in kinds
     assert "worker_event" in kinds
     assert "task_agent_event" in kinds
+    assert "tool_event" not in kinds
+    assert "system" not in kinds
+
+
+def test_daily_memory_keeps_high_signal_tool_failures(monkeypatch):
+    chat_logic._SESSIONS.clear()
+    captured: list[dict] = []
+    calls = {"n": 0}
+
+    class _FakeManager:
+        def list_workers(self):
+            return {
+                "ok": True,
+                "workers": [],
+                "runtime": {"running_count": 0, "queued_count": 0, "max_concurrent_workers": 3},
+            }
+
+        def list_forward_events(self, consume=True):
+            _ = consume
+            return {"ok": True, "events": []}
+
+    def fake_call_llm(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {
+                "ok": True,
+                "text": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "get_current_time", "arguments": "{}"},
+                    }
+                ],
+            }
+        return {"ok": True, "text": "ack", "tool_calls": None}
+
+    monkeypatch.setattr(chat_logic, "get_worker_manager", lambda: _FakeManager())
+    monkeypatch.setattr(chat_logic, "call_llm", fake_call_llm)
+    monkeypatch.setattr(chat_logic, "invoke_tool", lambda name, **kwargs: {"ok": False, "error": "boom", "name": name})
+    monkeypatch.setattr(
+        chat_logic,
+        "list_tools",
+        lambda **kwargs: [{"name": "get_current_time", "category": "kernel", "description": "time", "parameters": {}}],
+    )
+    monkeypatch.setattr(
+        chat_logic,
+        "load_context_bundle",
+        lambda **kwargs: {"base": {"context/AGENT.md": "x"}, "supplemental": {}},
+    )
+    monkeypatch.setattr(chat_logic, "_realtime_summary_turn_threshold", lambda: 1000)
+    monkeypatch.setattr(chat_logic, "append_daily_memory_entry", lambda **kwargs: captured.append(kwargs) or {"ok": True})
+    monkeypatch.setattr(chat_logic, "increment_day_message_count", lambda **kwargs: {"ok": True})
+
+    result = handle_chat_message("status?", allow_llm_fallback=True, session_id="ingest-tool-failure")
+    assert result["ok"] is True
+    kinds = {entry.get("kind") for entry in captured}
     assert "tool_event" in kinds
-    assert "system" in kinds

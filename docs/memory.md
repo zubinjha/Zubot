@@ -3,40 +3,64 @@
 `memory/` is for session history and longer-term memory artifacts.
 
 Current implementation:
-- Daily memory is split into:
-  - raw per-day logs: `memory/daily/raw/YYYY-MM-DD.md`
-  - summary snapshot files: `memory/daily/summary/YYYY-MM-DD.md`
+- Daily memory content is SQLite-backed in `memory/central/zubot_core.db`:
+  - raw events: `daily_memory_events`
+  - summary snapshots: `daily_memory_summaries`
+  - day status metadata: `day_memory_status`
+  - summary queue: `memory_summary_jobs`
 - Raw logs are transcript-style entries:
   - `[user]` for human messages
   - `[main_agent]` for assistant replies
-  - `[worker_event]` for forwarded worker-to-main events (when present)
-  - `[task_agent_event]` for central scheduler/task-agent lifecycle events
-  - `[tool_event]` for explicit tool execution outcomes
-  - `[system]` for orchestration/runtime status signals
-- Summary files are rewritten as snapshots on flush (not endlessly appended).
-- Default flush policy:
-  - periodic flush every 30 turns
-  - forced flush on session reset
+  - `[task_agent_event]` for high-signal central scheduler/task-agent outcomes
+  - `[worker_event]` for high-signal worker outcomes (completion/failure/blocked)
+  - `[tool_event]` only for high-signal tool outcomes (failures and side-effecting writes)
+- Signal filtering policy:
+  - keep user/main-agent conversational intent as primary memory signal
+  - drop routine system chatter (worker runtime snapshots/forward counts)
+  - suppress low-value tool/worker/task noise unless it materially changes progress
+- Summary rows are rewritten as snapshots on each successful summary job (not endlessly appended).
+- Summary generation is queue-driven (SQLite table `memory_summary_jobs` in `memory/central/zubot_core.db`):
+  - chat-turn ingestion enqueues day summary jobs
+  - task-agent lifecycle ingestion enqueues day summary jobs
+  - active-job dedupe avoids multiple queued/running jobs for the same day
+- Summary execution is handled by background worker thread (`src/zubot/core/memory_summary_worker.py`) so chat/task flows are not blocked by summarization work.
+- Startup and periodic sweeps finalize prior pending days by summarizing the full raw day transcript.
 - Daily summarization prompt is explicitly transcript-aware (it knows all entry types above).
 - If a summary batch is too large for safe model input, summarization recursively splits the batch into segments, summarizes each segment, then merges summaries.
-- Chat context autoloads summary files only (default: today + yesterday) each turn before LLM assembly.
-- Resetting a chat session clears in-memory conversation context only; daily files remain.
+- Chat context autoloads summary snapshots first (default: today + yesterday) and falls back to trimmed raw-day snapshots when summary rows are not yet available.
+- Resetting a chat session clears in-memory conversation context only; persisted DB memory remains.
 - Full-fidelity event logs in `memory/sessions/*.jsonl` are optional and disabled by default via config.
 - Day status/index metadata is tracked in the central runtime DB `memory/central/zubot_core.db` (table `day_memory_status`):
+  - `total_messages`
+  - `last_summarized_total`
   - `messages_since_last_summary`
   - summary/finalization status
-  - pending count resets to 0 on successful summary flush to avoid drift
-- Daily summary generation attempts the `low` model alias first, with deterministic fallback summarization if unavailable.
-- Raw/summary timestamps reflect event time (no forced midnight timestamps when writing with `day_str`).
+  - pending count resets to 0 after successful day summary completion
+- Daily summary generation defaults to deterministic summarization; optional low-model summarization can be enabled via config.
+- Raw/summary timestamps reflect event time.
+- Legacy markdown files under `memory/daily/` are migratable legacy inputs:
+  - runtime can import them into SQLite
+  - after import they are optional and may be removed
 
 Planned direction:
 - improve summarization quality and retrieval of older daily notes
 - tighten privacy/redaction policies for persisted entries
 - converge memory status + scheduler/run state toward one centralized SQLite authority (see `docs/src/zubot/central_db_schema.md`)
+- keep markdown memory files as optional export artifacts only (not source of truth)
 - legacy `memory/memory_index.sqlite3` rows are imported into central DB on schema initialization when present
 - central runtime memory-manager backstop sweep:
   - periodic sweep cadence (default 12h)
   - completion-triggered debounced sweep for prior non-finalized days
+
+Relevant `memory` config keys:
+- `autoload_summary_days`
+- `session_event_logging_enabled`
+- `session_ttl_minutes`
+- `max_active_sessions`
+- `realtime_summary_turn_threshold`
+- `summary_worker_poll_sec`
+- `summary_worker_max_jobs_per_tick`
+- `daily_summary_use_model`
 
 Repository rule:
 - `memory/` contents are local-only and ignored by default.

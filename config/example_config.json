@@ -32,7 +32,11 @@
         "session_event_logging_enabled": false,
         "autoload_summary_days": 2,
         "session_ttl_minutes": 720,
-        "max_active_sessions": 24
+        "max_active_sessions": 24,
+        "realtime_summary_turn_threshold": 1,
+        "summary_worker_poll_sec": 15,
+        "summary_worker_max_jobs_per_tick": 1,
+        "daily_summary_use_model": false
     },
     "agent_loop": {
         "max_concurrent_workers": 3,

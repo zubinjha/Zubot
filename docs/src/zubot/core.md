@@ -176,8 +176,34 @@ Primary module:
 
 Responsibilities:
 - maintain per-day summary counters and status in SQLite
-- track `messages_since_last_summary` and finalization state
+- track:
+  - `total_messages`
+  - `last_summarized_total`
+  - `messages_since_last_summary`
+  - finalization state
+- own queued summary-job table (`memory_summary_jobs`) with active-day dedupe
 - support pending-day queries for startup finalization workflows
+
+## Daily Summary Pipeline
+
+Primary module:
+- `src/zubot/core/daily_summary_pipeline.py`
+
+Responsibilities:
+- summarize full raw-day transcript (not just unsummarized tail buffers)
+- recursively compact oversized daily transcripts
+- write day summary snapshots
+- process queued summary jobs and mark completion/failure
+
+## Memory Summary Worker
+
+Primary module:
+- `src/zubot/core/memory_summary_worker.py`
+
+Responsibilities:
+- run background non-blocking summary-job processing
+- expose lifecycle methods (`start`, `stop`, `kick`, `status`)
+- drain `memory_summary_jobs` queue with configurable poll/throughput
 
 ## Memory Manager
 
@@ -187,7 +213,7 @@ Primary module:
 Responsibilities:
 - perform periodic sweeps for prior non-finalized day summaries
 - perform completion-triggered debounced sweeps from central runtime hooks
-- finalize pending days by writing summary snapshots and marking day status finalized
+- finalize pending days by replaying full raw day transcript and marking day status finalized
 
 ## Daily Memory
 
@@ -195,12 +221,12 @@ Primary module:
 - `src/zubot/core/daily_memory.py`
 
 Responsibilities:
-- create and write day-scoped raw/summary memory files:
-  - `memory/daily/raw/YYYY-MM-DD.md`
-  - `memory/daily/summary/YYYY-MM-DD.md`
+- write day-scoped raw/summary memory rows in SQLite:
+  - raw events table: `daily_memory_events`
+  - summary table: `daily_memory_summaries`
 - append turn-level raw log entries for completed interactions
-- load recent summary files (today + yesterday by default) and refresh before turn assembly
-- write summary snapshots for buffered turn batches (replace summary file content per update)
+- load recent summary snapshots (today + yesterday by default) with trimmed raw fallback when summary is unavailable
+- write summary snapshots from queued full-day summarization jobs (replace per-day summary row per update)
 - support writing to explicit day IDs for finalization/backfill cases
 
 Behavior note:
@@ -217,8 +243,9 @@ Responsibilities:
 - enforce bounded in-memory session retention (TTL + max active sessions)
 - provide explicit session initialization API behavior (preload before first message)
 - refresh recent daily memory before each chat turn
-- append completed-turn entries to the current daily memory file
+- append completed-turn entries to daily memory raw rows
 - ingest worker/task-agent/tool/system events into daily raw memory taxonomy
+- enqueue day-summary jobs on turn completion and kick background summary worker
 - expose session reset that clears in-memory state while preserving persisted daily memory
 - execute an iterative model/tool loop for LLM-routed requests:
   - include tool schemas from `tool_registry`

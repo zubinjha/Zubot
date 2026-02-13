@@ -1,6 +1,9 @@
 import sqlite3
 
 from src.zubot.core.memory_index import (
+    claim_next_day_summary_job,
+    complete_day_summary_job,
+    enqueue_day_summary_job,
     ensure_memory_index_schema,
     get_day_status,
     get_days_pending_summary,
@@ -15,15 +18,18 @@ def test_memory_index_increment_and_status(tmp_path):
     ensure_memory_index_schema(root=tmp_path)
     out = increment_day_message_count(day="2026-02-12", amount=3, root=tmp_path)
     assert out["messages_since_last_summary"] == 3
+    assert out["total_messages"] == 3
     status = get_day_status(day="2026-02-12", root=tmp_path)
     assert status is not None
     assert status["messages_since_last_summary"] == 3
+    assert status["total_messages"] == 3
 
 
 def test_memory_index_summarize_and_finalize(tmp_path):
     increment_day_message_count(day="2026-02-10", amount=5, root=tmp_path)
     summarized = mark_day_summarized(day="2026-02-10", summarized_messages=3, root=tmp_path)
     assert summarized["messages_since_last_summary"] == 0
+    assert summarized["last_summarized_total"] == summarized["total_messages"]
     final = mark_day_finalized(day="2026-02-10", root=tmp_path)
     assert final["is_finalized"] is True
 
@@ -70,3 +76,19 @@ def test_memory_index_migrates_legacy_table_into_unified_db(tmp_path):
     assert status is not None
     assert status["messages_since_last_summary"] == 2
     assert status["summaries_count"] == 1
+
+
+def test_memory_summary_job_queue_dedupes_active_day(tmp_path):
+    first = enqueue_day_summary_job(day="2026-02-13", reason="chat_turn", root=tmp_path)
+    second = enqueue_day_summary_job(day="2026-02-13", reason="chat_turn", root=tmp_path)
+    assert first["ok"] is True
+    assert first["enqueued"] is True
+    assert second["ok"] is True
+    assert second["enqueued"] is False
+    assert second["deduped"] is True
+
+    claimed = claim_next_day_summary_job(root=tmp_path)
+    assert claimed is not None
+    assert claimed["day"] == "2026-02-13"
+    done = complete_day_summary_job(job_id=int(claimed["job_id"]), ok=True, root=tmp_path)
+    assert done["status"] == "done"

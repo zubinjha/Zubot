@@ -9,7 +9,9 @@ from uuid import uuid4
 
 from .config_loader import load_config
 from .daily_memory import append_daily_memory_entry, local_day_str
+from .memory_index import enqueue_day_summary_job, increment_day_message_count
 from .memory_manager import MemoryManager, MemoryManagerSettings
+from .memory_summary_worker import get_memory_summary_worker
 from .task_agent_runner import TaskAgentRunner
 from .task_scheduler_store import TaskSchedulerStore, resolve_scheduler_db_path
 
@@ -188,15 +190,26 @@ class CentralService:
                 for event in recent
             ]
 
+    @staticmethod
+    def _is_high_signal_task_memory_event(event_type: str) -> bool:
+        return event_type in {"run_finished", "run_failed", "run_blocked"}
+
     def _log_task_agent_event(self, *, event_type: str, profile_id: str, run_id: str, detail: str) -> None:
         text = f"{event_type} profile={profile_id} run_id={run_id} {detail}".strip()
-        append_daily_memory_entry(
-            day_str=local_day_str(),
-            session_id="central_service",
-            kind="task_agent_event",
-            text=text,
-            layer="raw",
-        )
+        day = local_day_str()
+        if self._is_high_signal_task_memory_event(event_type):
+            append_daily_memory_entry(
+                day_str=day,
+                session_id="central_service",
+                kind="task_agent_event",
+                text=text,
+                layer="raw",
+            )
+            increment_day_message_count(day=day, amount=1)
+            enqueue_day_summary_job(day=day, reason=f"task_agent:{event_type}")
+            worker = get_memory_summary_worker()
+            worker.start()
+            worker.kick()
         self._record_event(
             event_type="task_agent_event",
             payload={"event_type": event_type, "profile_id": profile_id, "run_id": run_id, "detail": detail},

@@ -8,8 +8,9 @@ from threading import RLock
 from time import monotonic
 from typing import Any
 
-from .daily_memory import local_day_str, write_daily_summary_snapshot
-from .memory_index import ensure_memory_index_schema, get_days_pending_summary, mark_day_summarized
+from .daily_memory import local_day_str
+from .daily_summary_pipeline import summarize_day_from_raw
+from .memory_index import ensure_memory_index_schema, get_days_pending_summary
 
 
 @dataclass(slots=True)
@@ -37,19 +38,15 @@ class MemoryManager:
             day_key = str(day.get("day") or "").strip()
             if not day_key:
                 continue
-            count = int(day.get("messages_since_last_summary") or 0)
-            write_daily_summary_snapshot(
-                text=(
-                    "- Auto-finalized pending day.\n"
-                    f"- Pending unsummarized turns at finalize time: {count}.\n"
-                    "- Finalized by central memory manager sweep."
-                ),
-                day_str=day_key,
+            out = summarize_day_from_raw(
+                day=day_key,
+                reason="memory_manager_sweep",
                 session_id=session_id,
+                finalize=True,
                 root=self._root,
             )
-            mark_day_summarized(day=day_key, summarized_messages=count, finalize=True, root=self._root)
-            finalized_days.append(day_key)
+            if out.get("ok"):
+                finalized_days.append(day_key)
 
         return {
             "ok": True,

@@ -32,6 +32,9 @@ from .config_loader import (
 from .central_service import get_central_service
 from .llm_client import call_llm
 from .memory_index import (
+    claim_next_day_summary_job,
+    complete_day_summary_job,
+    enqueue_day_summary_job,
     ensure_memory_index_schema,
     get_day_status,
     get_days_pending_summary,
@@ -40,7 +43,9 @@ from .memory_index import (
     mark_day_summarized,
     memory_index_path,
 )
+from .daily_summary_pipeline import process_pending_summary_jobs, summarize_day_from_raw
 from .memory_manager import MemoryManager, MemoryManagerSettings
+from .memory_summary_worker import MemorySummaryWorker, MemorySummaryWorkerSettings, get_memory_summary_worker
 from .path_policy import (
     can_read,
     can_write,
@@ -84,14 +89,17 @@ __all__ = [
     "clear_config_cache",
     "call_llm",
     "cleanup_session_logs_older_than",
+    "claim_next_day_summary_job",
     "get_central_service",
     "get_central_service_config",
+    "complete_day_summary_job",
     "estimate_messages_tokens",
     "estimate_payload_tokens",
     "estimate_text_tokens",
     "extract_facts_from_events",
     "extract_facts_from_text",
     "fingerprint_text",
+    "enqueue_day_summary_job",
     "daily_memory_path",
     "ensure_daily_memory_file",
     "get_default_model",
@@ -116,6 +124,9 @@ __all__ = [
     "mark_day_finalized",
     "mark_day_summarized",
     "memory_index_path",
+    "MemorySummaryWorker",
+    "MemorySummaryWorkerSettings",
+    "get_memory_summary_worker",
     "MemoryManager",
     "MemoryManagerSettings",
     "normalize_repo_path",
@@ -132,6 +143,8 @@ __all__ = [
     "invoke_tool",
     "build_rolling_summary",
     "summarize_events",
+    "summarize_day_from_raw",
+    "process_pending_summary_jobs",
     "ensure_memory_index_schema",
     "increment_day_message_count",
 ]

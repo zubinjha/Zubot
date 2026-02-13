@@ -10,20 +10,21 @@ from typing import Any
 from src.zubot.core.agent_types import SessionEvent
 from src.zubot.core.context_assembler import assemble_messages
 from src.zubot.core.context_loader import load_context_bundle
+from src.zubot.core.daily_summary_pipeline import summarize_day_from_raw
 from src.zubot.core.daily_memory import (
     append_daily_memory_entry,
     load_recent_daily_memory,
     local_day_str,
-    write_daily_summary_snapshot,
 )
 from src.zubot.core.llm_client import call_llm
 from src.zubot.core.token_estimator import estimate_text_tokens
 from src.zubot.core.memory_index import (
+    enqueue_day_summary_job,
     ensure_memory_index_schema,
     get_days_pending_summary,
     increment_day_message_count,
-    mark_day_summarized,
 )
+from src.zubot.core.memory_summary_worker import get_memory_summary_worker
 from src.zubot.core.session_store import append_session_events
 from src.zubot.core.tool_registry import invoke_tool, list_tools
 from src.zubot.core.config_loader import load_config
@@ -31,8 +32,6 @@ from src.zubot.core.central_service import get_central_service
 from src.zubot.core.worker_manager import get_worker_manager
 
 MAX_RECENT_EVENTS = 60
-DAILY_MEMORY_FLUSH_EVERY_TURNS = 30
-DAILY_MEMORY_MAX_BUFFER_ITEMS = 24
 MAX_TOOL_LOOP_STEPS = 4
 SUMMARY_MAX_INPUT_TOKENS = 4000
 SUMMARY_MAX_RECURSION_DEPTH = 6
@@ -46,8 +45,6 @@ class SessionRuntime:
     session_summary: str | None = None
     facts: dict[str, str] = field(default_factory=dict)
     preloaded_daily_context: dict[str, str] = field(default_factory=dict)
-    daily_turn_buffer: list[dict[str, Any]] = field(default_factory=list)
-    turns_since_daily_flush: int = 0
     last_touched_mono: float = field(default_factory=monotonic)
 
 
@@ -86,6 +83,20 @@ def _session_retention_policy() -> tuple[int, int]:
     return ttl_minutes, max_sessions
 
 
+def _realtime_summary_turn_threshold() -> int:
+    try:
+        cfg = load_config()
+    except Exception:
+        return 1
+    memory_cfg = cfg.get("memory")
+    if not isinstance(memory_cfg, dict):
+        return 1
+    value = memory_cfg.get("realtime_summary_turn_threshold")
+    if isinstance(value, int) and value > 0:
+        return value
+    return 1
+
+
 def _prune_sessions() -> None:
     ttl_minutes, max_sessions = _session_retention_policy()
     now_mono = monotonic()
@@ -97,22 +108,19 @@ def _prune_sessions() -> None:
         if now_mono - float(runtime.last_touched_mono) > ttl_sec
     ]
     for sid in stale_ids:
-        runtime = _SESSIONS.get(sid)
-        if runtime is not None:
-            _flush_daily_summary(runtime, session_id=sid, reason="session_ttl_prune")
         _SESSIONS.pop(sid, None)
 
     if len(_SESSIONS) <= max_sessions:
         return
     ordered = sorted(_SESSIONS.items(), key=lambda item: float(item[1].last_touched_mono))
     overflow = len(_SESSIONS) - max_sessions
-    for sid, runtime in ordered[:overflow]:
-        _flush_daily_summary(runtime, session_id=sid, reason="session_count_prune")
+    for sid, _runtime in ordered[:overflow]:
         _SESSIONS.pop(sid, None)
 
 
 def _get_session(session_id: str) -> SessionRuntime:
     ensure_memory_index_schema()
+    get_memory_summary_worker().start()
     _prune_sessions()
     runtime = _SESSIONS.get(session_id)
     if runtime is None:
@@ -134,19 +142,17 @@ def initialize_session_context(session_id: str) -> dict[str, Any]:
     today = local_day_str()
     finalized_days: list[str] = []
     for pending in get_days_pending_summary(before_day=today):
-        day = pending["day"]
-        count = int(pending["messages_since_last_summary"])
-        write_daily_summary_snapshot(
-            text=(
-                "- Auto-finalized pending day.\n"
-                f"- Pending unsummarized turns at finalize time: {count}.\n"
-                "- Finalized without replaying raw entries."
-            ),
-            day_str=day,
+        day = str(pending.get("day") or "").strip()
+        if not day:
+            continue
+        out = summarize_day_from_raw(
+            day=day,
+            reason="session_initialize_finalize",
             session_id=session_id,
+            finalize=True,
         )
-        mark_day_summarized(day=day, summarized_messages=count, finalize=True)
-        finalized_days.append(day)
+        if out.get("ok"):
+            finalized_days.append(day)
 
     return {
         "ok": True,
@@ -165,9 +171,7 @@ def initialize_session_context(session_id: str) -> dict[str, Any]:
 
 
 def reset_session_context(session_id: str) -> dict[str, Any]:
-    runtime = _SESSIONS.get(session_id)
-    if runtime is not None:
-        _flush_daily_summary(runtime, session_id=session_id, reason="session_reset")
+    _flush_daily_summary(session_id=session_id, reason="session_reset")
     _SESSIONS.pop(session_id, None)
     return {
         "ok": True,
@@ -185,6 +189,47 @@ def _append_session_event(runtime: SessionRuntime, event: dict[str, Any]) -> Non
 
 def _clean_text(value: str, *, max_chars: int = 2000) -> str:
     return " ".join(value.strip().split())[:max_chars]
+
+
+def _is_high_signal_tool_event(tool_name: str, *, ok: bool, error: str) -> bool:
+    if not ok or bool(error.strip()):
+        return True
+    side_effect_prefixes = (
+        "append_",
+        "delete_",
+        "update_",
+        "write_",
+        "upload_",
+        "create_",
+    )
+    return tool_name.startswith(side_effect_prefixes)
+
+
+def _is_high_signal_worker_event(event_type: str, payload: Any) -> bool:
+    e = event_type.strip().lower()
+    if any(token in e for token in ("complete", "done", "fail", "error", "blocked", "cancel")):
+        return True
+    if isinstance(payload, dict):
+        status = str(payload.get("status", "")).strip().lower()
+        if status in {"done", "failed", "blocked", "cancelled"}:
+            return True
+        if payload.get("error"):
+            return True
+    return False
+
+
+def _is_high_signal_task_agent_event(event_type: str, payload: Any) -> bool:
+    e = event_type.strip().lower()
+    if e in {"run_finished", "run_failed", "run_blocked"}:
+        return True
+    if isinstance(payload, dict):
+        status = str(payload.get("status", "")).strip().lower()
+        if status in {"done", "failed", "blocked"}:
+            return True
+        nested = payload.get("event_type")
+        if isinstance(nested, str) and nested.strip().lower() in {"run_finished", "run_failed", "run_blocked"}:
+            return True
+    return False
 
 
 def _log_daily_transcript_event(
@@ -231,16 +276,10 @@ def _log_daily_turn(
     task_agent_events: list[dict[str, Any]] | None = None,
     system_events: list[str] | None = None,
 ) -> None:
-    runtime = _get_session(session_id)
+    _ = _get_session(session_id)
     day = local_day_str()
     trimmed_user = _clean_text(user_text)
     trimmed_reply = _clean_text(reply)
-
-    user_entry: dict[str, Any] = {"day": day, "speaker": "user", "route": route, "text": trimmed_user}
-    assistant_entry: dict[str, Any] = {"day": day, "speaker": "main_agent", "route": route, "text": trimmed_reply}
-
-    runtime.daily_turn_buffer.append(user_entry)
-    runtime.daily_turn_buffer.append(assistant_entry)
 
     _log_daily_transcript_event(
         session_id=session_id,
@@ -270,15 +309,9 @@ def _log_daily_turn(
         tool_name = str(tool.get("name") or "tool?")
         tool_ok = bool(tool.get("result_ok", True))
         tool_error = str(tool.get("error") or "").strip()
+        if not _is_high_signal_tool_event(tool_name, ok=tool_ok, error=tool_error):
+            continue
         tool_text = f"{tool_name} ok={tool_ok}" + (f" error={tool_error}" if tool_error else "")
-        runtime.daily_turn_buffer.append(
-            {
-                "day": day,
-                "speaker": "tool_event",
-                "route": route,
-                "text": _clean_text(tool_text),
-            }
-        )
         _log_daily_transcript_event(
             session_id=session_id,
             day=day,
@@ -294,16 +327,10 @@ def _log_daily_turn(
         worker_id = str(event.get("worker_id") or "worker?")
         event_type = str(event.get("type") or "worker_event")
         payload = event.get("payload")
+        if not _is_high_signal_worker_event(event_type, payload):
+            continue
         payload_text = json.dumps(payload, ensure_ascii=False) if payload is not None else "{}"
         worker_text = f"{event_type} from {worker_id}: {payload_text}"
-        runtime.daily_turn_buffer.append(
-            {
-                "day": day,
-                "speaker": "worker_event",
-                "route": route,
-                "text": _clean_text(worker_text),
-            }
-        )
         _log_daily_transcript_event(
             session_id=session_id,
             day=day,
@@ -318,16 +345,10 @@ def _log_daily_turn(
             continue
         event_type = str(event.get("type") or "task_agent_event")
         payload = event.get("payload")
+        if not _is_high_signal_task_agent_event(event_type, payload):
+            continue
         payload_text = json.dumps(payload, ensure_ascii=False) if payload is not None else "{}"
         task_text = f"{event_type}: {payload_text}"
-        runtime.daily_turn_buffer.append(
-            {
-                "day": day,
-                "speaker": "task_agent_event",
-                "route": route,
-                "text": _clean_text(task_text),
-            }
-        )
         _log_daily_transcript_event(
             session_id=session_id,
             day=day,
@@ -337,60 +358,21 @@ def _log_daily_turn(
             metadata={"event_type": event_type},
         )
 
-    for system_event in system_events or []:
-        if not isinstance(system_event, str) or not system_event.strip():
-            continue
-        runtime.daily_turn_buffer.append(
-            {
-                "day": day,
-                "speaker": "system",
-                "route": route,
-                "text": _clean_text(system_event),
-            }
-        )
-        _log_daily_transcript_event(
-            session_id=session_id,
-            day=day,
-            speaker="system",
-            text=system_event,
-            route=route,
-        )
+    _ = system_events  # system chatter is intentionally excluded from long-term daily memory
 
-    increment_day_message_count(day=day, amount=1)
-    if len(runtime.daily_turn_buffer) > DAILY_MEMORY_MAX_BUFFER_ITEMS:
-        runtime.daily_turn_buffer = runtime.daily_turn_buffer[-DAILY_MEMORY_MAX_BUFFER_ITEMS:]
-    runtime.turns_since_daily_flush += 1
-    if runtime.turns_since_daily_flush >= DAILY_MEMORY_FLUSH_EVERY_TURNS:
-        _flush_daily_summary(runtime, session_id=session_id, reason="interval")
+    status = increment_day_message_count(day=day, amount=1)
+    pending = int(status.get("messages_since_last_summary") or 0)
+    if pending >= _realtime_summary_turn_threshold():
+        enqueue_day_summary_job(day=day, reason=f"chat_turn:{route}")
+        get_memory_summary_worker().kick()
 
 
-def _flush_daily_summary(runtime: SessionRuntime, *, session_id: str, reason: str) -> dict[str, Any] | None:
-    if not runtime.daily_turn_buffer:
-        return None
-
-    writes: list[dict[str, Any]] = []
-    grouped: dict[str, list[dict[str, str]]] = {}
-    for turn in runtime.daily_turn_buffer:
-        day = str(turn.get("day") or local_day_str())
-        grouped.setdefault(day, []).append(turn)
-
-    for day, turns in sorted(grouped.items()):
-        summary_text = _summarize_turns_with_low_model(turns)
-        write = write_daily_summary_snapshot(
-            day_str=day,
-            session_id=session_id,
-            text=(
-                f"- Summary reason: {reason}\n"
-                f"- Turn batch size: {len(turns)}\n"
-                f"{summary_text}"
-            ),
-        )
-        writes.append(write)
-        mark_day_summarized(day=day, summarized_messages=len(turns), finalize=False)
-
-    runtime.daily_turn_buffer = []
-    runtime.turns_since_daily_flush = 0
-    return {"ok": all(bool(w.get("ok")) for w in writes), "writes": writes}
+def _flush_daily_summary(*, session_id: str, reason: str) -> dict[str, Any]:
+    day = local_day_str()
+    out = summarize_day_from_raw(day=day, reason=reason, session_id=session_id, finalize=False)
+    if out.get("ok"):
+        return {"ok": True, "writes": [{"ok": True, "path": out.get("status")}], "summary": out}
+    return {"ok": False, "writes": [{"ok": False, "error": out.get("error")}], "summary": out}
 
 
 def _entry_to_line(entry: dict[str, Any]) -> str:

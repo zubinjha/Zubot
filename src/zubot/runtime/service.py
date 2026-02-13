@@ -7,6 +7,7 @@ from threading import RLock
 from typing import Any
 
 from src.zubot.core.central_service import get_central_service
+from src.zubot.core.memory_summary_worker import get_memory_summary_worker
 from src.zubot.core.worker_manager import get_worker_manager
 
 
@@ -29,6 +30,7 @@ class RuntimeService:
             self._started = True
             self._last_start_source = source
 
+        get_memory_summary_worker().start()
         central_started = False
         if start_central_if_enabled:
             status = self.central_status()
@@ -61,6 +63,7 @@ class RuntimeService:
         with self._lock:
             self._started = False
             self._last_stop_source = source
+        get_memory_summary_worker().stop()
 
         return {
             "ok": True,
@@ -163,4 +166,3 @@ def get_runtime_service() -> RuntimeService:
     if _RUNTIME_SERVICE is None:
         _RUNTIME_SERVICE = RuntimeService()
     return _RUNTIME_SERVICE
-
