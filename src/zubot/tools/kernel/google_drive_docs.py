@@ -62,11 +62,15 @@ def _google_drive_settings() -> dict[str, Any]:
 
     spreadsheet_id = config.get("job_application_spreadsheet_id")
     default_upload_path = config.get("default_upload_path")
+    cover_letters_folder_id = config.get("cover_letters_folder_id")
     timeout_sec = config.get("timeout_sec", DEFAULT_TIMEOUT_SEC)
 
     return {
         "job_application_spreadsheet_id": spreadsheet_id if isinstance(spreadsheet_id, str) else None,
         "default_upload_path": default_upload_path if isinstance(default_upload_path, str) and default_upload_path.strip() else DEFAULT_UPLOAD_PATH,
+        "cover_letters_folder_id": cover_letters_folder_id.strip()
+        if isinstance(cover_letters_folder_id, str) and cover_letters_folder_id.strip()
+        else None,
         "timeout_sec": int(timeout_sec),
     }
 
@@ -220,6 +224,35 @@ def _resolve_or_create_folder_path(*, access_token: str, path: str, timeout_sec:
     return parent_id
 
 
+def _validate_folder_id(*, access_token: str, folder_id: str, timeout_sec: int) -> str:
+    encoded_folder_id = quote(folder_id, safe="")
+    url = f"https://www.googleapis.com/drive/v3/files/{encoded_folder_id}?fields=id,mimeType,trashed"
+    payload = _fetch_json(url, _authorized_headers(access_token), timeout_sec)
+    mime_type = payload.get("mimeType")
+    if mime_type != FOLDER_MIME_TYPE:
+        raise ValueError("Configured cover_letters_folder_id is not a folder.")
+    if payload.get("trashed") is True:
+        raise ValueError("Configured cover_letters_folder_id points to a trashed folder.")
+    return folder_id
+
+
+def _resolve_destination_folder_id(
+    *,
+    access_token: str,
+    settings: dict[str, Any],
+    destination_path: str,
+    timeout_sec: int,
+) -> str:
+    configured_folder_id = settings.get("cover_letters_folder_id")
+    if configured_folder_id and destination_path == settings["default_upload_path"]:
+        return _validate_folder_id(
+            access_token=access_token,
+            folder_id=str(configured_folder_id),
+            timeout_sec=timeout_sec,
+        )
+    return _resolve_or_create_folder_path(access_token=access_token, path=destination_path, timeout_sec=timeout_sec)
+
+
 def _file_exists_in_folder(*, access_token: str, parent_id: str, filename: str, timeout_sec: int) -> bool:
     escaped_name = _escape_query_value(filename)
     escaped_parent = _escape_query_value(parent_id)
@@ -332,7 +365,12 @@ def upload_file_to_google_drive(
         return _error("google_drive_upload_error", "Google auth returned empty access token.")
 
     try:
-        folder_id = _resolve_or_create_folder_path(access_token=access_token, path=target_path, timeout_sec=timeout_sec)
+        folder_id = _resolve_destination_folder_id(
+            access_token=access_token,
+            settings=settings,
+            destination_path=target_path,
+            timeout_sec=timeout_sec,
+        )
     except Exception as exc:
         return _error("google_drive_path_resolve_error", f"Failed to resolve destination path: {exc}")
 

@@ -60,7 +60,7 @@ Warning semantics:
 ## Retention and Pruning
 
 Central housekeeping enforces:
-- run-history retention window (`run_history_retention_days`)
-- run-history cap (`run_history_max_rows`)
+- run-history retention window (`run_history_retention_days`) applied to `defined_task_run_history`
+- run-history cap (`run_history_max_rows`) applied to `defined_task_run_history`
 - periodic memory sweep cadence (`memory_manager_sweep_interval_sec`)
 - completion-debounced memory sweep (`memory_manager_completion_debounce_sec`)

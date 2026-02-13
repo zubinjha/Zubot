@@ -26,7 +26,7 @@ def test_store_sync_and_list_schedules(tmp_path):
     assert len(schedules) == 1
     assert schedules[0]["schedule_id"] == "sched_a"
     assert schedules[0]["profile_id"] == "profile_a"
-    assert schedules[0]["mode"] == "interval"
+    assert schedules[0]["mode"] == "frequency"
 
 
 def test_enqueue_due_runs_and_dedupe(tmp_path):
@@ -194,13 +194,12 @@ def test_calendar_schedule_respects_catch_up_window(tmp_path):
                 "mode": "calendar",
                 "timezone": "UTC",
                 "time_of_day": "02:00",
-                "catch_up_window_minutes": 30,
             }
         ]
     )
 
-    # More than 30 minutes after 02:00 should miss the catch-up window.
-    now = datetime(2026, 2, 13, 2, 45, tzinfo=UTC)
+    # More than default 180 minutes after 02:00 should miss the catch-up window.
+    now = datetime(2026, 2, 13, 5, 45, tzinfo=UTC)
     out = store.enqueue_due_runs(now=now)
     assert out["ok"] is True
     assert out["enqueued"] == 0
@@ -248,8 +247,6 @@ def test_calendar_schedule_contract_fields_roundtrip(tmp_path):
                 "timezone": "America/New_York",
                 "time_of_day": "02:00",
                 "days_of_week": ["mon", "wed", "fri"],
-                "catch_up_window_minutes": 90,
-                "max_runtime_sec": 1800,
             }
         ]
     )
@@ -260,5 +257,8 @@ def test_calendar_schedule_contract_fields_roundtrip(tmp_path):
     assert sched["timezone"] == "America/New_York"
     assert sched["time_of_day"] == "02:00"
     assert sched["days_of_week"] == ["mon", "wed", "fri"]
-    assert sched["catch_up_window_minutes"] == 90
-    assert sched["max_runtime_sec"] == 1800
+    assert isinstance(sched["run_times"], list)
+    assert len(sched["run_times"]) == 1
+    assert sched["run_times"][0]["time_of_day"] == "02:00"
+    assert sched["run_times"][0]["timezone"] == "America/New_York"
+    assert sched["run_times"][0]["days_of_week"] == ["mon", "wed", "fri"]

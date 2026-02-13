@@ -189,6 +189,7 @@
             "google_drive": {
                 "job_application_spreadsheet_id": "XXXXXX",
                 "default_upload_path": "Job Applications/Cover Letters",
+                "cover_letters_folder_id": "XXXXXX",
                 "timeout_sec": 15
             }
         }

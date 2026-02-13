@@ -36,6 +36,7 @@ def configured_google(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
                     "google_drive": {
                         "job_application_spreadsheet_id": "sheet-123",
                         "default_upload_path": "Job Applications/Cover Letters",
+                        "cover_letters_folder_id": "folder-cover-letters-1",
                         "timeout_sec": 9,
                     },
                 }
@@ -132,7 +133,7 @@ def test_upload_file_to_google_drive_success(configured_google, monkeypatch: pyt
     local_file.write_bytes(b"dummy")
 
     monkeypatch.setattr(module, "get_google_access_token", lambda: {"ok": True, "access_token": "token"})
-    monkeypatch.setattr(module, "_resolve_or_create_folder_path", lambda **kwargs: "folder-123")
+    monkeypatch.setattr(module, "_validate_folder_id", lambda **kwargs: "folder-cover-letters-1")
     monkeypatch.setattr(module, "_file_exists_in_folder", lambda **kwargs: False)
 
     def fake_upload_multipart(**kwargs):
@@ -147,7 +148,7 @@ def test_upload_file_to_google_drive_success(configured_google, monkeypatch: pyt
     )
     assert out["ok"] is True
     assert out["drive_file_id"] == "drive-file-1"
-    assert out["destination_folder_id"] == "folder-123"
+    assert out["destination_folder_id"] == "folder-cover-letters-1"
 
 
 def test_upload_file_to_google_drive_name_conflict_adds_suffix(
@@ -159,7 +160,7 @@ def test_upload_file_to_google_drive_name_conflict_adds_suffix(
     local_file.write_bytes(b"dummy")
 
     monkeypatch.setattr(module, "get_google_access_token", lambda: {"ok": True, "access_token": "token"})
-    monkeypatch.setattr(module, "_resolve_or_create_folder_path", lambda **kwargs: "folder-123")
+    monkeypatch.setattr(module, "_validate_folder_id", lambda **kwargs: "folder-cover-letters-1")
     monkeypatch.setattr(module, "_file_exists_in_folder", lambda **kwargs: True)
     monkeypatch.setattr(module, "_with_timestamp_suffix", lambda name: "file-20260212-111111.docx")
 
@@ -183,7 +184,7 @@ def test_upload_file_to_google_drive_upload_error(configured_google, monkeypatch
     local_file.write_bytes(b"dummy")
 
     monkeypatch.setattr(module, "get_google_access_token", lambda: {"ok": True, "access_token": "token"})
-    monkeypatch.setattr(module, "_resolve_or_create_folder_path", lambda **kwargs: "folder-123")
+    monkeypatch.setattr(module, "_validate_folder_id", lambda **kwargs: "folder-cover-letters-1")
     monkeypatch.setattr(module, "_file_exists_in_folder", lambda **kwargs: False)
 
     def boom(**kwargs):
@@ -210,11 +211,41 @@ def test_upload_file_to_google_drive_path_resolve_error(configured_google, monke
     def boom(**kwargs):
         raise RuntimeError("resolve fail")
 
-    monkeypatch.setattr(module, "_resolve_or_create_folder_path", boom)
+    monkeypatch.setattr(module, "_validate_folder_id", boom)
     out = upload_file_to_google_drive(local_path=str(local_file.relative_to(module._repo_root())))
     assert out["ok"] is False
     assert out["source"] == "google_drive_path_resolve_error"
     assert "resolve fail" in out["error"]
+
+
+def test_upload_file_to_google_drive_falls_back_to_path_for_non_default_destination(
+    configured_google,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    local_file = Path(module._repo_root()) / "outputs/test_google_drive_docs/upload-non-default-path.docx"
+    local_file.parent.mkdir(parents=True, exist_ok=True)
+    local_file.write_bytes(b"dummy")
+
+    monkeypatch.setattr(module, "get_google_access_token", lambda: {"ok": True, "access_token": "token"})
+
+    def boom_validate(**kwargs):
+        raise AssertionError("cover_letters_folder_id should not be used for non-default destination_path")
+
+    monkeypatch.setattr(module, "_validate_folder_id", boom_validate)
+    monkeypatch.setattr(module, "_resolve_or_create_folder_path", lambda **kwargs: "custom-folder-1")
+    monkeypatch.setattr(module, "_file_exists_in_folder", lambda **kwargs: False)
+    monkeypatch.setattr(
+        module,
+        "_upload_multipart",
+        lambda **kwargs: {"id": "drive-file-custom", "name": "upload-non-default-path.docx"},
+    )
+
+    out = upload_file_to_google_drive(
+        local_path=str(local_file.relative_to(module._repo_root())),
+        destination_path="Custom/Upload/Path",
+    )
+    assert out["ok"] is True
+    assert out["destination_folder_id"] == "custom-folder-1"
 
 
 def test_upload_file_to_google_drive_auth_error(configured_google, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):

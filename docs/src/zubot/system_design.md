@@ -35,7 +35,7 @@ This document captures the conceptual architecture of Zubot at the system level.
 
 ### Task-Agent Queue
 - Backed by SQLite (`memory/central/zubot_core.db`).
-- Primary tables: `schedules`, `runs`, `run_history`.
+- Primary tables: `defined_tasks`, `defined_tasks_run_times`, `defined_task_runs`, `defined_task_run_history`.
 - Supports interval and wall-clock schedule modes.
 
 ### Memory Summary Queue
@@ -57,7 +57,7 @@ This document captures the conceptual architecture of Zubot at the system level.
 
 ### Current Source of Truth Split
 - SQLite:
-  - scheduler state (`schedules`, `runs`, `run_history`)
+  - scheduler state (`defined_tasks`, `defined_tasks_run_times`, `defined_task_runs`, `defined_task_run_history`)
   - raw memory events (`daily_memory_events`)
   - daily summary snapshots (`daily_memory_summaries`)
   - memory status/counters (`day_memory_status`)

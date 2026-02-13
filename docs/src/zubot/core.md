@@ -313,13 +313,13 @@ Primary module:
 - `src/zubot/core/task_scheduler_store.py`
 
 Responsibilities:
-- persist schedule definitions and run queue state in SQLite
+- persist defined-task definitions and run queue state in SQLite
 - sync configured schedules from `task_agents.schedules`
 - enqueue due runs based on interval cadence or calendar wall-clock cadence
 - enqueue manual runs for on-demand profile triggers
 - claim queued runs deterministically for consumer processing
 - record run completion status (`done`, `failed`, `blocked`) and update schedule last-run metadata
-- persist completion snapshots into `run_history` for bounded historical reporting
+- persist completion snapshots into `defined_task_run_history` for bounded historical reporting
 
 Default DB path:
 - `memory/central/zubot_core.db`

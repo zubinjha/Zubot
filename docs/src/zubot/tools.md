@@ -85,7 +85,8 @@ This document defines the initial tools scaffold in `src/zubot/tools/`.
     - writes local output under repo-relative paths (default `outputs/cover_letters`)
     - validates non-empty paragraph content
   - Drive upload behavior:
-    - resolves folder paths by name (for example `Job Applications/Cover Letters`) and auto-creates missing folders
+    - prefers configured `cover_letters_folder_id` when destination is the default cover-letter path
+    - otherwise resolves folder paths by name (for example `Job Applications/Cover Letters`) and auto-creates missing folders
     - uploads via Drive multipart upload API
     - checks name conflict in destination folder and appends timestamp suffix (`-YYYYMMDD-HHMMSS`) when needed
     - returns normalized upload metadata (`drive_file_id`, `drive_file_name`, `destination_folder_id`, `web_view_link`)
@@ -140,6 +141,7 @@ This document defines the initial tools scaffold in `src/zubot/tools/`.
   - `tool_profiles.user_specific.google_drive`
   - Google Drive DOCX helpers additionally use:
     - `tool_profiles.user_specific.google_drive.default_upload_path`
+    - `tool_profiles.user_specific.google_drive.cover_letters_folder_id`
     - `tool_profiles.user_specific.google_drive.timeout_sec`
 
 ## Google Token Lifecycle

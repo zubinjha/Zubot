@@ -17,30 +17,39 @@ Source modules:
 
 ## Current Tables
 
-### `schedules`
+### `defined_tasks`
 - `schedule_id` TEXT PK
 - `profile_id` TEXT NOT NULL
 - `enabled` INTEGER NOT NULL
-- `run_frequency_minutes` INTEGER NOT NULL
-- `schedule_mode` TEXT NOT NULL (`interval`/`calendar`)
-- `schedule_timezone` TEXT
-- `schedule_time_of_day` TEXT (`HH:MM`)
-- `schedule_days_of_week` TEXT CSV (`mon,tue,...`)
-- `schedule_catch_up_window_minutes` INTEGER NOT NULL
-- `schedule_max_runtime_sec` INTEGER
-- `next_run_at` TEXT
+- `mode` TEXT NOT NULL (`interval`/`calendar`)
+- `execution_order` INTEGER NOT NULL
+- `run_frequency_minutes` INTEGER
 - `last_scheduled_fire_time` TEXT
-- `last_successful_run_at` TEXT
 - `last_run_at` TEXT
+- `last_successful_run_at` TEXT
 - `last_status` TEXT
 - `last_summary` TEXT
 - `last_error` TEXT
 - `created_at` TEXT NOT NULL
 - `updated_at` TEXT NOT NULL
 
-### `runs`
+### `defined_tasks_run_times`
+- `run_time_id` INTEGER PK AUTOINCREMENT
+- `schedule_id` TEXT NOT NULL FK -> `defined_tasks(schedule_id)` (`ON DELETE CASCADE`)
+- `time_of_day` TEXT NOT NULL (`HH:MM`)
+- `timezone` TEXT NOT NULL
+- `enabled` INTEGER NOT NULL
+- `created_at` TEXT NOT NULL
+- `updated_at` TEXT NOT NULL
+
+### `defined_tasks_run_times_days_of_week`
+- `run_time_id` INTEGER NOT NULL FK -> `defined_tasks_run_times(run_time_id)` (`ON DELETE CASCADE`)
+- `day_of_week` TEXT NOT NULL (`mon`..`sun`)
+- `created_at` TEXT NOT NULL
+
+### `defined_task_runs`
 - `run_id` TEXT PK
-- `schedule_id` TEXT NULL FK -> `schedules(schedule_id)` (`ON DELETE SET NULL`)
+- `schedule_id` TEXT NULL FK -> `defined_tasks(schedule_id)` (`ON DELETE SET NULL`)
 - `profile_id` TEXT NOT NULL
 - `status` TEXT NOT NULL (`queued`/`running`/`done`/`failed`/`blocked`)
 - `queued_at` TEXT NOT NULL
@@ -50,9 +59,9 @@ Source modules:
 - `error` TEXT
 - `payload_json` TEXT NOT NULL
 
-### `run_history`
+### `defined_task_run_history`
 - `run_id` TEXT PK
-- `schedule_id` TEXT NULL FK -> `schedules(schedule_id)` (`ON DELETE SET NULL`)
+- `schedule_id` TEXT NULL FK -> `defined_tasks(schedule_id)` (`ON DELETE SET NULL`)
 - `profile_id` TEXT NOT NULL
 - `status` TEXT NOT NULL (`done`/`failed`/`blocked`)
 - `queued_at` TEXT NOT NULL
@@ -102,10 +111,13 @@ Source modules:
 
 ## Current Indexes
 
-- `idx_runs_status_queued_at(status, queued_at)`
-- `idx_runs_profile_queued_at(profile_id, queued_at)`
-- `idx_run_history_status_finished_at(status, finished_at)`
-- `idx_run_history_profile_finished_at(profile_id, finished_at)`
+- `idx_defined_tasks_enabled_order(enabled, execution_order, schedule_id)` on `defined_tasks`
+- `idx_defined_task_run_times_schedule_enabled(schedule_id, enabled, time_of_day)` on `defined_tasks_run_times`
+- `idx_defined_task_runs_status_queued_at(status, queued_at)` on `defined_task_runs`
+- `idx_defined_task_runs_profile_queued_at(profile_id, queued_at)` on `defined_task_runs`
+- `idx_defined_task_run_history_status_finished_at(status, finished_at)` on `defined_task_run_history`
+- `idx_defined_task_run_history_profile_finished_at(profile_id, finished_at)` on `defined_task_run_history`
+- `idx_defined_tasks_run_times_schedule_enabled(schedule_id, enabled, time_of_day)`
 - `idx_day_memory_finalized(is_finalized)`
 - `idx_memory_summary_jobs_status_created(status, created_at, job_id)`
 - `idx_memory_summary_jobs_day_active(day)` with partial predicate `status IN ('queued','running')`
@@ -142,7 +154,7 @@ Task-agent check-in snapshot:
 
 ```sql
 SELECT profile_id, status, queued_at, started_at, finished_at, summary, error
-FROM runs
+FROM defined_task_runs
 WHERE profile_id = ?
 ORDER BY queued_at DESC
 LIMIT 20;
@@ -152,7 +164,7 @@ Recent run outcomes:
 
 ```sql
 SELECT profile_id, status, finished_at, summary, error
-FROM run_history
+FROM defined_task_run_history
 ORDER BY COALESCE(finished_at, queued_at) DESC
 LIMIT 50;
 ```

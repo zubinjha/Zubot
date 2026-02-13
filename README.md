@@ -130,7 +130,7 @@ Choose one of these startup modes based on what you want to run.
 - Supports `session_id` scoping and session reset via `/api/session/reset`.
 - Supports explicit session initialization via `/api/session/init`.
 - Runtime behavior model:
-  - task-agent work is scheduled/triggered into central queue (`runs`) and then claimed by central service
+  - task-agent work is scheduled/triggered into central queue (`defined_task_runs`) and then claimed by central service
   - worker endpoints are separate manual orchestration controls for worker agents
   - task-agent execution and worker execution are related but not the same control path
 - Worker control endpoints:

@@ -42,12 +42,14 @@ Default DB path:
 - `memory/central/zubot_core.db`
 
 Tables:
-- `schedules`
+- `defined_tasks`
   - schedule metadata + cadence + last run info
   - supports `interval` and `calendar` schedule modes
-- `runs`
+- `defined_tasks_run_times`
+  - optional calendar-mode run-time rows (multiple `HH:MM` entries per defined task)
+- `defined_task_runs`
   - queued/running/completed run lifecycle records
-- `run_history`
+- `defined_task_run_history`
   - completion snapshots for historical reporting/pruning
 
 Indexes:
@@ -55,7 +57,7 @@ Indexes:
 - profile/queued-time lookup for per-profile state views
 
 ## Queue Flow
-1. Sync `task_agents.schedules` into `schedules` table.
+1. Sync `task_agents.schedules` into `defined_tasks` table (and `defined_tasks_run_times` for calendar mode).
 2. Detect due schedules and enqueue run records (`status = queued`).
 3. Claim queued runs (`status = running`) under concurrency cap.
 4. Execute via `TaskAgentRunner`.

@@ -15,8 +15,8 @@ from zoneinfo import ZoneInfo
 from .config_loader import load_config
 
 DEFAULT_DB_PATH = "memory/central/zubot_core.db"
+DEFAULT_CALENDAR_CATCHUP_MINUTES = 180
 _WEEKDAY_ORDER = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
-_WEEKDAY_TO_INDEX = {name: idx for idx, name in enumerate(_WEEKDAY_ORDER)}
 
 
 def _repo_root() -> Path:
@@ -62,22 +62,21 @@ def _parse_time_of_day(value: str | None) -> dt_time | None:
     return None
 
 
-def _normalize_days_of_week(value: Any) -> str | None:
+def _normalize_days_of_week(value: Any) -> list[str]:
     if isinstance(value, list):
         tokens = [str(v).strip().lower()[:3] for v in value if isinstance(v, str) and v.strip()]
     elif isinstance(value, str):
         tokens = [part.strip().lower()[:3] for part in value.split(",") if part.strip()]
     else:
         tokens = []
-    unique = [token for token in _WEEKDAY_ORDER if token in set(tokens)]
-    return ",".join(unique) if unique else None
+    seen = set(tokens)
+    return [token for token in _WEEKDAY_ORDER if token in seen]
 
 
-def _weekday_allowed(days_csv: str | None, local_dt: datetime) -> bool:
-    if not isinstance(days_csv, str) or not days_csv.strip():
+def _weekday_allowed(days: list[str], local_dt: datetime) -> bool:
+    if not days:
         return True
-    allowed = {part.strip().lower()[:3] for part in days_csv.split(",") if part.strip()}
-    return _WEEKDAY_ORDER[local_dt.weekday()] in allowed
+    return _WEEKDAY_ORDER[local_dt.weekday()] in set(days)
 
 
 def _most_recent_calendar_fire(
@@ -85,7 +84,7 @@ def _most_recent_calendar_fire(
     now_dt: datetime,
     timezone_name: str,
     time_of_day: str,
-    days_of_week: str | None,
+    days_of_week: list[str],
 ) -> datetime | None:
     try:
         zone = ZoneInfo(timezone_name)
@@ -119,7 +118,7 @@ def _next_calendar_fire_after(
     fire_dt: datetime,
     timezone_name: str,
     time_of_day: str,
-    days_of_week: str | None,
+    days_of_week: list[str],
 ) -> datetime | None:
     try:
         zone = ZoneInfo(timezone_name)
@@ -163,12 +162,64 @@ def _scheduler_db_path_from_config() -> Path:
 
 
 def resolve_scheduler_db_path(path: str | None) -> Path:
-    """Resolve scheduler DB path against repo root."""
     return _resolve_db_path(path)
 
 
+def _normalize_time_str(raw: str | None) -> str | None:
+    parsed = _parse_time_of_day(raw)
+    if parsed is None:
+        return None
+    return f"{parsed.hour:02d}:{parsed.minute:02d}"
+
+
+def _parse_run_time_specs(item: dict[str, Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    run_times = item.get("run_times")
+
+    def add_spec(time_of_day: str | None, timezone_name: str | None, days_value: Any) -> None:
+        normalized_time = _normalize_time_str(time_of_day)
+        if normalized_time is None:
+            return
+        tz = str(timezone_name or "UTC").strip() or "UTC"
+        try:
+            ZoneInfo(tz)
+        except Exception:
+            return
+        days = _normalize_days_of_week(days_value)
+        out.append({"time_of_day": normalized_time, "timezone": tz, "days_of_week": days})
+
+    if isinstance(run_times, list):
+        for entry in run_times:
+            if isinstance(entry, str):
+                add_spec(entry, item.get("timezone"), item.get("days_of_week"))
+                continue
+            if isinstance(entry, dict):
+                add_spec(
+                    entry.get("time_of_day"),
+                    entry.get("timezone") or item.get("timezone"),
+                    entry.get("days_of_week", item.get("days_of_week")),
+                )
+
+    if not out:
+        add_spec(item.get("time_of_day"), item.get("timezone"), item.get("days_of_week"))
+
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, tuple[str, ...]]] = set()
+    for spec in out:
+        key = (
+            str(spec["time_of_day"]),
+            str(spec["timezone"]),
+            tuple(spec.get("days_of_week") or []),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(spec)
+    return deduped
+
+
 class TaskSchedulerStore:
-    """Persist and query schedule/run queue state."""
+    """Persist and query defined-task schedule/run queue state."""
 
     def __init__(self, db_path: str | Path | None = None) -> None:
         if db_path is None:
@@ -189,7 +240,6 @@ class TaskSchedulerStore:
         return conn
 
     def _maybe_migrate_from_legacy_sqlite3(self) -> None:
-        """One-time copy forward from legacy `.sqlite3` filename to `.db`."""
         if self._db_path.exists():
             return
         if self._db_path.suffix != ".db":
@@ -198,31 +248,20 @@ class TaskSchedulerStore:
         if legacy_path.exists():
             shutil.copy2(legacy_path, self._db_path)
 
-    @staticmethod
-    def _ensure_column(conn: sqlite3.Connection, *, table: str, column: str, definition: str) -> None:
-        existing = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table});").fetchall()}
-        if column not in existing:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {definition};")
-
     def ensure_schema(self) -> None:
         with self._connect() as conn:
             conn.executescript(
                 """
-                CREATE TABLE IF NOT EXISTS schedules (
+                CREATE TABLE IF NOT EXISTS defined_tasks (
                     schedule_id TEXT PRIMARY KEY,
                     profile_id TEXT NOT NULL,
-                    enabled INTEGER NOT NULL DEFAULT 1,
-                    run_frequency_minutes INTEGER NOT NULL,
-                    schedule_mode TEXT NOT NULL DEFAULT 'interval',
-                    schedule_timezone TEXT,
-                    schedule_time_of_day TEXT,
-                    schedule_days_of_week TEXT,
-                    schedule_catch_up_window_minutes INTEGER NOT NULL DEFAULT 180,
-                    schedule_max_runtime_sec INTEGER,
-                    next_run_at TEXT,
+                    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+                    mode TEXT NOT NULL DEFAULT 'frequency' CHECK (mode IN ('frequency', 'calendar')),
+                    execution_order INTEGER NOT NULL DEFAULT 100 CHECK (execution_order >= 0),
+                    run_frequency_minutes INTEGER CHECK (run_frequency_minutes IS NULL OR run_frequency_minutes > 0),
                     last_scheduled_fire_time TEXT,
-                    last_successful_run_at TEXT,
                     last_run_at TEXT,
+                    last_successful_run_at TEXT,
                     last_status TEXT,
                     last_summary TEXT,
                     last_error TEXT,
@@ -230,25 +269,45 @@ class TaskSchedulerStore:
                     updated_at TEXT NOT NULL
                 );
 
-                CREATE TABLE IF NOT EXISTS runs (
+                CREATE TABLE IF NOT EXISTS defined_tasks_run_times (
+                    run_time_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    schedule_id TEXT NOT NULL,
+                    time_of_day TEXT NOT NULL,
+                    timezone TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(schedule_id) REFERENCES defined_tasks(schedule_id) ON DELETE CASCADE,
+                    UNIQUE(schedule_id, time_of_day, timezone)
+                );
+
+                CREATE TABLE IF NOT EXISTS defined_tasks_run_times_days_of_week (
+                    run_time_id INTEGER NOT NULL,
+                    day_of_week TEXT NOT NULL CHECK (day_of_week IN ('mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun')),
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(run_time_id, day_of_week),
+                    FOREIGN KEY(run_time_id) REFERENCES defined_tasks_run_times(run_time_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS defined_task_runs (
                     run_id TEXT PRIMARY KEY,
                     schedule_id TEXT,
                     profile_id TEXT NOT NULL,
-                    status TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'done', 'failed', 'blocked')),
                     queued_at TEXT NOT NULL,
                     started_at TEXT,
                     finished_at TEXT,
                     summary TEXT,
                     error TEXT,
                     payload_json TEXT NOT NULL,
-                    FOREIGN KEY(schedule_id) REFERENCES schedules(schedule_id) ON DELETE SET NULL
+                    FOREIGN KEY(schedule_id) REFERENCES defined_tasks(schedule_id) ON DELETE SET NULL
                 );
 
-                CREATE TABLE IF NOT EXISTS run_history (
+                CREATE TABLE IF NOT EXISTS defined_task_run_history (
                     run_id TEXT PRIMARY KEY,
                     schedule_id TEXT,
                     profile_id TEXT NOT NULL,
-                    status TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('done', 'failed', 'blocked')),
                     queued_at TEXT NOT NULL,
                     started_at TEXT,
                     finished_at TEXT,
@@ -256,158 +315,186 @@ class TaskSchedulerStore:
                     error TEXT,
                     payload_json TEXT NOT NULL,
                     archived_at TEXT NOT NULL,
-                    FOREIGN KEY(schedule_id) REFERENCES schedules(schedule_id) ON DELETE SET NULL
+                    FOREIGN KEY(schedule_id) REFERENCES defined_tasks(schedule_id) ON DELETE SET NULL
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_runs_status_queued_at ON runs(status, queued_at);
-                CREATE INDEX IF NOT EXISTS idx_runs_profile_queued_at ON runs(profile_id, queued_at);
-                CREATE INDEX IF NOT EXISTS idx_run_history_status_finished_at ON run_history(status, finished_at);
-                CREATE INDEX IF NOT EXISTS idx_run_history_profile_finished_at ON run_history(profile_id, finished_at);
+                CREATE INDEX IF NOT EXISTS idx_defined_tasks_enabled_order
+                    ON defined_tasks(enabled, execution_order, schedule_id);
+                CREATE INDEX IF NOT EXISTS idx_defined_task_run_times_schedule_enabled
+                    ON defined_tasks_run_times(schedule_id, enabled, time_of_day);
+                CREATE INDEX IF NOT EXISTS idx_defined_task_runs_status_queued_at
+                    ON defined_task_runs(status, queued_at);
+                CREATE INDEX IF NOT EXISTS idx_defined_task_runs_profile_queued_at
+                    ON defined_task_runs(profile_id, queued_at);
+                CREATE INDEX IF NOT EXISTS idx_defined_task_run_history_status_finished_at
+                    ON defined_task_run_history(status, finished_at);
+                CREATE INDEX IF NOT EXISTS idx_defined_task_run_history_profile_finished_at
+                    ON defined_task_run_history(profile_id, finished_at);
                 """
             )
-            # Backward-compatible column migrations for pre-existing local DBs.
-            self._ensure_column(conn, table="schedules", column="schedule_mode", definition="schedule_mode TEXT NOT NULL DEFAULT 'interval'")
-            self._ensure_column(conn, table="schedules", column="schedule_timezone", definition="schedule_timezone TEXT")
-            self._ensure_column(conn, table="schedules", column="schedule_time_of_day", definition="schedule_time_of_day TEXT")
-            self._ensure_column(conn, table="schedules", column="schedule_days_of_week", definition="schedule_days_of_week TEXT")
-            self._ensure_column(
-                conn,
-                table="schedules",
-                column="schedule_catch_up_window_minutes",
-                definition="schedule_catch_up_window_minutes INTEGER NOT NULL DEFAULT 180",
-            )
-            self._ensure_column(
-                conn,
-                table="schedules",
-                column="schedule_max_runtime_sec",
-                definition="schedule_max_runtime_sec INTEGER",
-            )
-            self._ensure_column(conn, table="schedules", column="last_scheduled_fire_time", definition="last_scheduled_fire_time TEXT")
-            self._ensure_column(conn, table="schedules", column="last_successful_run_at", definition="last_successful_run_at TEXT")
 
-    def sync_schedules(self, schedules: list[dict[str, Any]]) -> dict[str, Any]:
+    def _replace_run_times(self, conn: sqlite3.Connection, *, schedule_id: str, specs: list[dict[str, Any]], now: str) -> None:
+        existing = conn.execute(
+            "SELECT run_time_id FROM defined_tasks_run_times WHERE schedule_id = ?;",
+            (schedule_id,),
+        ).fetchall()
+        for row in existing:
+            conn.execute(
+                "DELETE FROM defined_tasks_run_times_days_of_week WHERE run_time_id = ?;",
+                (int(row["run_time_id"]),),
+            )
+        conn.execute("DELETE FROM defined_tasks_run_times WHERE schedule_id = ?;", (schedule_id,))
+
+        for spec in specs:
+            conn.execute(
+                """
+                INSERT INTO defined_tasks_run_times(schedule_id, time_of_day, timezone, enabled, created_at, updated_at)
+                VALUES (?, ?, ?, 1, ?, ?);
+                """,
+                (schedule_id, str(spec["time_of_day"]), str(spec["timezone"]), now, now),
+            )
+            run_time_id = int(conn.execute("SELECT last_insert_rowid() AS rid;").fetchone()["rid"])
+            for day in spec.get("days_of_week") or []:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO defined_tasks_run_times_days_of_week(run_time_id, day_of_week, created_at)
+                    VALUES (?, ?, ?);
+                    """,
+                    (run_time_id, str(day), now),
+                )
+
+    def sync_schedules(self, defined_tasks: list[dict[str, Any]]) -> dict[str, Any]:
         now = _iso(_utc_now())
         upserted = 0
         with self._connect() as conn:
-            for item in schedules:
+            for item in defined_tasks:
                 schedule_id = str(item.get("schedule_id") or "").strip()
                 profile_id = str(item.get("profile_id") or "").strip()
-                enabled = bool(item.get("enabled", True))
-                mode_raw = str(item.get("mode") or "interval").strip().lower()
-                mode = mode_raw if mode_raw in {"interval", "calendar"} else "interval"
-                freq = item.get("run_frequency_minutes")
                 if not schedule_id or not profile_id:
                     continue
-                if mode == "interval":
+
+                enabled = 1 if bool(item.get("enabled", True)) else 0
+                mode_raw = str(item.get("mode") or "frequency").strip().lower()
+                if mode_raw == "interval":
+                    mode_raw = "frequency"
+                mode = mode_raw if mode_raw in {"frequency", "calendar"} else "frequency"
+                execution_order_raw = item.get("execution_order")
+                execution_order = int(execution_order_raw) if isinstance(execution_order_raw, int) and execution_order_raw >= 0 else 100
+
+                run_frequency_minutes: int | None
+                run_time_specs: list[dict[str, Any]] = []
+                if mode == "frequency":
+                    freq = item.get("run_frequency_minutes")
                     if not isinstance(freq, int) or freq <= 0:
                         continue
+                    run_frequency_minutes = int(freq)
                 else:
-                    # calendar mode can omit frequency; keep a sane fallback for compatibility fields.
-                    freq = int(freq) if isinstance(freq, int) and freq > 0 else 1440
-                    schedule_tz = str(item.get("timezone") or "UTC").strip() or "UTC"
-                    try:
-                        ZoneInfo(schedule_tz)
-                    except Exception:
+                    run_frequency_minutes = None
+                    run_time_specs = _parse_run_time_specs(item)
+                    if not run_time_specs:
                         continue
-                    schedule_tod = str(item.get("time_of_day") or "").strip()
-                    if _parse_time_of_day(schedule_tod) is None:
-                        continue
-                    normalized_days = _normalize_days_of_week(item.get("days_of_week"))
-                    catch_up_window = item.get("catch_up_window_minutes")
-                    catch_up = int(catch_up_window) if isinstance(catch_up_window, int) and catch_up_window >= 0 else 180
-                    max_runtime = item.get("max_runtime_sec")
-                    max_runtime_sec = int(max_runtime) if isinstance(max_runtime, int) and max_runtime > 0 else None
-                if mode == "interval":
-                    schedule_tz = None
-                    schedule_tod = None
-                    normalized_days = None
-                    catch_up = int(item.get("catch_up_window_minutes")) if isinstance(item.get("catch_up_window_minutes"), int) else 180
-                    max_runtime = item.get("max_runtime_sec")
-                    max_runtime_sec = int(max_runtime) if isinstance(max_runtime, int) and max_runtime > 0 else None
 
-                next_run_at = item.get("next_run_at")
                 conn.execute(
                     """
-                    INSERT INTO schedules(
-                        schedule_id, profile_id, enabled, run_frequency_minutes,
-                        schedule_mode, schedule_timezone, schedule_time_of_day, schedule_days_of_week,
-                        schedule_catch_up_window_minutes, schedule_max_runtime_sec,
-                        next_run_at, created_at, updated_at
+                    INSERT INTO defined_tasks(
+                        schedule_id, profile_id, enabled, mode, execution_order,
+                        run_frequency_minutes, created_at, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(schedule_id) DO UPDATE SET
                         profile_id = excluded.profile_id,
                         enabled = excluded.enabled,
+                        mode = excluded.mode,
+                        execution_order = excluded.execution_order,
                         run_frequency_minutes = excluded.run_frequency_minutes,
-                        schedule_mode = excluded.schedule_mode,
-                        schedule_timezone = excluded.schedule_timezone,
-                        schedule_time_of_day = excluded.schedule_time_of_day,
-                        schedule_days_of_week = excluded.schedule_days_of_week,
-                        schedule_catch_up_window_minutes = excluded.schedule_catch_up_window_minutes,
-                        schedule_max_runtime_sec = excluded.schedule_max_runtime_sec,
-                        next_run_at = COALESCE(excluded.next_run_at, schedules.next_run_at),
                         updated_at = excluded.updated_at;
                     """,
                     (
                         schedule_id,
                         profile_id,
-                        1 if enabled else 0,
-                        int(freq),
+                        enabled,
                         mode,
-                        schedule_tz,
-                        schedule_tod,
-                        normalized_days,
-                        int(catch_up),
-                        max_runtime_sec,
-                        str(next_run_at) if isinstance(next_run_at, str) and next_run_at.strip() else None,
+                        execution_order,
+                        run_frequency_minutes,
                         now,
                         now,
                     ),
                 )
+
+                self._replace_run_times(conn, schedule_id=schedule_id, specs=run_time_specs, now=now)
                 upserted += 1
         return {"ok": True, "upserted": upserted}
+
+    def _load_run_times_for_schedule(self, conn: sqlite3.Connection, *, schedule_id: str) -> list[dict[str, Any]]:
+        rows = conn.execute(
+            """
+            SELECT rt.run_time_id, rt.time_of_day, rt.timezone, rt.enabled,
+                   GROUP_CONCAT(rtd.day_of_week) AS days_csv
+            FROM defined_tasks_run_times rt
+            LEFT JOIN defined_tasks_run_times_days_of_week rtd ON rtd.run_time_id = rt.run_time_id
+            WHERE rt.schedule_id = ?
+            GROUP BY rt.run_time_id, rt.time_of_day, rt.timezone, rt.enabled
+            ORDER BY rt.time_of_day ASC;
+            """,
+            (schedule_id,),
+        ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            days = _normalize_days_of_week(str(row["days_csv"])) if row["days_csv"] else []
+            out.append(
+                {
+                    "run_time_id": int(row["run_time_id"]),
+                    "time_of_day": str(row["time_of_day"]),
+                    "timezone": str(row["timezone"]),
+                    "days_of_week": days,
+                    "enabled": bool(row["enabled"]),
+                }
+            )
+        return out
 
     def list_schedules(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT schedule_id, profile_id, enabled, run_frequency_minutes,
-                       schedule_mode, schedule_timezone, schedule_time_of_day, schedule_days_of_week,
-                       schedule_catch_up_window_minutes, schedule_max_runtime_sec,
-                       next_run_at, last_scheduled_fire_time, last_successful_run_at,
-                       last_run_at, last_status, last_summary, last_error
-                FROM schedules
-                ORDER BY schedule_id;
+                SELECT schedule_id, profile_id, enabled, mode, execution_order, run_frequency_minutes,
+                       last_scheduled_fire_time, last_run_at, last_successful_run_at,
+                       last_status, last_summary, last_error
+                FROM defined_tasks
+                ORDER BY execution_order ASC, schedule_id ASC;
                 """
             ).fetchall()
-        return [
-            {
-                "schedule_id": row["schedule_id"],
-                "profile_id": row["profile_id"],
-                "enabled": bool(row["enabled"]),
-                "run_frequency_minutes": int(row["run_frequency_minutes"]),
-                "mode": row["schedule_mode"] or "interval",
-                "timezone": row["schedule_timezone"],
-                "time_of_day": row["schedule_time_of_day"],
-                "days_of_week": (
-                    [part for part in str(row["schedule_days_of_week"]).split(",") if part]
-                    if row["schedule_days_of_week"]
-                    else None
-                ),
-                "catch_up_window_minutes": int(row["schedule_catch_up_window_minutes"])
-                if row["schedule_catch_up_window_minutes"] is not None
-                else None,
-                "max_runtime_sec": int(row["schedule_max_runtime_sec"]) if row["schedule_max_runtime_sec"] is not None else None,
-                "next_run_at": row["next_run_at"],
-                "last_scheduled_fire_time": row["last_scheduled_fire_time"],
-                "last_successful_run_at": row["last_successful_run_at"],
-                "last_run_at": row["last_run_at"],
-                "last_status": row["last_status"],
-                "last_summary": row["last_summary"],
-                "last_error": row["last_error"],
-            }
-            for row in rows
-        ]
+
+            out: list[dict[str, Any]] = []
+            for row in rows:
+                schedule_id = str(row["schedule_id"])
+                run_times = self._load_run_times_for_schedule(conn, schedule_id=schedule_id)
+                first = run_times[0] if run_times else None
+                out.append(
+                    {
+                        "schedule_id": schedule_id,
+                        "profile_id": str(row["profile_id"]),
+                        "enabled": bool(row["enabled"]),
+                        "mode": str(row["mode"] or "frequency"),
+                        "execution_order": int(row["execution_order"]),
+                        "run_frequency_minutes": int(row["run_frequency_minutes"])
+                        if row["run_frequency_minutes"] is not None
+                        else None,
+                        "last_scheduled_fire_time": row["last_scheduled_fire_time"],
+                        "last_run_at": row["last_run_at"],
+                        "last_successful_run_at": row["last_successful_run_at"],
+                        "last_status": row["last_status"],
+                        "last_summary": row["last_summary"],
+                        "last_error": row["last_error"],
+                        "run_times": run_times,
+                        # Compatibility facade for older callers.
+                        "timezone": first["timezone"] if first else None,
+                        "time_of_day": first["time_of_day"] if first else None,
+                        "days_of_week": list(first["days_of_week"]) if first else None,
+                        "catch_up_window_minutes": DEFAULT_CALENDAR_CATCHUP_MINUTES,
+                        "max_runtime_sec": None,
+                    }
+                )
+        return out
 
     def enqueue_due_runs(self, *, now: datetime | None = None) -> dict[str, Any]:
         now_dt = now.astimezone(UTC) if isinstance(now, datetime) else _utc_now()
@@ -417,118 +504,102 @@ class TaskSchedulerStore:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT schedule_id, profile_id, run_frequency_minutes, next_run_at, last_run_at,
-                       schedule_mode, schedule_timezone, schedule_time_of_day, schedule_days_of_week,
-                       schedule_catch_up_window_minutes, schedule_max_runtime_sec,
-                       last_scheduled_fire_time
-                FROM schedules
-                WHERE enabled = 1;
+                SELECT schedule_id, profile_id, enabled, mode, execution_order,
+                       run_frequency_minutes, last_scheduled_fire_time
+                FROM defined_tasks
+                WHERE enabled = 1
+                ORDER BY execution_order ASC, schedule_id ASC;
                 """
             ).fetchall()
 
             for row in rows:
-                mode = str(row["schedule_mode"] or "interval").strip().lower()
-                freq = int(row["run_frequency_minutes"])
-                next_run_update: str | None = None
-                scheduled_fire_time: str | None = None
+                schedule_id = str(row["schedule_id"])
+                profile_id = str(row["profile_id"])
+                mode = str(row["mode"] or "frequency").strip().lower()
+                if mode == "interval":
+                    mode = "frequency"
+                last_fire = _parse_iso(row["last_scheduled_fire_time"] if isinstance(row["last_scheduled_fire_time"], str) else None)
+                execution_order = int(row["execution_order"]) if row["execution_order"] is not None else 100
 
-                if mode == "calendar":
-                    timezone_name = str(row["schedule_timezone"] or "UTC").strip() or "UTC"
-                    time_of_day = str(row["schedule_time_of_day"] or "").strip()
-                    days_csv = row["schedule_days_of_week"] if isinstance(row["schedule_days_of_week"], str) else None
-                    catch_up = (
-                        int(row["schedule_catch_up_window_minutes"])
-                        if row["schedule_catch_up_window_minutes"] is not None
-                        else 180
-                    )
-                    fire_dt = _most_recent_calendar_fire(
-                        now_dt=now_dt,
-                        timezone_name=timezone_name,
-                        time_of_day=time_of_day,
-                        days_of_week=days_csv,
-                    )
-                    if fire_dt is None:
-                        continue
-                    if fire_dt > now_dt:
-                        continue
-                    if now_dt > fire_dt + timedelta(minutes=max(0, catch_up)):
-                        continue
-                    last_fire = _parse_iso(row["last_scheduled_fire_time"])
-                    if last_fire is not None and last_fire >= fire_dt:
-                        continue
+                scheduled_fire_time: datetime | None = None
 
-                    next_fire = _next_calendar_fire_after(
-                        fire_dt=fire_dt,
-                        timezone_name=timezone_name,
-                        time_of_day=time_of_day,
-                        days_of_week=days_csv,
-                    )
-                    next_run_update = _iso(next_fire) if next_fire is not None else None
-                    scheduled_fire_time = _iso(fire_dt)
+                if mode == "frequency":
+                    freq = int(row["run_frequency_minutes"]) if row["run_frequency_minutes"] is not None else 0
+                    if freq <= 0:
+                        continue
+                    if last_fire is None:
+                        scheduled_fire_time = now_dt
+                    elif now_dt >= (last_fire + timedelta(minutes=freq)):
+                        scheduled_fire_time = now_dt
                 else:
-                    next_run = _parse_iso(row["next_run_at"])
-                    last_run = _parse_iso(row["last_run_at"])
-                    if next_run is not None:
-                        is_due = next_run <= now_dt
-                    elif last_run is None:
-                        is_due = True
-                    else:
-                        is_due = (last_run + timedelta(minutes=freq)) <= now_dt
-                    if not is_due:
-                        continue
-                    next_run_update = _iso(now_dt + timedelta(minutes=freq))
+                    run_times = [item for item in self._load_run_times_for_schedule(conn, schedule_id=schedule_id) if item.get("enabled")]
+                    candidates: list[tuple[datetime, str, list[str]]] = []
+                    for spec in run_times:
+                        fire = _most_recent_calendar_fire(
+                            now_dt=now_dt,
+                            timezone_name=str(spec["timezone"]),
+                            time_of_day=str(spec["time_of_day"]),
+                            days_of_week=list(spec.get("days_of_week") or []),
+                        )
+                        if fire is None:
+                            continue
+                        if now_dt > fire + timedelta(minutes=DEFAULT_CALENDAR_CATCHUP_MINUTES):
+                            continue
+                        candidates.append((fire, str(spec["time_of_day"]), list(spec.get("days_of_week") or [])))
 
-                # Prevent duplicate enqueues for same schedule if a queued/running run already exists.
+                    if candidates:
+                        chosen_fire, _chosen_time, _chosen_days = max(candidates, key=lambda item: item[0])
+                        if last_fire is None or chosen_fire > last_fire:
+                            scheduled_fire_time = chosen_fire
+
+                if scheduled_fire_time is None:
+                    continue
+
                 existing = conn.execute(
                     """
-                    SELECT run_id FROM runs
+                    SELECT run_id FROM defined_task_runs
                     WHERE schedule_id = ? AND status IN ('queued', 'running')
                     LIMIT 1;
                     """,
-                    (row["schedule_id"],),
+                    (schedule_id,),
                 ).fetchone()
                 if existing is not None:
                     continue
 
                 run_id = f"trun_{uuid4().hex}"
                 payload = {
-                    "schedule_id": row["schedule_id"],
-                    "profile_id": row["profile_id"],
+                    "schedule_id": schedule_id,
+                    "profile_id": profile_id,
                     "trigger": "scheduled",
                     "enqueued_at": now_iso,
-                    "schedule_mode": mode,
-                    "scheduled_fire_time": scheduled_fire_time,
+                    "mode": mode,
+                    "scheduled_fire_time": _iso(scheduled_fire_time),
                 }
-                max_runtime_sec = row["schedule_max_runtime_sec"]
-                if max_runtime_sec is not None:
-                    payload["max_runtime_sec"] = int(max_runtime_sec)
                 conn.execute(
                     """
-                    INSERT INTO runs(run_id, schedule_id, profile_id, status, queued_at, payload_json)
+                    INSERT INTO defined_task_runs(run_id, schedule_id, profile_id, status, queued_at, payload_json)
                     VALUES (?, ?, ?, 'queued', ?, ?);
                     """,
-                    (run_id, row["schedule_id"], row["profile_id"], now_iso, json.dumps(payload)),
+                    (run_id, schedule_id, profile_id, now_iso, json.dumps(payload)),
                 )
-                if mode == "calendar":
-                    conn.execute(
-                        """
-                        UPDATE schedules
-                        SET next_run_at = ?, last_scheduled_fire_time = ?, updated_at = ?
-                        WHERE schedule_id = ?;
-                        """,
-                        (next_run_update, scheduled_fire_time, now_iso, row["schedule_id"]),
-                    )
-                else:
-                    conn.execute(
-                        """
-                        UPDATE schedules
-                        SET next_run_at = ?, last_scheduled_fire_time = ?, updated_at = ?
-                        WHERE schedule_id = ?;
-                        """,
-                        (next_run_update, now_iso, now_iso, row["schedule_id"]),
-                    )
-                due.append({"run_id": run_id, "schedule_id": row["schedule_id"], "profile_id": row["profile_id"]})
+                conn.execute(
+                    """
+                    UPDATE defined_tasks
+                    SET last_scheduled_fire_time = ?, updated_at = ?
+                    WHERE schedule_id = ?;
+                    """,
+                    (_iso(scheduled_fire_time), now_iso, schedule_id),
+                )
+                due.append(
+                    {
+                        "run_id": run_id,
+                        "schedule_id": schedule_id,
+                        "profile_id": profile_id,
+                        "execution_order": execution_order,
+                    }
+                )
 
+        due.sort(key=lambda item: (int(item.get("execution_order", 100)), str(item.get("schedule_id") or "")))
         return {"ok": True, "enqueued": len(due), "runs": due}
 
     def enqueue_manual_run(self, *, profile_id: str, description: str | None = None) -> dict[str, Any]:
@@ -548,7 +619,7 @@ class TaskSchedulerStore:
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO runs(run_id, schedule_id, profile_id, status, queued_at, payload_json)
+                INSERT INTO defined_task_runs(run_id, schedule_id, profile_id, status, queued_at, payload_json)
                 VALUES (?, NULL, ?, 'queued', ?, ?);
                 """,
                 (run_id, clean_profile, queued_at, json.dumps(payload)),
@@ -560,7 +631,7 @@ class TaskSchedulerStore:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT run_id FROM runs
+                SELECT run_id FROM defined_task_runs
                 WHERE status = 'queued'
                 ORDER BY queued_at ASC
                 LIMIT 1;
@@ -569,10 +640,10 @@ class TaskSchedulerStore:
             if row is None:
                 return None
 
-            run_id = row["run_id"]
+            run_id = str(row["run_id"])
             conn.execute(
                 """
-                UPDATE runs
+                UPDATE defined_task_runs
                 SET status = 'running', started_at = ?
                 WHERE run_id = ?;
                 """,
@@ -582,7 +653,7 @@ class TaskSchedulerStore:
             result = conn.execute(
                 """
                 SELECT run_id, schedule_id, profile_id, status, queued_at, started_at, finished_at, summary, error, payload_json
-                FROM runs
+                FROM defined_task_runs
                 WHERE run_id = ?;
                 """,
                 (run_id,),
@@ -618,13 +689,13 @@ class TaskSchedulerStore:
 
         now_iso = _iso(_utc_now())
         with self._connect() as conn:
-            row = conn.execute("SELECT schedule_id FROM runs WHERE run_id = ?;", (run_id,)).fetchone()
+            row = conn.execute("SELECT schedule_id FROM defined_task_runs WHERE run_id = ?;", (run_id,)).fetchone()
             if row is None:
                 return {"ok": False, "error": "run not found"}
 
             conn.execute(
                 """
-                UPDATE runs
+                UPDATE defined_task_runs
                 SET status = ?, finished_at = ?, summary = ?, error = ?
                 WHERE run_id = ?;
                 """,
@@ -632,14 +703,14 @@ class TaskSchedulerStore:
             )
             conn.execute(
                 """
-                INSERT INTO run_history(
+                INSERT INTO defined_task_run_history(
                     run_id, schedule_id, profile_id, status, queued_at, started_at, finished_at,
                     summary, error, payload_json, archived_at
                 )
                 SELECT
                     run_id, schedule_id, profile_id, status, queued_at, started_at, finished_at,
                     summary, error, payload_json, ?
-                FROM runs
+                FROM defined_task_runs
                 WHERE run_id = ?
                 ON CONFLICT(run_id) DO UPDATE SET
                     status = excluded.status,
@@ -658,9 +729,13 @@ class TaskSchedulerStore:
                 successful_at = now_iso if status == "done" else None
                 conn.execute(
                     """
-                    UPDATE schedules
-                    SET last_run_at = ?, last_successful_run_at = COALESCE(?, last_successful_run_at),
-                        last_status = ?, last_summary = ?, last_error = ?, updated_at = ?
+                    UPDATE defined_tasks
+                    SET last_run_at = ?,
+                        last_successful_run_at = COALESCE(?, last_successful_run_at),
+                        last_status = ?,
+                        last_summary = ?,
+                        last_error = ?,
+                        updated_at = ?
                     WHERE schedule_id = ?;
                     """,
                     (now_iso, successful_at, status, summary, error, now_iso, schedule_id),
@@ -674,7 +749,7 @@ class TaskSchedulerStore:
             rows = conn.execute(
                 """
                 SELECT run_id, schedule_id, profile_id, status, queued_at, started_at, finished_at, summary, error, payload_json
-                FROM runs
+                FROM defined_task_runs
                 ORDER BY queued_at DESC
                 LIMIT ?;
                 """,
@@ -702,18 +777,18 @@ class TaskSchedulerStore:
 
     def runtime_counts(self) -> dict[str, int]:
         with self._connect() as conn:
-            queued = conn.execute("SELECT COUNT(*) AS c FROM runs WHERE status = 'queued';").fetchone()["c"]
-            running = conn.execute("SELECT COUNT(*) AS c FROM runs WHERE status = 'running';").fetchone()["c"]
+            queued = conn.execute("SELECT COUNT(*) AS c FROM defined_task_runs WHERE status = 'queued';").fetchone()["c"]
+            running = conn.execute("SELECT COUNT(*) AS c FROM defined_task_runs WHERE status = 'running';").fetchone()["c"]
         return {"queued_count": int(queued), "running_count": int(running)}
 
     def runtime_metrics(self, *, now: datetime | None = None) -> dict[str, Any]:
         now_dt = now.astimezone(UTC) if isinstance(now, datetime) else _utc_now()
         with self._connect() as conn:
             oldest_queued = conn.execute(
-                "SELECT MIN(queued_at) AS t FROM runs WHERE status = 'queued';"
+                "SELECT MIN(queued_at) AS t FROM defined_task_runs WHERE status = 'queued';"
             ).fetchone()["t"]
             oldest_running = conn.execute(
-                "SELECT MIN(started_at) AS t FROM runs WHERE status = 'running';"
+                "SELECT MIN(started_at) AS t FROM defined_task_runs WHERE status = 'running';"
             ).fetchone()["t"]
 
         queued_age = None
@@ -735,7 +810,7 @@ class TaskSchedulerStore:
             rows = conn.execute(
                 """
                 SELECT run_id, schedule_id, profile_id, status, queued_at, started_at, finished_at, summary, error, payload_json
-                FROM run_history
+                FROM defined_task_run_history
                 ORDER BY COALESCE(finished_at, queued_at) DESC
                 LIMIT ?;
                 """,
@@ -768,7 +843,6 @@ class TaskSchedulerStore:
         max_history_rows: int | None = None,
         now: datetime | None = None,
     ) -> dict[str, Any]:
-        """Prune completed run history while preserving queued/running runs."""
         deleted = 0
         now_dt = now.astimezone(UTC) if isinstance(now, datetime) else _utc_now()
         completion_statuses = ("done", "failed", "blocked")
@@ -779,7 +853,7 @@ class TaskSchedulerStore:
                 rows = conn.execute(
                     """
                     SELECT run_id
-                    FROM run_history
+                    FROM defined_task_run_history
                     WHERE status IN (?, ?, ?)
                       AND COALESCE(finished_at, queued_at) < ?;
                     """,
@@ -787,26 +861,25 @@ class TaskSchedulerStore:
                 ).fetchall()
                 for row in rows:
                     run_id = row["run_id"]
-                    res_hist = conn.execute("DELETE FROM run_history WHERE run_id = ?;", (run_id,))
-                    res_runs = conn.execute("DELETE FROM runs WHERE run_id = ?;", (run_id,))
+                    res_hist = conn.execute("DELETE FROM defined_task_run_history WHERE run_id = ?;", (run_id,))
+                    res_runs = conn.execute("DELETE FROM defined_task_runs WHERE run_id = ?;", (run_id,))
                     deleted += int((res_hist.rowcount or 0) + (res_runs.rowcount or 0))
 
             if isinstance(max_history_rows, int) and max_history_rows >= 0:
                 rows = conn.execute(
                     """
                     SELECT run_id
-                    FROM run_history
+                    FROM defined_task_run_history
                     WHERE status IN (?, ?, ?)
                     ORDER BY COALESCE(finished_at, queued_at) DESC;
                     """,
                     completion_statuses,
-                )
-                rows = rows.fetchall()
+                ).fetchall()
                 if len(rows) > max_history_rows:
                     to_delete = [row["run_id"] for row in rows[max_history_rows:]]
                     for run_id in to_delete:
-                        res_hist = conn.execute("DELETE FROM run_history WHERE run_id = ?;", (run_id,))
-                        res_runs = conn.execute("DELETE FROM runs WHERE run_id = ?;", (run_id,))
+                        res_hist = conn.execute("DELETE FROM defined_task_run_history WHERE run_id = ?;", (run_id,))
+                        res_runs = conn.execute("DELETE FROM defined_task_runs WHERE run_id = ?;", (run_id,))
                         deleted += int((res_hist.rowcount or 0) + (res_runs.rowcount or 0))
 
         return {"ok": True, "deleted_runs": deleted}
