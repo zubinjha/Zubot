@@ -74,33 +74,24 @@ def _load_task_profiles() -> dict[str, dict[str, Any]]:
     except Exception:
         return {}
 
-    task_agents = cfg.get("task_agents") if isinstance(cfg, dict) else None
-    profiles = task_agents.get("profiles") if isinstance(task_agents, dict) else None
-    if not isinstance(profiles, dict):
-        return {}
     out: dict[str, dict[str, Any]] = {}
-    for profile_id, payload in profiles.items():
-        if isinstance(profile_id, str) and isinstance(payload, dict):
-            out[profile_id] = payload
+
+    predefined_root = cfg.get("pre_defined_tasks") if isinstance(cfg, dict) else None
+    predefined_tasks = predefined_root.get("tasks") if isinstance(predefined_root, dict) else None
+    if isinstance(predefined_tasks, dict):
+        for task_id, payload in predefined_tasks.items():
+            if not isinstance(task_id, str) or not isinstance(payload, dict):
+                continue
+            out[task_id] = {
+                "name": payload.get("name") or task_id,
+                "entrypoint_path": payload.get("entrypoint_path"),
+            }
+
     return out
 
 
-def _load_schedules() -> list[dict[str, Any]]:
-    try:
-        cfg = load_config()
-    except Exception:
-        return []
-
-    task_agents = cfg.get("task_agents") if isinstance(cfg, dict) else None
-    schedules = task_agents.get("schedules") if isinstance(task_agents, dict) else None
-    if not isinstance(schedules, list):
-        return []
-
-    out: list[dict[str, Any]] = []
-    for item in schedules:
-        if isinstance(item, dict):
-            out.append(item)
-    return out
+def _sanitize_task_id(raw: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in raw.strip())
 
 
 def summarize_task_agent_check_in(task_agents: list[dict[str, Any]]) -> str:
@@ -266,10 +257,6 @@ class CentralService:
                 self._store = TaskSchedulerStore(db_path=settings.scheduler_db_path)
         return settings
 
-    def _sync_schedules(self) -> dict[str, Any]:
-        schedules = _load_schedules()
-        return self._store.sync_schedules(schedules)
-
     def start(self) -> dict[str, Any]:
         with self._lock:
             if self._loop_thread is not None and self._loop_thread.is_alive():
@@ -369,7 +356,6 @@ class CentralService:
 
     def tick(self) -> dict[str, Any]:
         settings = self._refresh_settings()
-        sync = self._sync_schedules()
         enqueue = self._store.enqueue_due_runs()
         dispatch = self._dispatch_available()
         housekeeping = self._run_housekeeping(on_completion=False)
@@ -388,7 +374,6 @@ class CentralService:
                 "queue_warning_threshold": settings.queue_warning_threshold,
                 "running_age_warning_sec": settings.running_age_warning_sec,
             },
-            "sync": sync,
             "enqueue": enqueue,
             "dispatch": dispatch,
             "housekeeping": housekeeping,
@@ -398,6 +383,80 @@ class CentralService:
         out = self._store.enqueue_manual_run(profile_id=profile_id, description=description)
         self._dispatch_available()
         return out
+
+    def list_defined_tasks(self) -> dict[str, Any]:
+        tasks = _load_task_profiles()
+        out: list[dict[str, Any]] = []
+        for task_id, payload in sorted(tasks.items(), key=lambda item: item[0]):
+            out.append(
+                {
+                    "task_id": task_id,
+                    "name": str(payload.get("name") or task_id),
+                    "entrypoint_path": payload.get("entrypoint_path"),
+                }
+            )
+        return {"ok": True, "tasks": out}
+
+    def upsert_schedule(
+        self,
+        *,
+        schedule_id: str | None,
+        task_id: str,
+        enabled: bool,
+        mode: str,
+        execution_order: int,
+        run_frequency_minutes: int | None = None,
+        timezone: str | None = None,
+        run_times: list[str] | None = None,
+        days_of_week: list[str] | None = None,
+    ) -> dict[str, Any]:
+        clean_task_id = str(task_id or "").strip()
+        if not clean_task_id:
+            return {"ok": False, "error": "task_id is required."}
+        tasks = _load_task_profiles()
+        if clean_task_id not in tasks:
+            return {"ok": False, "error": f"Unknown task_id `{clean_task_id}`."}
+
+        clean_schedule_id = str(schedule_id or "").strip()
+        if not clean_schedule_id:
+            clean_schedule_id = f"sched_{_sanitize_task_id(clean_task_id)}_{uuid4().hex[:8]}"
+
+        mode_value = str(mode or "frequency").strip().lower()
+        if mode_value == "interval":
+            mode_value = "frequency"
+        if mode_value not in {"frequency", "calendar"}:
+            return {"ok": False, "error": "mode must be `frequency` or `calendar`."}
+
+        payload: dict[str, Any] = {
+            "schedule_id": clean_schedule_id,
+            "profile_id": clean_task_id,
+            "enabled": bool(enabled),
+            "mode": mode_value,
+            "execution_order": int(execution_order) if execution_order >= 0 else 100,
+        }
+
+        if mode_value == "frequency":
+            if not isinstance(run_frequency_minutes, int) or run_frequency_minutes <= 0:
+                return {"ok": False, "error": "run_frequency_minutes must be > 0 for frequency mode."}
+            payload["run_frequency_minutes"] = int(run_frequency_minutes)
+            payload["run_times"] = []
+            payload["days_of_week"] = []
+        else:
+            clean_timezone = str(timezone or "America/New_York").strip() or "America/New_York"
+            clean_run_times = [str(item).strip() for item in (run_times or []) if isinstance(item, str) and str(item).strip()]
+            if not clean_run_times:
+                return {"ok": False, "error": "run_times is required for calendar mode."}
+            payload["timezone"] = clean_timezone
+            payload["run_times"] = clean_run_times
+            payload["days_of_week"] = [str(item).strip().lower() for item in (days_of_week or []) if isinstance(item, str)]
+
+        out = self._store.upsert_schedule(payload)
+        if not out.get("ok"):
+            return out
+        return {"ok": True, "schedule_id": clean_schedule_id}
+
+    def delete_schedule(self, *, schedule_id: str) -> dict[str, Any]:
+        return self._store.delete_schedule(schedule_id=schedule_id)
 
     def _check_in_payload(self) -> list[dict[str, Any]]:
         profiles = _load_task_profiles()
@@ -501,7 +560,6 @@ class CentralService:
         }
 
     def list_schedules(self) -> dict[str, Any]:
-        self._sync_schedules()
         return {"ok": True, "schedules": self._store.list_schedules()}
 
     def list_runs(self, *, limit: int = 50) -> dict[str, Any]:

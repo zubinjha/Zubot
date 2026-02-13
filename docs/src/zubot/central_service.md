@@ -11,7 +11,7 @@ This document describes the v1 central runtime scaffold for scheduled task-agent
 
 ## Runtime Model (v1)
 - single-process scheduler + queue consumer
-- profile-based task-agent execution
+- task execution is `pre_defined_tasks` script-driven
 - implemented but disabled by default (`central_service.enabled = false`)
 - daemon-first startup supported via `python -m src.zubot.daemon.main`
 - central loop auto-runs at daemon startup only when config-enabled
@@ -32,9 +32,8 @@ This document describes the v1 central runtime scaffold for scheduled task-agent
 - `queue_warning_threshold`
 - `running_age_warning_sec`
 
-`task_agents`:
-- `profiles` map (profile contracts)
-- `schedules` list (frequency + profile binding)
+`pre_defined_tasks`:
+- `tasks` map (`task_id` -> script entrypoint + args + timeout)
 
 ## SQLite Store
 
@@ -57,16 +56,15 @@ Indexes:
 - profile/queued-time lookup for per-profile state views
 
 ## Queue Flow
-1. Sync `task_agents.schedules` into `defined_tasks` table (and `defined_tasks_run_times` for calendar mode).
-2. Detect due schedules and enqueue run records (`status = queued`).
-3. Claim queued runs (`status = running`) under concurrency cap.
-4. Execute via `TaskAgentRunner`.
-5. Write completion status (`done`/`failed`/`blocked`) and schedule last-run metadata.
-6. Run housekeeping:
+1. Read due schedules from SQLite (`defined_tasks` + `defined_tasks_run_times`) and enqueue run records (`status = queued`).
+2. Claim queued runs (`status = running`) under concurrency cap.
+3. Execute via `TaskAgentRunner`.
+4. Write completion status (`done`/`failed`/`blocked`) and schedule last-run metadata.
+5. Run housekeeping:
   - prune old completed run history rows
   - run debounced/periodic memory finalization sweeps for prior non-finalized days (full raw-day replay summary)
   - emit structured memory-manager sweep events for observability
-7. Memory ingestion behavior for task-agent events:
+6. Memory ingestion behavior for task-agent events:
   - append raw memory events (`task_agent_event`)
   - increment day-memory counters
   - enqueue day-summary jobs with dedupe
@@ -90,10 +88,13 @@ Per profile status includes:
 - `GET /api/central/status`
 - `POST /api/central/start`
 - `POST /api/central/stop`
+- `GET /api/central/tasks`
 - `GET /api/central/schedules`
+- `POST /api/central/schedules`
+- `DELETE /api/central/schedules/{schedule_id}`
 - `GET /api/central/runs`
 - `GET /api/central/metrics`
-- `POST /api/central/trigger/{profile_id}`
+- `POST /api/central/trigger/{task_id}`
 
 ## Future Direction
 - merge scheduler store + memory index into a unified sqlite authority

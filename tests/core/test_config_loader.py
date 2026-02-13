@@ -12,6 +12,7 @@ from src.zubot.core.config_loader import (
     get_model_by_id,
     get_home_location,
     get_model_by_alias,
+    get_predefined_task_config,
     get_task_agent_config,
     get_worker_runtime_config,
     get_provider_config,
@@ -71,9 +72,15 @@ def test_helpers_resolve_default_model_and_location():
             "queue_warning_threshold": 10,
             "running_age_warning_sec": 600,
         },
-        "task_agents": {
-            "profiles": {"profile_a": {"name": "Profile A"}},
-            "schedules": [{"schedule_id": "sched_a", "profile_id": "profile_a", "enabled": True, "run_frequency_minutes": 5}],
+        "pre_defined_tasks": {
+            "tasks": {
+                "profile_a": {
+                    "name": "Profile A",
+                    "entrypoint_path": "src/zubot/predefined_tasks/indeed_daily_search.py",
+                    "args": [],
+                    "timeout_sec": 120,
+                }
+            }
         },
         "default_model_alias": "medium",
         "model_providers": {"openrouter": {"apikey": "x"}},
@@ -105,6 +112,7 @@ def test_helpers_resolve_default_model_and_location():
     assert central["memory_manager_completion_debounce_sec"] == 120
     assert central["queue_warning_threshold"] == 10
     assert central["running_age_warning_sec"] == 600
-    task_agents = get_task_agent_config(config)
-    assert "profile_a" in task_agents["profiles"]
-    assert task_agents["schedules"][0]["schedule_id"] == "sched_a"
+    predefined = get_predefined_task_config(config)
+    assert "profile_a" in predefined["tasks"]
+    compat = get_task_agent_config(config)
+    assert "profile_a" in compat["tasks"]

@@ -157,6 +157,37 @@ class RuntimeService:
     def central_trigger_profile(self, *, profile_id: str, description: str | None = None) -> dict[str, Any]:
         return get_central_service().trigger_profile(profile_id=profile_id, description=description)
 
+    def central_list_defined_tasks(self) -> dict[str, Any]:
+        return get_central_service().list_defined_tasks()
+
+    def central_upsert_schedule(
+        self,
+        *,
+        schedule_id: str | None,
+        task_id: str,
+        enabled: bool,
+        mode: str,
+        execution_order: int,
+        run_frequency_minutes: int | None = None,
+        timezone: str | None = None,
+        run_times: list[str] | None = None,
+        days_of_week: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return get_central_service().upsert_schedule(
+            schedule_id=schedule_id,
+            task_id=task_id,
+            enabled=enabled,
+            mode=mode,
+            execution_order=execution_order,
+            run_frequency_minutes=run_frequency_minutes,
+            timezone=timezone,
+            run_times=run_times,
+            days_of_week=days_of_week,
+        )
+
+    def central_delete_schedule(self, *, schedule_id: str) -> dict[str, Any]:
+        return get_central_service().delete_schedule(schedule_id=schedule_id)
+
 
 _RUNTIME_SERVICE: RuntimeService | None = None
 

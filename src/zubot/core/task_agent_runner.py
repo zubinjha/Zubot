@@ -1,243 +1,202 @@
-"""Task-agent profile resolution and run execution."""
+"""Predefined task resolution and execution for central scheduler runs."""
 
 from __future__ import annotations
 
-from uuid import uuid4
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 from typing import Any
 
-from .agent_types import TaskEnvelope
-from .config_loader import get_model_config, load_config
-from .context_loader import load_base_context
-from .daily_memory import load_recent_daily_memory
+from .config_loader import load_config
 from .sub_agent_runner import SubAgentRunner
 
-TASK_AGENT_BASE_CONTEXT_FILES = [
-    "context/KERNEL.md",
-    "context/TASK_AGENT.md",
-    "context/TASK_SOUL.md",
-    "context/USER.md",
-]
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
 
 
 class TaskAgentRunner:
-    """Resolve and execute task-agent profile runs.
-
-    v1 behavior is profile-driven and returns structured summaries.
-    Execution intentionally avoids side effects beyond run-state updates until
-    dedicated task handlers are introduced.
-    """
+    """Resolve and execute predefined task runs from config."""
 
     def __init__(self, *, runner: SubAgentRunner | None = None) -> None:
-        self._runner = runner or SubAgentRunner()
+        # Reserved for future hybrid execution modes.
+        self._runner = runner
 
     @staticmethod
-    def _load_profiles() -> dict[str, dict[str, Any]]:
+    def _load_predefined_tasks() -> dict[str, dict[str, Any]]:
         try:
             cfg = load_config()
         except Exception:
             return {}
-        task_agents = cfg.get("task_agents") if isinstance(cfg, dict) else None
-        profiles = task_agents.get("profiles") if isinstance(task_agents, dict) else None
-        if not isinstance(profiles, dict):
+        root = cfg.get("pre_defined_tasks") if isinstance(cfg, dict) else None
+        tasks = root.get("tasks") if isinstance(root, dict) else None
+        if not isinstance(tasks, dict):
             return {}
-
         out: dict[str, dict[str, Any]] = {}
-        for profile_id, payload in profiles.items():
-            if not isinstance(profile_id, str) or not isinstance(payload, dict):
-                continue
-            out[profile_id] = payload
+        for task_id, payload in tasks.items():
+            if isinstance(task_id, str) and isinstance(payload, dict):
+                out[task_id] = payload
         return out
 
     @staticmethod
-    def _memory_autoload_days() -> int:
+    def _resolve_predefined_entrypoint(entrypoint_path: str) -> Path:
+        candidate = Path(entrypoint_path.strip())
+        if candidate.is_absolute():
+            raise ValueError("Predefined task entrypoint_path must be repository-relative.")
+        normalized_parts = [part for part in candidate.parts if part not in ("", ".")]
+        if any(part == ".." for part in normalized_parts):
+            raise ValueError("Path traversal is not allowed in predefined task entrypoint_path.")
+        resolved = (_repo_root() / candidate).resolve()
+        if not resolved.exists() or not resolved.is_file():
+            raise ValueError(f"Predefined task entrypoint file not found: {entrypoint_path}")
+        return resolved
+
+    @staticmethod
+    def _run_predefined_task(*, task_id: str, task_def: dict[str, Any], payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        name = str(task_def.get("name") or task_id)
+        entrypoint_raw = str(task_def.get("entrypoint_path") or "").strip()
+        if not entrypoint_raw:
+            return {
+                "ok": False,
+                "status": "failed",
+                "summary": None,
+                "error": f"Predefined task `{task_id}` is missing entrypoint_path.",
+                "current_description": f"{name}: missing entrypoint_path.",
+                "model_alias": "predefined",
+                "used_tool_access": [],
+                "used_skill_access": [],
+                "retryable_error": False,
+                "attempts_used": None,
+                "attempts_configured": None,
+            }
+
         try:
-            cfg = load_config()
-        except Exception:
-            return 2
-        memory_cfg = cfg.get("memory") if isinstance(cfg, dict) else None
-        value = memory_cfg.get("autoload_summary_days") if isinstance(memory_cfg, dict) else None
-        if isinstance(value, int) and value > 0:
-            return value
-        return 2
+            entrypoint = TaskAgentRunner._resolve_predefined_entrypoint(entrypoint_raw)
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "status": "failed",
+                "summary": None,
+                "error": str(exc),
+                "current_description": f"{name}: invalid entrypoint.",
+                "model_alias": "predefined",
+                "used_tool_access": [],
+                "used_skill_access": [],
+                "retryable_error": False,
+                "attempts_used": None,
+                "attempts_configured": None,
+            }
 
-    @staticmethod
-    def _normalize_model_tier(model_alias: str) -> str:
-        alias = model_alias.strip().lower()
-        if alias in {"low", "medium", "high"}:
-            return alias
-        return "medium"
+        args = task_def.get("args")
+        arg_list = [str(item) for item in args if isinstance(item, (str, int, float))] if isinstance(args, list) else []
+        timeout_raw = task_def.get("timeout_sec")
+        timeout_sec = int(timeout_raw) if isinstance(timeout_raw, int) and timeout_raw > 0 else 1800
 
-    @staticmethod
-    def _instructions_for_run(*, profile_name: str, profile: dict[str, Any], payload: dict[str, Any] | None = None) -> str:
-        template = str(profile.get("instructions_template") or "").strip()
-        payload_dict = payload if isinstance(payload, dict) else {}
-        description = str(payload_dict.get("description") or "").strip()
-        trigger = str(payload_dict.get("trigger") or "scheduled")
-        run_context = f"Run context:\n- trigger: {trigger}"
-        if description:
-            run_context += f"\n- description: {description}"
-        policy_hint = (
-            "Worker escalation policy:\n"
-            "- If you need to spawn a worker from this task-agent run, use `spawn_task_agent_worker`.\n"
-            "- Do not call `spawn_worker` directly from task-agent runs."
-        )
+        env = os.environ.copy()
+        env["ZUBOT_TASK_ID"] = task_id
+        env["ZUBOT_TASK_PAYLOAD_JSON"] = json.dumps(payload if isinstance(payload, dict) else {})
 
-        if template:
-            return f"{template}\n\n{run_context}\n\n{policy_hint}".strip()
-        return f"Execute task-agent profile `{profile_name}`.\n\n{run_context}\n\n{policy_hint}"
-
-    @staticmethod
-    def _normalize_tool_access(profile_tools: list[str]) -> list[str]:
-        """Normalize task-agent tool access to reserve-aware orchestration tools."""
-        out: list[str] = []
-        for tool_name in profile_tools:
-            if tool_name == "spawn_worker":
-                if "spawn_task_agent_worker" not in out:
-                    out.append("spawn_task_agent_worker")
-                continue
-            if tool_name not in out:
-                out.append(tool_name)
-        return out
-
-    @staticmethod
-    def _extract_llm_failure_meta(result: dict[str, Any]) -> dict[str, Any]:
-        artifacts = result.get("artifacts")
-        if not isinstance(artifacts, list):
-            return {}
-        for item in artifacts:
-            if not isinstance(item, dict):
-                continue
-            if item.get("type") != "llm_failure":
-                continue
-            data = item.get("data")
-            if isinstance(data, dict):
-                return data
-        return {}
-
-    def _resolve_model_alias(self, profile: dict[str, Any]) -> tuple[bool, str, str | None]:
-        model_alias = str(profile.get("model_alias") or "medium").strip() or "medium"
         try:
-            # Validates alias/id existence in runtime config.
-            get_model_config(model_alias)
+            completed = subprocess.run(
+                [sys.executable, str(entrypoint), *arg_list],
+                cwd=str(_repo_root()),
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout_sec,
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "ok": False,
+                "status": "failed",
+                "summary": None,
+                "error": f"Predefined task `{task_id}` timed out after {timeout_sec}s.",
+                "current_description": f"{name}: timed out after {timeout_sec}s.",
+                "model_alias": "predefined",
+                "used_tool_access": [],
+                "used_skill_access": [],
+                "retryable_error": False,
+                "attempts_used": None,
+                "attempts_configured": None,
+            }
         except Exception as exc:
-            return False, model_alias, str(exc)
-        return True, model_alias, None
+            return {
+                "ok": False,
+                "status": "failed",
+                "summary": None,
+                "error": f"Predefined task `{task_id}` failed to start: {exc}",
+                "current_description": f"{name}: failed to start.",
+                "model_alias": "predefined",
+                "used_tool_access": [],
+                "used_skill_access": [],
+                "retryable_error": False,
+                "attempts_used": None,
+                "attempts_configured": None,
+            }
 
-    def _load_context(self, profile: dict[str, Any]) -> tuple[dict[str, str], dict[str, str]]:
-        base_context = load_base_context(files=TASK_AGENT_BASE_CONTEXT_FILES)
-        preload_files = profile.get("preload_files")
-        preload_list = [path for path in preload_files if isinstance(path, str)] if isinstance(preload_files, list) else []
-        supplemental_context = load_base_context(files=preload_list) if preload_list else {}
-        supplemental_context.update(load_recent_daily_memory(days=self._memory_autoload_days()))
-        return base_context, supplemental_context
+        stdout = (completed.stdout or "").strip()
+        stderr = (completed.stderr or "").strip()
+        if completed.returncode == 0:
+            summary = stdout.splitlines()[-1][:300] if stdout else f"{name} completed."
+            return {
+                "ok": True,
+                "status": "done",
+                "summary": summary,
+                "error": None,
+                "current_description": f"{name}: completed.",
+                "model_alias": "predefined",
+                "used_tool_access": [],
+                "used_skill_access": [],
+                "retryable_error": False,
+                "attempts_used": 1,
+                "attempts_configured": 1,
+            }
+
+        err_msg = stderr[:500] if stderr else f"exit_code={completed.returncode}"
+        return {
+            "ok": False,
+            "status": "failed",
+            "summary": stdout.splitlines()[-1][:300] if stdout else None,
+            "error": f"Predefined task `{task_id}` failed: {err_msg}",
+            "current_description": f"{name}: failed (exit {completed.returncode}).",
+            "model_alias": "predefined",
+            "used_tool_access": [],
+            "used_skill_access": [],
+            "retryable_error": False,
+            "attempts_used": 1,
+            "attempts_configured": 1,
+        }
 
     def describe_run(self, *, profile_id: str, payload: dict[str, Any] | None = None) -> str:
-        profiles = self._load_profiles()
-        profile = profiles.get(profile_id)
-        if not isinstance(profile, dict):
-            return f"Task profile `{profile_id}` is not defined."
+        _ = payload
+        predefined = self._load_predefined_tasks().get(profile_id)
+        if not isinstance(predefined, dict):
+            return f"Predefined task `{profile_id}` is not defined."
 
-        profile_name = str(profile.get("name") or profile_id)
-        instructions_template = str(profile.get("instructions_template") or "").strip()
-        if instructions_template:
-            text = instructions_template.replace("\n", " ").strip()
-            if len(text) > 160:
-                text = text[:157] + "..."
-            return f"{profile_name}: {text}"
-        return f"{profile_name}: processing scheduled task run."
+        task_name = str(predefined.get("name") or profile_id)
+        entrypoint = str(predefined.get("entrypoint_path") or "").strip()
+        if entrypoint:
+            return f"{task_name}: executing `{entrypoint}`."
+        return f"{task_name}: predefined task execution."
 
     def run_profile(self, *, profile_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        profiles = self._load_profiles()
-        profile = profiles.get(profile_id)
-        if not isinstance(profile, dict):
+        predefined = self._load_predefined_tasks().get(profile_id)
+        if not isinstance(predefined, dict):
             return {
                 "ok": False,
                 "status": "failed",
                 "summary": None,
-                "error": f"Task profile `{profile_id}` not found.",
-                "current_description": f"Failed to resolve task profile `{profile_id}`.",
+                "error": f"Predefined task `{profile_id}` not found.",
+                "current_description": f"Failed to resolve predefined task `{profile_id}`.",
+                "model_alias": "predefined",
+                "used_tool_access": [],
+                "used_skill_access": [],
+                "retryable_error": False,
+                "attempts_used": None,
+                "attempts_configured": None,
             }
 
-        profile_name = str(profile.get("name") or profile_id)
-        model_ok, model_alias, model_error = self._resolve_model_alias(profile)
-        if not model_ok:
-            return {
-                "ok": False,
-                "status": "failed",
-                "summary": None,
-                "error": f"Task profile `{profile_id}` has invalid model alias `{model_alias}`: {model_error}",
-                "current_description": f"Failed to resolve model alias `{model_alias}` for task profile `{profile_id}`.",
-            }
-
-        tool_access = profile.get("tool_access")
-        skill_access = profile.get("skill_access")
-        raw_tool_list = [name for name in tool_access if isinstance(name, str)] if isinstance(tool_access, list) else []
-        tool_list = self._normalize_tool_access(raw_tool_list)
-        skill_list = [name for name in skill_access if isinstance(name, str)] if isinstance(skill_access, list) else []
-        base_context, supplemental_context = self._load_context(profile)
-
-        instructions = self._instructions_for_run(profile_name=profile_name, profile=profile, payload=payload)
-        task = TaskEnvelope(
-            task_id=f"task_agent_{uuid4().hex}",
-            requested_by=f"task_agent:{profile_id}",
-            instructions=instructions,
-            model_tier=self._normalize_model_tier(model_alias),  # type: ignore[arg-type]
-            tool_access=tool_list,
-            skill_access=skill_list,
-            metadata={
-                "profile_id": profile_id,
-                "profile_name": profile_name,
-                "trigger": (payload or {}).get("trigger", "scheduled"),
-                "payload": payload if isinstance(payload, dict) else {},
-            },
-        )
-
-        run_out = self._runner.run_task(
-            task,
-            model=model_alias,
-            base_context=base_context,
-            supplemental_context=supplemental_context,
-            allow_orchestration_tools=True,
-        )
-
-        result = run_out.get("result") if isinstance(run_out.get("result"), dict) else {}
-        result_status = str(result.get("status") or "").strip().lower()
-        if run_out.get("ok") is True:
-            if result_status == "needs_user_input":
-                status = "blocked"
-            elif result_status == "failed":
-                status = "failed"
-            else:
-                status = "done"
-        else:
-            status = "failed"
-
-        summary = result.get("summary") if isinstance(result.get("summary"), str) else None
-        error = result.get("error") if isinstance(result.get("error"), str) else None
-        llm_failure = self._extract_llm_failure_meta(result)
-        attempts_used = llm_failure.get("attempts_used") if isinstance(llm_failure.get("attempts_used"), int) else None
-        attempts_configured = (
-            llm_failure.get("attempts_configured")
-            if isinstance(llm_failure.get("attempts_configured"), int)
-            else None
-        )
-        retryable_error = bool(llm_failure.get("retryable_error", False))
-        if summary is None:
-            summary = f"{profile_name} run completed (model={model_alias})." if status == "done" else None
-        if error is None and run_out.get("ok") is not True:
-            error = str(run_out.get("error") or "task_agent_run_failed")
-
-        desc = self.describe_run(profile_id=profile_id, payload=payload)
-        return {
-            "ok": status == "done",
-            "status": status,
-            "summary": summary,
-            "error": error,
-            "current_description": desc,
-            "model_alias": model_alias,
-            "used_tool_access": tool_list,
-            "used_skill_access": skill_list,
-            "retryable_error": retryable_error,
-            "attempts_used": attempts_used,
-            "attempts_configured": attempts_configured,
-        }
+        return self._run_predefined_task(task_id=profile_id, task_def=predefined, payload=payload)

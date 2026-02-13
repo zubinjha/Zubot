@@ -199,14 +199,17 @@ def get_central_service_config(config: dict[str, Any] | None = None) -> dict[str
     }
 
 
-def get_task_agent_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Return task-agent profiles and schedules from config."""
+def get_predefined_task_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return predefined task config from `pre_defined_tasks`."""
     payload = config or load_config()
-    task_agents = payload.get("task_agents")
-    cfg = task_agents if isinstance(task_agents, dict) else {}
-    profiles = cfg.get("profiles")
-    schedules = cfg.get("schedules")
+    root = payload.get("pre_defined_tasks")
+    cfg = root if isinstance(root, dict) else {}
+    tasks = cfg.get("tasks")
     return {
-        "profiles": profiles if isinstance(profiles, dict) else {},
-        "schedules": schedules if isinstance(schedules, list) else [],
+        "tasks": tasks if isinstance(tasks, dict) else {},
     }
+
+
+def get_task_agent_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Backward-compatible alias for predefined-task config."""
+    return get_predefined_task_config(config)

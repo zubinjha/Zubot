@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
+from typing import Literal
 
 from src.zubot.runtime.service import get_runtime_service
 
@@ -39,6 +40,18 @@ class WorkerMessageRequest(BaseModel):
 
 class TriggerTaskProfileRequest(BaseModel):
     description: str | None = None
+
+
+class ScheduleUpsertRequest(BaseModel):
+    schedule_id: str | None = None
+    task_id: str
+    enabled: bool = True
+    mode: Literal["frequency", "calendar"] = "frequency"
+    execution_order: int = 100
+    run_frequency_minutes: int | None = None
+    timezone: str | None = "America/New_York"
+    run_times: list[str] = Field(default_factory=list)
+    days_of_week: list[str] = Field(default_factory=list)
 
 
 @app.on_event("startup")
@@ -135,6 +148,31 @@ def central_metrics() -> dict:
     return get_runtime_service().central_metrics()
 
 
+@app.get("/api/central/tasks")
+def central_tasks() -> dict:
+    return get_runtime_service().central_list_defined_tasks()
+
+
+@app.post("/api/central/schedules")
+def central_upsert_schedule(req: ScheduleUpsertRequest) -> dict:
+    return get_runtime_service().central_upsert_schedule(
+        schedule_id=req.schedule_id,
+        task_id=req.task_id,
+        enabled=req.enabled,
+        mode=req.mode,
+        execution_order=req.execution_order,
+        run_frequency_minutes=req.run_frequency_minutes,
+        timezone=req.timezone,
+        run_times=req.run_times,
+        days_of_week=req.days_of_week,
+    )
+
+
+@app.delete("/api/central/schedules/{schedule_id}")
+def central_delete_schedule(schedule_id: str) -> dict:
+    return get_runtime_service().central_delete_schedule(schedule_id=schedule_id)
+
+
 @app.post("/api/central/trigger/{profile_id}")
 def central_trigger_profile(profile_id: str, req: TriggerTaskProfileRequest | None = None) -> dict:
     description = req.description if isinstance(req, TriggerTaskProfileRequest) else None
@@ -174,8 +212,10 @@ def index() -> HTMLResponse:
         radial-gradient(900px 600px at -10% 0%, #d7f8ef 0%, transparent 60%),
         radial-gradient(700px 500px at 100% 100%, #ffe3b2 0%, transparent 50%),
         var(--bg);
-      display: grid;
-      place-items: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
       padding: 20px;
     }
 
@@ -185,6 +225,14 @@ def index() -> HTMLResponse:
       display: grid;
       grid-template-columns: 1.6fr 1fr;
       gap: 14px;
+    }
+
+    .app.schedules-mode {
+      grid-template-columns: 1fr;
+    }
+
+    .app.schedules-mode .side {
+      display: none;
     }
 
     .panel {
@@ -197,7 +245,7 @@ def index() -> HTMLResponse:
 
     .chat {
       display: grid;
-      grid-template-rows: auto 1fr auto;
+      grid-template-rows: auto 1fr;
       min-height: 0;
     }
 
@@ -205,6 +253,30 @@ def index() -> HTMLResponse:
       padding: 14px 16px;
       border-bottom: 1px solid var(--line);
       background: linear-gradient(120deg, #f3fff9 0%, #fff7eb 100%);
+    }
+
+    .global-tabs {
+      display: flex;
+      gap: 8px;
+      width: min(1100px, 100%);
+      margin-bottom: 10px;
+    }
+
+    .tab-btn {
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+      padding: 6px 10px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.8rem;
+    }
+
+    .tab-btn.active {
+      border-color: var(--accent);
+      background: #e8faf4;
+      color: #0a614e;
     }
 
     .chat-header h1 {
@@ -226,6 +298,183 @@ def index() -> HTMLResponse:
       display: flex;
       flex-direction: column;
       gap: 10px;
+    }
+
+    .tab-panel {
+      min-height: 0;
+      display: none;
+      height: 100%;
+    }
+
+    .tab-panel.active {
+      display: grid;
+      grid-template-rows: 1fr auto;
+    }
+
+    .tab-panel.schedules.active {
+      grid-template-rows: auto 1fr;
+    }
+
+    .sched-wrap {
+      padding: 12px;
+      min-height: 0;
+      overflow: auto;
+      display: grid;
+      gap: 10px;
+      align-content: start;
+    }
+
+    .sched-form {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fffdfa;
+      padding: 10px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .sched-status {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.76rem;
+      color: var(--muted);
+      min-height: 18px;
+    }
+
+    .sched-status.error {
+      color: #9b3c3c;
+    }
+
+    .sched-status.ok {
+      color: #0e8f73;
+    }
+
+    .sched-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .sched-grid.single {
+      grid-template-columns: 1fr;
+    }
+
+    .sched-time-entry {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr 1fr auto;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .sched-time-entry.frequency {
+      grid-template-columns: 1fr auto 1fr;
+    }
+
+    .time-join {
+      text-align: center;
+      font-family: "IBM Plex Mono", monospace;
+      color: var(--muted);
+    }
+
+    .sched-time-rows {
+      display: grid;
+      gap: 8px;
+    }
+
+    .days {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.78rem;
+    }
+
+    .day-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .sched-list {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+      overflow: hidden;
+    }
+
+    .sched-head, .sched-row {
+      display: grid;
+      grid-template-columns: 1.4fr 1fr 0.8fr 0.7fr 0.9fr;
+      gap: 8px;
+      padding: 8px 10px;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.76rem;
+      align-items: center;
+    }
+
+    .sched-head {
+      background: #fcfaf5;
+      border-bottom: 1px solid var(--line);
+      font-weight: 600;
+    }
+
+    .sched-row {
+      border-bottom: 1px solid var(--line);
+    }
+
+    .sched-row:last-child {
+      border-bottom: 0;
+    }
+
+    .sched-details {
+      border-bottom: 1px solid var(--line);
+      background: #fcfaf5;
+      padding: 8px 12px 10px 28px;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.74rem;
+      color: var(--muted);
+      display: grid;
+      gap: 4px;
+    }
+
+    .sched-row-title {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .sched-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .caret-btn {
+      width: 18px;
+      height: 18px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      padding: 0;
+      font-size: 0.72rem;
+      line-height: 1;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+    }
+
+    .sched-actions {
+      display: flex;
+      gap: 6px;
+      justify-content: flex-end;
+    }
+
+    .btn-mini {
+      padding: 5px 8px;
+      font-size: 0.72rem;
+      border-radius: 8px;
+      cursor: pointer;
     }
 
     .msg {
@@ -410,25 +659,90 @@ def index() -> HTMLResponse:
   </style>
 </head>
 <body>
-  <div class="app">
+  <div class="global-tabs">
+    <button id="tab-chat" class="tab-btn active" onclick="switchTab('chat')">Chat</button>
+    <button id="tab-schedules" class="tab-btn" onclick="switchTab('schedules')">Scheduled Tasks</button>
+  </div>
+  <div id="app-root" class="app">
     <section class="panel chat">
       <div class="chat-header">
         <h1>Zubot Local Chat</h1>
         <div class="sub">Session-based chat with context + daily memory refresh</div>
       </div>
-      <div id="messages" class="messages">
-        <div class="msg bot">Try: "what time is it?", "weather tomorrow", or "sunrise today".</div>
+      <div id="panel-chat" class="tab-panel active">
+        <div id="messages" class="messages">
+          <div class="msg bot">Try: "what time is it?", "weather tomorrow", or "sunrise today".</div>
+        </div>
+        <div class="composer">
+          <div class="row">
+            <input id="session" placeholder="Session ID" value="default" />
+            <input id="msg" placeholder="Ask Zubot..." />
+          </div>
+          <div class="row">
+            <button class="primary" onclick="sendMsg()">Send</button>
+            <button class="warn" onclick="resetSession()">Reset Session</button>
+          </div>
+          <div id="status" class="status"></div>
+        </div>
       </div>
-      <div class="composer">
-        <div class="row">
-          <input id="session" placeholder="Session ID" value="default" />
-          <input id="msg" placeholder="Ask Zubot..." />
+      <div id="panel-schedules" class="tab-panel schedules">
+        <div class="sched-wrap">
+          <div class="sched-form">
+            <div class="sched-grid">
+              <input id="sched-name" placeholder="Schedule Name" />
+              <select id="sched-task-id"></select>
+            </div>
+            <div class="sched-grid">
+              <select id="sched-mode" onchange="onScheduleModeChange()">
+                <option value="frequency">frequency</option>
+                <option value="calendar">calendar</option>
+              </select>
+              <label class="day-item"><input id="sched-enabled" type="checkbox" checked /> enabled</label>
+            </div>
+            <div class="sched-time-entry frequency" id="sched-frequency-row">
+              <input id="sched-frequency-hours" type="number" min="0" step="1" inputmode="numeric" placeholder="Hours" />
+              <span class="time-join">:</span>
+              <input id="sched-frequency-minutes" type="number" min="0" max="59" step="1" inputmode="numeric" placeholder="Minutes" />
+            </div>
+            <div id="sched-calendar-fields" style="display:none;">
+              <div class="sched-grid">
+                <select id="sched-timezone">
+                  <option value="America/New_York">America/New_York</option>
+                </select>
+                <div></div>
+              </div>
+              <div id="sched-calendar-time-rows" class="sched-time-rows"></div>
+              <div class="row">
+                <button onclick="addCalendarRunTimeRow()">Add Another Time</button>
+              </div>
+              <div class="days">
+                <label class="day-item"><input type="checkbox" value="mon" class="sched-day" />mon</label>
+                <label class="day-item"><input type="checkbox" value="tue" class="sched-day" />tue</label>
+                <label class="day-item"><input type="checkbox" value="wed" class="sched-day" />wed</label>
+                <label class="day-item"><input type="checkbox" value="thu" class="sched-day" />thu</label>
+                <label class="day-item"><input type="checkbox" value="fri" class="sched-day" />fri</label>
+                <label class="day-item"><input type="checkbox" value="sat" class="sched-day" />sat</label>
+                <label class="day-item"><input type="checkbox" value="sun" class="sched-day" />sun</label>
+              </div>
+            </div>
+            <div class="row">
+              <button class="primary" onclick="saveSchedule()">Save Schedule</button>
+              <button onclick="clearScheduleForm()">Clear</button>
+            </div>
+            <div id="sched-form-status" class="sched-status"></div>
+            <div class="worker-meta">Switching mode from calendar to frequency will clear calendar rows on save.</div>
+          </div>
+          <div class="sched-list">
+            <div class="sched-head">
+              <div>name</div>
+              <div>config item</div>
+              <div>mode</div>
+              <div>enabled</div>
+              <div>actions</div>
+            </div>
+            <div id="schedules-list"></div>
+          </div>
         </div>
-        <div class="row">
-          <button class="primary" onclick="sendMsg()">Send</button>
-          <button class="warn" onclick="resetSession()">Reset Session</button>
-        </div>
-        <div id="status" class="status"></div>
       </div>
     </section>
 
@@ -607,6 +921,23 @@ def index() -> HTMLResponse:
         if (window.__zubotFallbackActive) return;
         window.__zubotFallbackActive = true;
 
+        window.switchTab = function (tabName) {
+          var appRoot = el('app-root');
+          var chat = el('panel-chat');
+          var schedules = el('panel-schedules');
+          var tabChat = el('tab-chat');
+          var tabSchedules = el('tab-schedules');
+          var useSchedules = tabName === 'schedules';
+          if (chat && chat.classList) chat.classList.toggle('active', !useSchedules);
+          if (schedules && schedules.classList) schedules.classList.toggle('active', useSchedules);
+          if (tabChat && tabChat.classList) tabChat.classList.toggle('active', !useSchedules);
+          if (tabSchedules && tabSchedules.classList) tabSchedules.classList.toggle('active', useSchedules);
+          if (appRoot && appRoot.classList) appRoot.classList.toggle('schedules-mode', useSchedules);
+          if (useSchedules && typeof window.refreshScheduleManager === 'function') {
+            window.refreshScheduleManager();
+          }
+        };
+
         window.sendMsg = function () {
           var msgInput = el('msg');
           var sessionInput = el('session');
@@ -680,7 +1011,499 @@ def index() -> HTMLResponse:
     const msgCountPill = document.getElementById('msgcount-pill');
     const workersEl = document.getElementById('workers');
     const centralStatusEl = document.getElementById('central-status');
+    const appRoot = document.getElementById('app-root');
+    const panelChat = document.getElementById('panel-chat');
+    const panelSchedules = document.getElementById('panel-schedules');
+    const tabChat = document.getElementById('tab-chat');
+    const tabSchedules = document.getElementById('tab-schedules');
+    const schedulesListEl = document.getElementById('schedules-list');
+    const scheduleTaskSelect = document.getElementById('sched-task-id');
+    const scheduleModeSelect = document.getElementById('sched-mode');
+    const scheduleEnabledCheckbox = document.getElementById('sched-enabled');
+    const scheduleCalendarFields = document.getElementById('sched-calendar-fields');
+    const scheduleFrequencyRow = document.getElementById('sched-frequency-row');
+    const scheduleNameInput = document.getElementById('sched-name');
+    const scheduleFrequencyHours = document.getElementById('sched-frequency-hours');
+    const scheduleFrequencyMinutes = document.getElementById('sched-frequency-minutes');
+    const scheduleCalendarRows = document.getElementById('sched-calendar-time-rows');
+    const scheduleFormStatus = document.getElementById('sched-form-status');
     let workerPollTimer = null;
+    let currentUiTab = 'chat';
+    let cachedSchedules = [];
+    let scheduleEditingId = null;
+    let expandedScheduleIds = new Set();
+
+    function switchTab(tabName) {
+      currentUiTab = tabName === 'schedules' ? 'schedules' : 'chat';
+      const chatActive = currentUiTab === 'chat';
+      panelChat.classList.toggle('active', chatActive);
+      panelSchedules.classList.toggle('active', !chatActive);
+      tabChat.classList.toggle('active', chatActive);
+      tabSchedules.classList.toggle('active', !chatActive);
+      if (appRoot && appRoot.classList) {
+        appRoot.classList.toggle('schedules-mode', !chatActive);
+      }
+      if (!chatActive) {
+        refreshScheduleManager();
+      }
+    }
+
+    function onScheduleModeChange() {
+      const mode = scheduleModeSelect ? scheduleModeSelect.value : 'frequency';
+      const isCalendar = mode === 'calendar';
+      if (scheduleCalendarFields) scheduleCalendarFields.style.display = isCalendar ? 'block' : 'none';
+      if (scheduleFrequencyRow) scheduleFrequencyRow.style.display = isCalendar ? 'none' : 'grid';
+    }
+
+    function selectedScheduleDays() {
+      return Array.from(document.querySelectorAll('.sched-day'))
+        .filter((el) => el.checked)
+        .map((el) => el.value);
+    }
+
+    function setScheduleDays(days) {
+      const set = new Set(Array.isArray(days) ? days : []);
+      Array.from(document.querySelectorAll('.sched-day')).forEach((el) => {
+        el.checked = set.has(el.value);
+      });
+    }
+
+    function setScheduleFormStatus(text, level = 'info') {
+      if (!scheduleFormStatus) return;
+      scheduleFormStatus.textContent = text || '';
+      scheduleFormStatus.classList.remove('error', 'ok');
+      if (level === 'error') scheduleFormStatus.classList.add('error');
+      if (level === 'ok') scheduleFormStatus.classList.add('ok');
+    }
+
+    function bindNumericOnly(inputEl) {
+      if (!inputEl) return;
+      inputEl.addEventListener('input', () => {
+        const cleaned = String(inputEl.value || '').replace(/[^\\d]/g, '');
+        if (inputEl.value !== cleaned) inputEl.value = cleaned;
+      });
+    }
+
+    function parseIntegerField(rawValue) {
+      const text = String(rawValue == null ? '' : rawValue).trim();
+      if (!text) return null;
+      if (!/^\\d+$/.test(text)) return Number.NaN;
+      return Number.parseInt(text, 10);
+    }
+
+    function initSchedulePickers() {
+      bindNumericOnly(scheduleFrequencyHours);
+      bindNumericOnly(scheduleFrequencyMinutes);
+    }
+
+    function frequencyMinutesToHHMM(totalMinutes) {
+      const value = Number.parseInt(String(totalMinutes || 0), 10);
+      if (!Number.isFinite(value) || value <= 0) return '24:00';
+      const hours = Math.floor(value / 60);
+      const minutes = value % 60;
+      return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+    }
+
+    function frequencySelectorToMinutes() {
+      const hours = parseIntegerField(scheduleFrequencyHours ? scheduleFrequencyHours.value : '');
+      const minutes = parseIntegerField(scheduleFrequencyMinutes ? scheduleFrequencyMinutes.value : '');
+      if (hours === null || minutes === null) {
+        return { minutes: null, error: 'Frequency requires both hour and minute values.' };
+      }
+      if (!Number.isFinite(hours) || hours < 0) {
+        return { minutes: null, error: 'Frequency hours must be 0 or greater.' };
+      }
+      if (!Number.isFinite(minutes) || minutes < 0 || minutes > 59) {
+        return { minutes: null, error: 'Frequency minutes must be between 0 and 59.' };
+      }
+      const total = (hours * 60) + minutes;
+      if (total <= 0) {
+        return { minutes: null, error: 'Frequency must be greater than 00:00.' };
+      }
+      return { minutes: total, error: null };
+    }
+
+    function setFrequencySelectorsFromMinutes(totalMinutes) {
+      const safeTotal = Number.isFinite(Number(totalMinutes)) ? Number(totalMinutes) : 1440;
+      const hours = Math.floor(safeTotal / 60);
+      const minutes = safeTotal % 60;
+      if (scheduleFrequencyHours) scheduleFrequencyHours.value = String(Math.max(0, hours));
+      if (scheduleFrequencyMinutes) scheduleFrequencyMinutes.value = String(Math.max(0, Math.min(59, minutes)));
+    }
+
+    function formatCalendarTime(hhmm) {
+      const match = String(hhmm || '').match(/^([01]\\d|2[0-3]):([0-5]\\d)$/);
+      if (!match) return hhmm || '';
+      let hour = Number.parseInt(match[1], 10);
+      const minute = match[2];
+      const suffix = hour >= 12 ? 'PM' : 'AM';
+      if (hour === 0) hour = 12;
+      if (hour > 12) hour -= 12;
+      return `${hour}:${minute} ${suffix}`;
+    }
+
+    function parseHHMM(hhmm) {
+      const match = String(hhmm || '').match(/^([01]\\d|2[0-3]):([0-5]\\d)$/);
+      if (!match) return null;
+      return {
+        hour24: Number.parseInt(match[1], 10),
+        minute: Number.parseInt(match[2], 10),
+      };
+    }
+
+    function hhmmToRowParts(hhmm) {
+      const parsed = parseHHMM(hhmm);
+      if (!parsed) return { hour12: 9, minute: 0, ampm: 'AM' };
+      let hour12 = parsed.hour24;
+      const ampm = hour12 >= 12 ? 'PM' : 'AM';
+      if (hour12 === 0) hour12 = 12;
+      else if (hour12 > 12) hour12 -= 12;
+      return { hour12, minute: parsed.minute, ampm };
+    }
+
+    function rowPartsToHHMM(hour12, minute, ampm) {
+      let h = Number.parseInt(String(hour12), 10);
+      const m = Number.parseInt(String(minute), 10);
+      const suffix = String(ampm || 'AM').toUpperCase();
+      if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+      if (h < 1 || h > 12 || m < 0 || m > 59) return null;
+      if (suffix === 'AM') {
+        if (h === 12) h = 0;
+      } else {
+        if (h !== 12) h += 12;
+      }
+      return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+    }
+
+    function addCalendarRunTimeRow(initialHHMM = null) {
+      if (!scheduleCalendarRows) return;
+      const row = document.createElement('div');
+      row.className = 'sched-time-entry';
+      const initial = hhmmToRowParts(initialHHMM);
+
+      const hourInput = document.createElement('input');
+      hourInput.type = 'number';
+      hourInput.className = 'sched-time-hour';
+      hourInput.inputMode = 'numeric';
+      hourInput.step = '1';
+      hourInput.min = '1';
+      hourInput.max = '12';
+      hourInput.placeholder = 'HH';
+      hourInput.value = String(initial.hour12);
+      bindNumericOnly(hourInput);
+
+      const minuteInput = document.createElement('input');
+      minuteInput.type = 'number';
+      minuteInput.className = 'sched-time-minute';
+      minuteInput.inputMode = 'numeric';
+      minuteInput.step = '1';
+      minuteInput.min = '0';
+      minuteInput.max = '59';
+      minuteInput.placeholder = 'MM';
+      minuteInput.value = String(initial.minute);
+      bindNumericOnly(minuteInput);
+
+      const ampmSel = document.createElement('select');
+      ampmSel.className = 'sched-time-ampm';
+      ampmSel.innerHTML = '<option value="AM">AM</option><option value="PM">PM</option>';
+      ampmSel.value = initial.ampm;
+
+      const join = document.createElement('span');
+      join.className = 'time-join';
+      join.textContent = ':';
+
+      const removeBtn = document.createElement('button');
+      removeBtn.className = 'warn';
+      removeBtn.textContent = 'Remove';
+      removeBtn.addEventListener('click', () => {
+        row.remove();
+      });
+
+      row.appendChild(hourInput);
+      row.appendChild(join);
+      row.appendChild(minuteInput);
+      row.appendChild(ampmSel);
+      row.appendChild(removeBtn);
+      scheduleCalendarRows.appendChild(row);
+    }
+
+    function clearCalendarRunTimeRows() {
+      if (!scheduleCalendarRows) return;
+      scheduleCalendarRows.innerHTML = '';
+    }
+
+    function collectCalendarRunTimes() {
+      if (!scheduleCalendarRows) return { times: [], error: 'Calendar time rows are unavailable.' };
+      const rows = Array.from(scheduleCalendarRows.querySelectorAll('.sched-time-entry'));
+      const out = [];
+      for (let index = 0; index < rows.length; index += 1) {
+        const row = rows[index];
+        const hour = row.querySelector('.sched-time-hour');
+        const minute = row.querySelector('.sched-time-minute');
+        const ampm = row.querySelector('.sched-time-ampm');
+        const hourValue = parseIntegerField(hour && hour.value);
+        const minuteValue = parseIntegerField(minute && minute.value);
+        if (hourValue === null || minuteValue === null) {
+          return { times: [], error: `Calendar row ${index + 1}: hour and minute are required.` };
+        }
+        if (!Number.isFinite(hourValue) || hourValue < 1 || hourValue > 12) {
+          return { times: [], error: `Calendar row ${index + 1}: hour must be between 1 and 12.` };
+        }
+        if (!Number.isFinite(minuteValue) || minuteValue < 0 || minuteValue > 59) {
+          return { times: [], error: `Calendar row ${index + 1}: minute must be between 0 and 59.` };
+        }
+        const hhmm = rowPartsToHHMM(hourValue, minuteValue, ampm && ampm.value);
+        if (!hhmm) {
+          return { times: [], error: `Calendar row ${index + 1}: invalid time.` };
+        }
+        out.push(hhmm);
+      }
+      return { times: Array.from(new Set(out)).sort(), error: null };
+    }
+
+    function normalizeRunTimes(runTimes) {
+      if (!Array.isArray(runTimes)) return [];
+      const normalized = [];
+      runTimes.forEach((row) => {
+        const value = typeof row === 'string' ? row : row && row.time_of_day;
+        const parsed = parseHHMM(value) ? value : null;
+        if (parsed && !normalized.includes(parsed)) normalized.push(parsed);
+      });
+      normalized.sort();
+      return normalized;
+    }
+
+    function clearScheduleForm() {
+      scheduleEditingId = null;
+      if (scheduleTaskSelect && scheduleTaskSelect.options.length > 0) {
+        scheduleTaskSelect.selectedIndex = 0;
+      }
+      if (scheduleNameInput) {
+        const selected = scheduleTaskSelect && scheduleTaskSelect.value ? scheduleTaskSelect.value : '';
+        scheduleNameInput.value = selected ? `${selected}_schedule` : '';
+      }
+      if (scheduleModeSelect) scheduleModeSelect.value = 'frequency';
+      setFrequencySelectorsFromMinutes(1440);
+      clearCalendarRunTimeRows();
+      addCalendarRunTimeRow('09:00');
+      document.getElementById('sched-timezone').value = 'America/New_York';
+      if (scheduleEnabledCheckbox) scheduleEnabledCheckbox.checked = true;
+      setScheduleDays([]);
+      setScheduleFormStatus('');
+      onScheduleModeChange();
+    }
+
+    async function loadDefinedTasks() {
+      const previousValue = scheduleTaskSelect ? scheduleTaskSelect.value : '';
+      const res = await fetch('/api/central/tasks');
+      const payload = await res.json();
+      const ok = !!(payload && payload.ok);
+      const tasks = payload && Array.isArray(payload.tasks) ? payload.tasks : [];
+      scheduleTaskSelect.innerHTML = '';
+      tasks.forEach((task) => {
+        const opt = document.createElement('option');
+        opt.value = task.task_id;
+        opt.textContent = `${task.task_id}${task.name ? ` (${task.name})` : ''}`;
+        scheduleTaskSelect.appendChild(opt);
+      });
+      if (!tasks.length) {
+        const opt = document.createElement('option');
+        opt.value = '';
+        opt.textContent = ok ? 'No predefined tasks configured' : 'Failed to load predefined tasks';
+        scheduleTaskSelect.appendChild(opt);
+        setScheduleFormStatus(ok ? 'No configured tasks found in config.' : 'Failed to load configured tasks.', ok ? 'info' : 'error');
+      } else if (previousValue && tasks.some((task) => task.task_id === previousValue)) {
+        scheduleTaskSelect.value = previousValue;
+        setScheduleFormStatus('');
+      } else {
+        if (scheduleTaskSelect) scheduleTaskSelect.selectedIndex = 0;
+        setScheduleFormStatus('');
+      }
+      if (!scheduleEditingId && scheduleNameInput) {
+        const selected = scheduleTaskSelect && scheduleTaskSelect.value ? scheduleTaskSelect.value : '';
+        scheduleNameInput.value = selected ? `${selected}_schedule` : '';
+      }
+    }
+
+    function editSchedule(scheduleId) {
+      const item = cachedSchedules.find((row) => row.schedule_id === scheduleId);
+      if (!item) return;
+      scheduleEditingId = item.schedule_id || null;
+      if (scheduleNameInput) scheduleNameInput.value = item.schedule_id || '';
+      if (scheduleTaskSelect) scheduleTaskSelect.value = item.task_id || item.profile_id || '';
+      if (scheduleModeSelect) scheduleModeSelect.value = item.mode || 'frequency';
+      setFrequencySelectorsFromMinutes(item.run_frequency_minutes);
+      if (scheduleEnabledCheckbox) scheduleEnabledCheckbox.checked = !!item.enabled;
+      document.getElementById('sched-timezone').value = item.timezone || 'America/New_York';
+      clearCalendarRunTimeRows();
+      const runTimes = normalizeRunTimes(item.run_times);
+      if (runTimes.length) {
+        runTimes.forEach((time) => addCalendarRunTimeRow(time));
+      } else {
+        addCalendarRunTimeRow('09:00');
+      }
+      setScheduleDays(item.days_of_week || []);
+      setScheduleFormStatus(`Editing ${scheduleEditingId}`, 'ok');
+      onScheduleModeChange();
+    }
+
+    async function deleteSchedule(scheduleId) {
+      if (!window.confirm(`Delete schedule ${scheduleId}?`)) return;
+      setBusyStatus(true, `Deleting ${scheduleId}...`);
+      try {
+        const res = await fetch(`/api/central/schedules/${encodeURIComponent(scheduleId)}`, { method: 'DELETE' });
+        const body = await res.json();
+        if (!body || !body.ok) {
+          setScheduleFormStatus(body && body.error ? body.error : `Failed to delete ${scheduleId}.`, 'error');
+        } else {
+          setScheduleFormStatus(`Deleted ${scheduleId}.`, 'ok');
+        }
+      } catch (_err) {
+        setScheduleFormStatus(`Failed to delete ${scheduleId}.`, 'error');
+      } finally {
+        setBusyStatus(false, '');
+        await refreshScheduleManager();
+      }
+    }
+
+    function renderSchedulesList(payload) {
+      const schedules = payload && Array.isArray(payload.schedules) ? payload.schedules : [];
+      cachedSchedules = schedules;
+      if (!schedules.length) {
+        schedulesListEl.innerHTML = '<div class="sched-row"><div>(none)</div><div>-</div><div>-</div><div>-</div><div>-</div></div>';
+        return;
+      }
+      schedulesListEl.innerHTML = schedules.map((row) => {
+        const id = row.schedule_id || '';
+        const taskId = row.task_id || row.profile_id || '';
+        const expanded = expandedScheduleIds.has(id);
+        const runTimes = normalizeRunTimes(row.run_times);
+        const dayList = Array.isArray(row.days_of_week) ? row.days_of_week.join(', ') : '-';
+        const frequencyLabel = frequencyMinutesToHHMM(row.run_frequency_minutes);
+        const detailLines = row.mode === 'frequency'
+          ? `<div>frequency: ${frequencyLabel}</div>`
+          : `${runTimes.map((time) => `<div>time: ${formatCalendarTime(time)}</div>`).join('')}<div>days: ${dayList || '-'}</div><div>timezone: ${row.timezone || 'America/New_York'}</div>`;
+        return `
+          <div class="sched-row">
+            <div class="sched-row-title">
+              <button class="caret-btn" data-toggle-schedule="${id}" title="Show details">${expanded ? 'v' : '>'}</button>
+              <span class="sched-name" title="${id}">${id}</span>
+            </div>
+            <div title="${taskId}">${taskId}</div>
+            <div>${row.mode || '-'}</div>
+            <div>${row.enabled ? 'yes' : 'no'}</div>
+            <div class="sched-actions">
+              <button class="btn-mini warn" data-delete-schedule="${id}">Delete</button>
+            </div>
+          </div>
+          ${expanded ? `<div class="sched-details">${detailLines || '<div>(no details)</div>'}</div>` : ''}
+        `;
+      }).join('');
+
+      schedulesListEl.querySelectorAll('[data-toggle-schedule]').forEach((btn) => {
+        btn.addEventListener('click', (evt) => {
+          const scheduleId = evt.currentTarget.getAttribute('data-toggle-schedule');
+          if (!scheduleId) return;
+          if (expandedScheduleIds.has(scheduleId)) expandedScheduleIds.delete(scheduleId);
+          else expandedScheduleIds.add(scheduleId);
+          renderSchedulesList({ schedules: cachedSchedules });
+        });
+      });
+      schedulesListEl.querySelectorAll('[data-delete-schedule]').forEach((btn) => {
+        btn.addEventListener('click', (evt) => {
+          const scheduleId = evt.currentTarget.getAttribute('data-delete-schedule');
+          if (scheduleId) deleteSchedule(scheduleId);
+        });
+      });
+    }
+
+    async function refreshScheduleManager() {
+      try {
+        await loadDefinedTasks();
+        const res = await fetch('/api/central/schedules');
+        const payload = await res.json();
+        renderSchedulesList(payload);
+      } catch (_err) {
+        schedulesListEl.innerHTML = '<div class="sched-row"><div>Failed to load schedules.</div><div>-</div><div>-</div><div>-</div><div>-</div></div>';
+      }
+    }
+
+    function toScheduleId(name, taskId) {
+      const text = String(name || '').trim().toLowerCase();
+      if (!text) return null;
+      const slug = text.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40);
+      const taskSlug = String(taskId || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 20);
+      if (!slug) return null;
+      return `${taskSlug || 'task'}_${slug}`;
+    }
+
+    async function saveSchedule() {
+      const mode = scheduleModeSelect.value;
+      const scheduleName = scheduleNameInput ? scheduleNameInput.value : '';
+      const taskId = scheduleTaskSelect ? scheduleTaskSelect.value : '';
+      const frequencyValidation = frequencySelectorToMinutes();
+      const calendarValidation = collectCalendarRunTimes();
+      const selectedDays = selectedScheduleDays();
+      const scheduleId = scheduleEditingId || toScheduleId(scheduleName, taskId);
+
+      if (!scheduleId) {
+        setScheduleFormStatus('Schedule name is required.', 'error');
+        return;
+      }
+      if (!taskId) {
+        setScheduleFormStatus('Choose a config item before saving.', 'error');
+        return;
+      }
+      if (mode === 'frequency' && frequencyValidation.error) {
+        setScheduleFormStatus(frequencyValidation.error, 'error');
+        return;
+      }
+      if (mode === 'calendar' && calendarValidation.error) {
+        setScheduleFormStatus(calendarValidation.error, 'error');
+        return;
+      }
+      if (mode === 'calendar' && calendarValidation.times.length === 0) {
+        setScheduleFormStatus('Add at least one calendar run time.', 'error');
+        return;
+      }
+      if (mode === 'calendar' && selectedDays.length === 0) {
+        setScheduleFormStatus('Select at least one day for calendar mode.', 'error');
+        return;
+      }
+
+      const body = {
+        schedule_id: scheduleId,
+        task_id: taskId,
+        enabled: !!scheduleEnabledCheckbox.checked,
+        mode,
+        execution_order: 100,
+        run_frequency_minutes: mode === 'frequency' ? frequencyValidation.minutes : null,
+        timezone: 'America/New_York',
+        run_times: mode === 'calendar' ? calendarValidation.times : [],
+        days_of_week: mode === 'calendar' ? selectedDays : [],
+      };
+
+      setBusyStatus(true, 'Saving schedule...');
+      try {
+        const res = await fetch('/api/central/schedules', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(body),
+        });
+        const payload = await res.json();
+        if (payload && payload.ok) {
+          clearScheduleForm();
+          await refreshScheduleManager();
+          setScheduleFormStatus(`Saved ${payload.schedule_id || scheduleId}.`, 'ok');
+        } else {
+          setScheduleFormStatus(payload && payload.error ? payload.error : 'Failed to save schedule.', 'error');
+        }
+      } catch (_err) {
+        setScheduleFormStatus('Failed to save schedule.', 'error');
+      } finally {
+        setBusyStatus(false, '');
+      }
+    }
 
     function appendMessage(role, text) {
       const div = document.createElement('div');
@@ -838,7 +1661,7 @@ def index() -> HTMLResponse:
         });
       }
 
-      centralStatusEl.textContent = lines.join('\n');
+      centralStatusEl.textContent = lines.join('\\n');
     }
 
     async function refreshCentralStatus() {
@@ -992,10 +1815,28 @@ def index() -> HTMLResponse:
       initSession(true);
     });
 
+    window.switchTab = switchTab;
+    window.onScheduleModeChange = onScheduleModeChange;
+    window.clearScheduleForm = clearScheduleForm;
+    window.refreshScheduleManager = refreshScheduleManager;
+    window.saveSchedule = saveSchedule;
+    window.addCalendarRunTimeRow = addCalendarRunTimeRow;
+
     workerPollTimer = setInterval(() => {
       refreshWorkers();
       refreshCentralStatus();
     }, 1200);
+    initSchedulePickers();
+    if (scheduleTaskSelect) {
+      scheduleTaskSelect.addEventListener('change', () => {
+        if (!scheduleEditingId && scheduleNameInput) {
+          const selected = scheduleTaskSelect.value || '';
+          scheduleNameInput.value = selected ? `${selected}_schedule` : '';
+        }
+      });
+    }
+    onScheduleModeChange();
+    clearScheduleForm();
     initSession(true);
     window.__zubotRichUiInitDone = true;
   </script>

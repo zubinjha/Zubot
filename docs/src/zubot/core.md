@@ -314,7 +314,6 @@ Primary module:
 
 Responsibilities:
 - persist defined-task definitions and run queue state in SQLite
-- sync configured schedules from `task_agents.schedules`
 - enqueue due runs based on interval cadence or calendar wall-clock cadence
 - enqueue manual runs for on-demand profile triggers
 - claim queued runs deterministically for consumer processing
@@ -332,21 +331,15 @@ Primary module:
 - `src/zubot/core/task_agent_runner.py`
 
 Responsibilities:
-- resolve task-agent profile config from `task_agents.profiles`
+- resolve predefined task scripts from `pre_defined_tasks.tasks`
 - generate textual run descriptions for user-facing check-in
-- resolve and validate configured `model_alias`
-- apply profile-level `tool_access`/`skill_access`/`preload_files`
-- load task-agent base context identity:
-  - `context/KERNEL.md`
-  - `context/TASK_AGENT.md`
-  - `context/TASK_SOUL.md`
-  - `context/USER.md`
-- load recent daily summary context for run continuity
-- execute profile runs through `SubAgentRunner` and return normalized run result payloads
+- execute predefined scripts through a controlled subprocess runner
+- pass run payload context to scripts via `ZUBOT_TASK_PAYLOAD_JSON`
+- return normalized run result payloads
 
 Behavior note:
-- execution is profile-driven and bounded by configured tool/skill/context access
-- deeper per-profile handlers and orchestration hooks are added incrementally
+- execution is deterministic script-based and bounded by configured entrypoint + timeout
+- deeper task routing/parameter schemas can be layered on top of this contract
 
 ## Worker Capacity Policy
 

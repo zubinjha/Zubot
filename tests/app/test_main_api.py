@@ -77,6 +77,38 @@ class _FakeRuntimeService:
     def central_metrics(self):
         return {"ok": True, "runtime": {"queued_count": 0, "warnings": []}}
 
+    def central_list_defined_tasks(self):
+        return {"ok": True, "tasks": [{"task_id": "task_a", "name": "Task A"}]}
+
+    def central_upsert_schedule(
+        self,
+        *,
+        schedule_id: str | None,
+        task_id: str,
+        enabled: bool,
+        mode: str,
+        execution_order: int,
+        run_frequency_minutes: int | None = None,
+        timezone: str | None = None,
+        run_times: list[str] | None = None,
+        days_of_week: list[str] | None = None,
+    ):
+        return {
+            "ok": True,
+            "schedule_id": schedule_id or "sched_new",
+            "task_id": task_id,
+            "enabled": enabled,
+            "mode": mode,
+            "execution_order": execution_order,
+            "run_frequency_minutes": run_frequency_minutes,
+            "timezone": timezone,
+            "run_times": run_times or [],
+            "days_of_week": days_of_week or [],
+        }
+
+    def central_delete_schedule(self, *, schedule_id: str):
+        return {"ok": True, "schedule_id": schedule_id, "deleted": 1}
+
     def central_trigger_profile(self, *, profile_id: str, description: str | None = None):
         return {"ok": True, "profile_id": profile_id, "description": description}
 
@@ -172,6 +204,27 @@ def test_central_endpoints(monkeypatch):
     assert metrics.status_code == 200
     assert metrics.json()["ok"] is True
 
+    tasks = client.get("/api/central/tasks")
+    assert tasks.status_code == 200
+    assert tasks.json()["ok"] is True
+
+    save_sched = client.post(
+        "/api/central/schedules",
+        json={
+            "task_id": "task_a",
+            "enabled": True,
+            "mode": "frequency",
+            "execution_order": 100,
+            "run_frequency_minutes": 60,
+        },
+    )
+    assert save_sched.status_code == 200
+    assert save_sched.json()["ok"] is True
+
+    del_sched = client.delete("/api/central/schedules/sched_x")
+    assert del_sched.status_code == 200
+    assert del_sched.json()["ok"] is True
+
     trigger = client.post("/api/central/trigger/profile_x", json={"description": "manual"})
     assert trigger.status_code == 200
     assert trigger.json()["profile_id"] == "profile_x"
@@ -196,4 +249,3 @@ def test_startup_hook_initializes_runtime_client_mode(monkeypatch):
     assert len(calls) == 1
     assert calls[0]["start_central_if_enabled"] is False
     assert calls[0]["source"] == "app"
-

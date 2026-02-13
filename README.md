@@ -45,6 +45,7 @@ Operations guidance for long-running mode lives in [docs/src/zubot/operations.md
   - session event persistence + daily memory helpers
   - SQLite-backed daily memory events/summaries + day-status + summary-job queue
   - background memory-summary worker (non-blocking queue drain)
+  - predefined task execution support (`pre_defined_tasks` config + script entrypoints)
 - Daemon-first runtime facade:
   - shared runtime service in `src/zubot/runtime/service.py`
   - daemon entrypoint in `src/zubot/daemon/main.py`
@@ -52,6 +53,13 @@ Operations guidance for long-running mode lives in [docs/src/zubot/operations.md
   - `context/TASK_AGENT.md`
   - `context/TASK_SOUL.md`
 - Automated tests in `tests/` with `pytest`.
+
+## Predefined Tasks
+- Configure executable scheduled tasks in `config/config.json` under:
+  - `pre_defined_tasks.tasks`
+- Script entrypoints should be repository-relative paths (for example `src/zubot/predefined_tasks/indeed_daily_search.py`).
+- Scheduler rows live in SQLite (`defined_tasks` / `defined_tasks_run_times`) and reference `profile_id == task_id`.
+- Central service resolves `task_id -> pre_defined_tasks.tasks.<task_id>` at execution time.
 
 ## Agent Resume Checklist
 For new agents or fresh sessions, use this order:
@@ -116,8 +124,6 @@ Choose one of these startup modes based on what you want to run.
     - `context/TASK_AGENT.md`
     - `context/TASK_SOUL.md`
     - `context/USER.md`
-  - Profile-specific preload files:
-    - `task_agents.profiles.<profile_id>.preload_files`
   - Daily memory auto-load:
     - recent daily memory via `memory.autoload_summary_days` (default `2`)
 
@@ -144,10 +150,13 @@ Choose one of these startup modes based on what you want to run.
   - `GET /api/central/status`
   - `POST /api/central/start`
   - `POST /api/central/stop`
+  - `GET /api/central/tasks`
   - `GET /api/central/schedules`
+  - `POST /api/central/schedules`
+  - `DELETE /api/central/schedules/{schedule_id}`
   - `GET /api/central/runs`
   - `GET /api/central/metrics`
-  - `POST /api/central/trigger/{profile_id}`
+  - `POST /api/central/trigger/{task_id}`
 - Session reset clears chat working context but preserves persisted daily memory in SQLite.
 - Daily memory is DB-backed in `memory/central/zubot_core.db`:
   - raw events (`daily_memory_events`)
@@ -162,6 +171,8 @@ Choose one of these startup modes based on what you want to run.
   - `reset_worker_context`, `get_worker`, `list_workers`, `list_worker_events`
 - UI now includes:
   - chat-style message timeline
+  - Chat/Scheduled Tasks tab split in the left panel
+  - scheduled-task editor/list (create, edit, delete with confirm modal)
   - live in-flight progress states (thinking/context/tool-check phases)
   - post-response tool-chain summary in Progress (exact tool names + status)
   - worker status panel (up to 3 shown) with per-worker kill control

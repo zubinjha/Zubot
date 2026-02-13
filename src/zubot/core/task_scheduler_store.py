@@ -176,7 +176,7 @@ def _parse_run_time_specs(item: dict[str, Any]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     run_times = item.get("run_times")
 
-    def add_spec(time_of_day: str | None, timezone_name: str | None, days_value: Any) -> None:
+    def add_spec(time_of_day: str | None, timezone_name: str | None) -> None:
         normalized_time = _normalize_time_str(time_of_day)
         if normalized_time is None:
             return
@@ -185,37 +185,49 @@ def _parse_run_time_specs(item: dict[str, Any]) -> list[dict[str, Any]]:
             ZoneInfo(tz)
         except Exception:
             return
-        days = _normalize_days_of_week(days_value)
-        out.append({"time_of_day": normalized_time, "timezone": tz, "days_of_week": days})
+        out.append({"time_of_day": normalized_time, "timezone": tz})
 
     if isinstance(run_times, list):
         for entry in run_times:
             if isinstance(entry, str):
-                add_spec(entry, item.get("timezone"), item.get("days_of_week"))
+                add_spec(entry, item.get("timezone"))
                 continue
             if isinstance(entry, dict):
                 add_spec(
                     entry.get("time_of_day"),
                     entry.get("timezone") or item.get("timezone"),
-                    entry.get("days_of_week", item.get("days_of_week")),
                 )
 
     if not out:
-        add_spec(item.get("time_of_day"), item.get("timezone"), item.get("days_of_week"))
+        add_spec(item.get("time_of_day"), item.get("timezone"))
 
     deduped: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, tuple[str, ...]]] = set()
+    seen: set[tuple[str, str]] = set()
     for spec in out:
-        key = (
-            str(spec["time_of_day"]),
-            str(spec["timezone"]),
-            tuple(spec.get("days_of_week") or []),
-        )
+        key = (str(spec["time_of_day"]), str(spec["timezone"]))
         if key in seen:
             continue
         seen.add(key)
         deduped.append(spec)
     return deduped
+
+
+def _parse_schedule_days(item: dict[str, Any]) -> list[str]:
+    explicit_days = _normalize_days_of_week(item.get("days_of_week"))
+    if explicit_days:
+        return explicit_days
+
+    # Backward-compatible parse: if days were nested under run_times entries,
+    # aggregate them into schedule-level day constraints.
+    run_times = item.get("run_times")
+    if not isinstance(run_times, list):
+        return []
+    aggregated: set[str] = set()
+    for entry in run_times:
+        if isinstance(entry, dict):
+            for day in _normalize_days_of_week(entry.get("days_of_week")):
+                aggregated.add(day)
+    return [day for day in _WEEKDAY_ORDER if day in aggregated]
 
 
 class TaskSchedulerStore:
@@ -237,6 +249,7 @@ class TaskSchedulerStore:
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON;")
         return conn
 
     def _maybe_migrate_from_legacy_sqlite3(self) -> None:
@@ -281,12 +294,12 @@ class TaskSchedulerStore:
                     UNIQUE(schedule_id, time_of_day, timezone)
                 );
 
-                CREATE TABLE IF NOT EXISTS defined_tasks_run_times_days_of_week (
-                    run_time_id INTEGER NOT NULL,
+                CREATE TABLE IF NOT EXISTS defined_tasks_days_of_week (
+                    schedule_id TEXT NOT NULL,
                     day_of_week TEXT NOT NULL CHECK (day_of_week IN ('mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun')),
                     created_at TEXT NOT NULL,
-                    PRIMARY KEY(run_time_id, day_of_week),
-                    FOREIGN KEY(run_time_id) REFERENCES defined_tasks_run_times(run_time_id) ON DELETE CASCADE
+                    PRIMARY KEY(schedule_id, day_of_week),
+                    FOREIGN KEY(schedule_id) REFERENCES defined_tasks(schedule_id) ON DELETE CASCADE
                 );
 
                 CREATE TABLE IF NOT EXISTS defined_task_runs (
@@ -322,6 +335,8 @@ class TaskSchedulerStore:
                     ON defined_tasks(enabled, execution_order, schedule_id);
                 CREATE INDEX IF NOT EXISTS idx_defined_task_run_times_schedule_enabled
                     ON defined_tasks_run_times(schedule_id, enabled, time_of_day);
+                CREATE INDEX IF NOT EXISTS idx_defined_tasks_days_schedule
+                    ON defined_tasks_days_of_week(schedule_id, day_of_week);
                 CREATE INDEX IF NOT EXISTS idx_defined_task_runs_status_queued_at
                     ON defined_task_runs(status, queued_at);
                 CREATE INDEX IF NOT EXISTS idx_defined_task_runs_profile_queued_at
@@ -332,17 +347,41 @@ class TaskSchedulerStore:
                     ON defined_task_run_history(profile_id, finished_at);
                 """
             )
+            # One-time compatibility migration from older schema where weekdays
+            # were attached to run_time rows instead of schedule rows.
+            old_days_table = conn.execute(
+                """
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'table' AND name = 'defined_tasks_run_times_days_of_week';
+                """
+            ).fetchone()
+            if old_days_table is not None:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO defined_tasks_days_of_week(schedule_id, day_of_week, created_at)
+                    SELECT rt.schedule_id, rtd.day_of_week, COALESCE(rtd.created_at, ?)
+                    FROM defined_tasks_run_times_days_of_week rtd
+                    JOIN defined_tasks_run_times rt ON rt.run_time_id = rtd.run_time_id;
+                    """,
+                    (_iso(_utc_now()),),
+                )
+            # Safety cleanup: remove orphan child rows that may have been created
+            # earlier when foreign key enforcement was disabled.
+            conn.execute(
+                """
+                DELETE FROM defined_tasks_run_times
+                WHERE schedule_id NOT IN (SELECT schedule_id FROM defined_tasks);
+                """
+            )
+            conn.execute(
+                """
+                DELETE FROM defined_tasks_days_of_week
+                WHERE schedule_id NOT IN (SELECT schedule_id FROM defined_tasks);
+                """
+            )
 
     def _replace_run_times(self, conn: sqlite3.Connection, *, schedule_id: str, specs: list[dict[str, Any]], now: str) -> None:
-        existing = conn.execute(
-            "SELECT run_time_id FROM defined_tasks_run_times WHERE schedule_id = ?;",
-            (schedule_id,),
-        ).fetchall()
-        for row in existing:
-            conn.execute(
-                "DELETE FROM defined_tasks_run_times_days_of_week WHERE run_time_id = ?;",
-                (int(row["run_time_id"]),),
-            )
         conn.execute("DELETE FROM defined_tasks_run_times WHERE schedule_id = ?;", (schedule_id,))
 
         for spec in specs:
@@ -353,15 +392,17 @@ class TaskSchedulerStore:
                 """,
                 (schedule_id, str(spec["time_of_day"]), str(spec["timezone"]), now, now),
             )
-            run_time_id = int(conn.execute("SELECT last_insert_rowid() AS rid;").fetchone()["rid"])
-            for day in spec.get("days_of_week") or []:
-                conn.execute(
-                    """
-                    INSERT OR IGNORE INTO defined_tasks_run_times_days_of_week(run_time_id, day_of_week, created_at)
-                    VALUES (?, ?, ?);
-                    """,
-                    (run_time_id, str(day), now),
-                )
+
+    def _replace_schedule_days(self, conn: sqlite3.Connection, *, schedule_id: str, days: list[str], now: str) -> None:
+        conn.execute("DELETE FROM defined_tasks_days_of_week WHERE schedule_id = ?;", (schedule_id,))
+        for day in days:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO defined_tasks_days_of_week(schedule_id, day_of_week, created_at)
+                VALUES (?, ?, ?);
+                """,
+                (schedule_id, day, now),
+            )
 
     def sync_schedules(self, defined_tasks: list[dict[str, Any]]) -> dict[str, Any]:
         now = _iso(_utc_now())
@@ -383,6 +424,7 @@ class TaskSchedulerStore:
 
                 run_frequency_minutes: int | None
                 run_time_specs: list[dict[str, Any]] = []
+                schedule_days: list[str] = []
                 if mode == "frequency":
                     freq = item.get("run_frequency_minutes")
                     if not isinstance(freq, int) or freq <= 0:
@@ -391,6 +433,7 @@ class TaskSchedulerStore:
                 else:
                     run_frequency_minutes = None
                     run_time_specs = _parse_run_time_specs(item)
+                    schedule_days = _parse_schedule_days(item)
                     if not run_time_specs:
                         continue
 
@@ -422,35 +465,73 @@ class TaskSchedulerStore:
                 )
 
                 self._replace_run_times(conn, schedule_id=schedule_id, specs=run_time_specs, now=now)
+                self._replace_schedule_days(conn, schedule_id=schedule_id, days=schedule_days, now=now)
                 upserted += 1
         return {"ok": True, "upserted": upserted}
+
+    def upsert_schedule(self, schedule: dict[str, Any]) -> dict[str, Any]:
+        schedule_id = str(schedule.get("schedule_id") or "").strip()
+        profile_id = str(schedule.get("profile_id") or "").strip()
+        if not schedule_id:
+            return {"ok": False, "error": "schedule_id is required."}
+        if not profile_id:
+            return {"ok": False, "error": "profile_id is required."}
+        out = self.sync_schedules([schedule])
+        if not out.get("ok"):
+            return out
+        return {"ok": True, "schedule_id": schedule_id, "upserted": int(out.get("upserted") or 0)}
+
+    def delete_schedule(self, *, schedule_id: str) -> dict[str, Any]:
+        clean = schedule_id.strip()
+        if not clean:
+            return {"ok": False, "error": "schedule_id is required."}
+        with self._connect() as conn:
+            res = conn.execute("DELETE FROM defined_tasks WHERE schedule_id = ?;", (clean,))
+            deleted = int(res.rowcount or 0)
+        return {"ok": True, "schedule_id": clean, "deleted": deleted}
 
     def _load_run_times_for_schedule(self, conn: sqlite3.Connection, *, schedule_id: str) -> list[dict[str, Any]]:
         rows = conn.execute(
             """
-            SELECT rt.run_time_id, rt.time_of_day, rt.timezone, rt.enabled,
-                   GROUP_CONCAT(rtd.day_of_week) AS days_csv
+            SELECT rt.run_time_id, rt.time_of_day, rt.timezone, rt.enabled
             FROM defined_tasks_run_times rt
-            LEFT JOIN defined_tasks_run_times_days_of_week rtd ON rtd.run_time_id = rt.run_time_id
             WHERE rt.schedule_id = ?
-            GROUP BY rt.run_time_id, rt.time_of_day, rt.timezone, rt.enabled
             ORDER BY rt.time_of_day ASC;
             """,
             (schedule_id,),
         ).fetchall()
         out: list[dict[str, Any]] = []
         for row in rows:
-            days = _normalize_days_of_week(str(row["days_csv"])) if row["days_csv"] else []
             out.append(
                 {
                     "run_time_id": int(row["run_time_id"]),
                     "time_of_day": str(row["time_of_day"]),
                     "timezone": str(row["timezone"]),
-                    "days_of_week": days,
                     "enabled": bool(row["enabled"]),
                 }
             )
         return out
+
+    def _load_schedule_days(self, conn: sqlite3.Connection, *, schedule_id: str) -> list[str]:
+        rows = conn.execute(
+            """
+            SELECT day_of_week
+            FROM defined_tasks_days_of_week
+            WHERE schedule_id = ?
+            ORDER BY CASE day_of_week
+                WHEN 'mon' THEN 1
+                WHEN 'tue' THEN 2
+                WHEN 'wed' THEN 3
+                WHEN 'thu' THEN 4
+                WHEN 'fri' THEN 5
+                WHEN 'sat' THEN 6
+                WHEN 'sun' THEN 7
+                ELSE 99
+            END ASC;
+            """,
+            (schedule_id,),
+        ).fetchall()
+        return [str(row["day_of_week"]) for row in rows]
 
     def list_schedules(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
@@ -468,10 +549,19 @@ class TaskSchedulerStore:
             for row in rows:
                 schedule_id = str(row["schedule_id"])
                 run_times = self._load_run_times_for_schedule(conn, schedule_id=schedule_id)
+                schedule_days = self._load_schedule_days(conn, schedule_id=schedule_id)
                 first = run_times[0] if run_times else None
+                run_times_with_days = [
+                    {
+                        **item,
+                        "days_of_week": list(schedule_days),
+                    }
+                    for item in run_times
+                ]
                 out.append(
                     {
                         "schedule_id": schedule_id,
+                        "task_id": str(row["profile_id"]),
                         "profile_id": str(row["profile_id"]),
                         "enabled": bool(row["enabled"]),
                         "mode": str(row["mode"] or "frequency"),
@@ -485,11 +575,11 @@ class TaskSchedulerStore:
                         "last_status": row["last_status"],
                         "last_summary": row["last_summary"],
                         "last_error": row["last_error"],
-                        "run_times": run_times,
+                        "run_times": run_times_with_days,
                         # Compatibility facade for older callers.
                         "timezone": first["timezone"] if first else None,
                         "time_of_day": first["time_of_day"] if first else None,
-                        "days_of_week": list(first["days_of_week"]) if first else None,
+                        "days_of_week": list(schedule_days),
                         "catch_up_window_minutes": DEFAULT_CALENDAR_CATCHUP_MINUTES,
                         "max_runtime_sec": None,
                     }
@@ -533,19 +623,20 @@ class TaskSchedulerStore:
                         scheduled_fire_time = now_dt
                 else:
                     run_times = [item for item in self._load_run_times_for_schedule(conn, schedule_id=schedule_id) if item.get("enabled")]
+                    schedule_days = self._load_schedule_days(conn, schedule_id=schedule_id)
                     candidates: list[tuple[datetime, str, list[str]]] = []
                     for spec in run_times:
                         fire = _most_recent_calendar_fire(
                             now_dt=now_dt,
                             timezone_name=str(spec["timezone"]),
                             time_of_day=str(spec["time_of_day"]),
-                            days_of_week=list(spec.get("days_of_week") or []),
+                            days_of_week=list(schedule_days),
                         )
                         if fire is None:
                             continue
                         if now_dt > fire + timedelta(minutes=DEFAULT_CALENDAR_CATCHUP_MINUTES):
                             continue
-                        candidates.append((fire, str(spec["time_of_day"]), list(spec.get("days_of_week") or [])))
+                        candidates.append((fire, str(spec["time_of_day"]), list(schedule_days)))
 
                     if candidates:
                         chosen_fire, _chosen_time, _chosen_days = max(candidates, key=lambda item: item[0])

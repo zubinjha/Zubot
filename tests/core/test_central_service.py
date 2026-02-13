@@ -25,24 +25,15 @@ def configured_central(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
                     "queue_warning_threshold": 1,
                     "running_age_warning_sec": 0,
                 },
-                "task_agents": {
-                    "profiles": {
+                "pre_defined_tasks": {
+                    "tasks": {
                         "profile_a": {
                             "name": "Profile A",
-                            "instructions_template": "Do profile A work",
-                            "model_alias": "medium",
-                            "tool_access": [],
-                            "skill_access": [],
-                        }
-                    },
-                    "schedules": [
-                        {
-                            "schedule_id": "sched_a",
-                            "profile_id": "profile_a",
-                            "enabled": True,
-                            "run_frequency_minutes": 999999,
-                        }
-                    ],
+                            "entrypoint_path": "src/zubot/predefined_tasks/indeed_daily_search.py",
+                            "args": [],
+                            "timeout_sec": 120,
+                        },
+                    }
                 },
             }
         ),
@@ -135,11 +126,49 @@ def test_start_stop_lifecycle(configured_central):
     assert service.status()["service"]["running"] is False
 
 
-def test_list_schedules_syncs_from_config(configured_central):
+def test_list_schedules_reads_from_db(configured_central):
     service = CentralService()
+    service._store.sync_schedules(  # noqa: SLF001
+        [
+            {
+                "schedule_id": "sched_a",
+                "profile_id": "profile_a",
+                "enabled": True,
+                "run_frequency_minutes": 999999,
+            }
+        ]
+    )
     out = service.list_schedules()
     assert out["ok"] is True
     assert out["schedules"][0]["schedule_id"] == "sched_a"
+
+
+def test_defined_tasks_and_schedule_crud(configured_central):
+    service = CentralService()
+    tasks = service.list_defined_tasks()
+    assert tasks["ok"] is True
+    assert tasks["tasks"][0]["task_id"] == "profile_a"
+
+    upsert = service.upsert_schedule(
+        schedule_id="sched_crud",
+        task_id="profile_a",
+        enabled=True,
+        mode="calendar",
+        execution_order=50,
+        timezone="America/New_York",
+        run_times=["02:00", "14:00"],
+        days_of_week=["mon", "wed"],
+    )
+    assert upsert["ok"] is True
+
+    listed = service.list_schedules()
+    row = [item for item in listed["schedules"] if item["schedule_id"] == "sched_crud"][0]
+    assert row["task_id"] == "profile_a"
+    assert row["days_of_week"] == ["mon", "wed"]
+
+    deleted = service.delete_schedule(schedule_id="sched_crud")
+    assert deleted["ok"] is True
+    assert deleted["deleted"] == 1
 
 
 def test_central_service_concurrency_respects_setting(configured_central):

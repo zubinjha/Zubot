@@ -34,6 +34,15 @@ class _FakeCentral:
     def metrics(self) -> dict[str, Any]:
         return {"ok": True, "runtime": {"queued_count": 0}}
 
+    def list_defined_tasks(self) -> dict[str, Any]:
+        return {"ok": True, "tasks": [{"task_id": "task_a"}]}
+
+    def upsert_schedule(self, **kwargs) -> dict[str, Any]:
+        return {"ok": True, "schedule_id": kwargs.get("schedule_id") or "sched_new"}
+
+    def delete_schedule(self, *, schedule_id: str) -> dict[str, Any]:
+        return {"ok": True, "schedule_id": schedule_id, "deleted": 1}
+
     def trigger_profile(self, *, profile_id: str, description: str | None = None) -> dict[str, Any]:
         return {"ok": True, "profile_id": profile_id, "description": description}
 
@@ -140,3 +149,29 @@ def test_runtime_service_delegates_chat_module(monkeypatch):
     assert init["initialized"] is True
     reset = svc.reset_session(session_id="s1")
     assert reset["reset"] is True
+
+
+def test_runtime_service_central_schedule_crud(monkeypatch):
+    central = _FakeCentral()
+    monkeypatch.setattr("src.zubot.runtime.service.get_central_service", lambda: central)
+    monkeypatch.setattr("src.zubot.runtime.service.get_worker_manager", lambda: _FakeWorker())
+    monkeypatch.setattr("src.zubot.runtime.service.get_memory_summary_worker", lambda: _FakeMemoryWorker())
+
+    svc = RuntimeService()
+    tasks = svc.central_list_defined_tasks()
+    assert tasks["ok"] is True
+    assert tasks["tasks"][0]["task_id"] == "task_a"
+
+    upsert = svc.central_upsert_schedule(
+        schedule_id=None,
+        task_id="task_a",
+        enabled=True,
+        mode="frequency",
+        execution_order=100,
+        run_frequency_minutes=60,
+    )
+    assert upsert["ok"] is True
+
+    deleted = svc.central_delete_schedule(schedule_id="sched_x")
+    assert deleted["ok"] is True
+    assert deleted["deleted"] == 1

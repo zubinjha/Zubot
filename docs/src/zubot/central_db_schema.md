@@ -21,7 +21,7 @@ Source modules:
 - `schedule_id` TEXT PK
 - `profile_id` TEXT NOT NULL
 - `enabled` INTEGER NOT NULL
-- `mode` TEXT NOT NULL (`interval`/`calendar`)
+- `mode` TEXT NOT NULL (`frequency`/`calendar`)
 - `execution_order` INTEGER NOT NULL
 - `run_frequency_minutes` INTEGER
 - `last_scheduled_fire_time` TEXT
@@ -42,8 +42,8 @@ Source modules:
 - `created_at` TEXT NOT NULL
 - `updated_at` TEXT NOT NULL
 
-### `defined_tasks_run_times_days_of_week`
-- `run_time_id` INTEGER NOT NULL FK -> `defined_tasks_run_times(run_time_id)` (`ON DELETE CASCADE`)
+### `defined_tasks_days_of_week`
+- `schedule_id` TEXT NOT NULL FK -> `defined_tasks(schedule_id)` (`ON DELETE CASCADE`)
 - `day_of_week` TEXT NOT NULL (`mon`..`sun`)
 - `created_at` TEXT NOT NULL
 
@@ -113,11 +113,11 @@ Source modules:
 
 - `idx_defined_tasks_enabled_order(enabled, execution_order, schedule_id)` on `defined_tasks`
 - `idx_defined_task_run_times_schedule_enabled(schedule_id, enabled, time_of_day)` on `defined_tasks_run_times`
+- `idx_defined_tasks_days_schedule(schedule_id, day_of_week)` on `defined_tasks_days_of_week`
 - `idx_defined_task_runs_status_queued_at(status, queued_at)` on `defined_task_runs`
 - `idx_defined_task_runs_profile_queued_at(profile_id, queued_at)` on `defined_task_runs`
 - `idx_defined_task_run_history_status_finished_at(status, finished_at)` on `defined_task_run_history`
 - `idx_defined_task_run_history_profile_finished_at(profile_id, finished_at)` on `defined_task_run_history`
-- `idx_defined_tasks_run_times_schedule_enabled(schedule_id, enabled, time_of_day)`
 - `idx_day_memory_finalized(is_finalized)`
 - `idx_memory_summary_jobs_status_created(status, created_at, job_id)`
 - `idx_memory_summary_jobs_day_active(day)` with partial predicate `status IN ('queued','running')`

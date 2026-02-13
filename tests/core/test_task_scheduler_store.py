@@ -262,3 +262,77 @@ def test_calendar_schedule_contract_fields_roundtrip(tmp_path):
     assert sched["run_times"][0]["time_of_day"] == "02:00"
     assert sched["run_times"][0]["timezone"] == "America/New_York"
     assert sched["run_times"][0]["days_of_week"] == ["mon", "wed", "fri"]
+
+
+def test_mode_switch_calendar_to_frequency_clears_calendar_rows(tmp_path):
+    store = TaskSchedulerStore(db_path=tmp_path / "scheduler.sqlite3")
+    store.upsert_schedule(
+        {
+            "schedule_id": "sched_switch",
+            "profile_id": "profile_switch",
+            "enabled": True,
+            "mode": "calendar",
+            "execution_order": 10,
+            "run_times": ["02:00"],
+            "timezone": "America/New_York",
+            "days_of_week": ["mon", "tue"],
+        }
+    )
+    first = [x for x in store.list_schedules() if x["schedule_id"] == "sched_switch"][0]
+    assert first["run_times"]
+    assert first["days_of_week"] == ["mon", "tue"]
+
+    store.upsert_schedule(
+        {
+            "schedule_id": "sched_switch",
+            "profile_id": "profile_switch",
+            "enabled": True,
+            "mode": "frequency",
+            "execution_order": 10,
+            "run_frequency_minutes": 120,
+        }
+    )
+    second = [x for x in store.list_schedules() if x["schedule_id"] == "sched_switch"][0]
+    assert second["mode"] == "frequency"
+    assert second["run_times"] == []
+    assert second["days_of_week"] == []
+
+
+def test_delete_schedule_cascades_child_rows(tmp_path):
+    store = TaskSchedulerStore(db_path=tmp_path / "scheduler.sqlite3")
+    store.upsert_schedule(
+        {
+            "schedule_id": "sched_delete",
+            "profile_id": "profile_delete",
+            "enabled": True,
+            "mode": "calendar",
+            "execution_order": 10,
+            "run_times": ["02:00", "13:30"],
+            "timezone": "America/New_York",
+            "days_of_week": ["mon", "wed"],
+        }
+    )
+
+    with store._connect() as conn:  # noqa: SLF001 - test-only direct inspection
+        before_times = conn.execute(
+            "SELECT COUNT(*) AS c FROM defined_tasks_run_times WHERE schedule_id = 'sched_delete';"
+        ).fetchone()
+        before_days = conn.execute(
+            "SELECT COUNT(*) AS c FROM defined_tasks_days_of_week WHERE schedule_id = 'sched_delete';"
+        ).fetchone()
+    assert int(before_times["c"]) == 2
+    assert int(before_days["c"]) == 2
+
+    out = store.delete_schedule(schedule_id="sched_delete")
+    assert out["ok"] is True
+    assert out["deleted"] == 1
+
+    with store._connect() as conn:  # noqa: SLF001 - test-only direct inspection
+        after_times = conn.execute(
+            "SELECT COUNT(*) AS c FROM defined_tasks_run_times WHERE schedule_id = 'sched_delete';"
+        ).fetchone()
+        after_days = conn.execute(
+            "SELECT COUNT(*) AS c FROM defined_tasks_days_of_week WHERE schedule_id = 'sched_delete';"
+        ).fetchone()
+    assert int(after_times["c"]) == 0
+    assert int(after_days["c"]) == 0
