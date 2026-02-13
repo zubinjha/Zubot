@@ -191,33 +191,6 @@ def _clean_text(value: str, *, max_chars: int = 2000) -> str:
     return " ".join(value.strip().split())[:max_chars]
 
 
-def _is_high_signal_worker_event(event_type: str, payload: Any) -> bool:
-    e = event_type.strip().lower()
-    if any(token in e for token in ("complete", "done", "fail", "error", "blocked", "cancel")):
-        return True
-    if isinstance(payload, dict):
-        status = str(payload.get("status", "")).strip().lower()
-        if status in {"done", "failed", "blocked", "cancelled"}:
-            return True
-        if payload.get("error"):
-            return True
-    return False
-
-
-def _is_high_signal_task_agent_event(event_type: str, payload: Any) -> bool:
-    e = event_type.strip().lower()
-    if e in {"run_finished", "run_failed", "run_blocked"}:
-        return True
-    if isinstance(payload, dict):
-        status = str(payload.get("status", "")).strip().lower()
-        if status in {"done", "failed", "blocked"}:
-            return True
-        nested = payload.get("event_type")
-        if isinstance(nested, str) and nested.strip().lower() in {"run_finished", "run_failed", "run_blocked"}:
-            return True
-    return False
-
-
 def _log_daily_transcript_event(
     *,
     session_id: str,
@@ -280,44 +253,9 @@ def _log_daily_turn(
         metadata={"tools": ",".join(tools_used) if tools_used else None},
     )
 
-    for event in worker_events or []:
-        if not isinstance(event, dict):
-            continue
-        worker_id = str(event.get("worker_id") or "worker?")
-        event_type = str(event.get("type") or "worker_event")
-        payload = event.get("payload")
-        if not _is_high_signal_worker_event(event_type, payload):
-            continue
-        payload_text = json.dumps(payload, ensure_ascii=False) if payload is not None else "{}"
-        worker_text = f"{event_type} from {worker_id}: {payload_text}"
-        _log_daily_transcript_event(
-            session_id=session_id,
-            day=day,
-            speaker="worker_event",
-            text=worker_text,
-            route=route,
-            metadata={"worker_id": worker_id, "event_type": event_type},
-        )
-
-    for event in task_agent_events or []:
-        if not isinstance(event, dict):
-            continue
-        event_type = str(event.get("type") or "task_agent_event")
-        payload = event.get("payload")
-        if not _is_high_signal_task_agent_event(event_type, payload):
-            continue
-        payload_text = json.dumps(payload, ensure_ascii=False) if payload is not None else "{}"
-        task_text = f"{event_type}: {payload_text}"
-        _log_daily_transcript_event(
-            session_id=session_id,
-            day=day,
-            speaker="task_agent_event",
-            text=task_text,
-            route=route,
-            metadata={"event_type": event_type},
-        )
-
-    _ = system_events  # system chatter is intentionally excluded from long-term daily memory
+    _ = worker_events
+    _ = task_agent_events
+    _ = system_events  # internal chatter is intentionally excluded from long-term daily memory
 
     status = increment_day_message_count(day=day, amount=1)
     pending = int(status.get("messages_since_last_summary") or 0)

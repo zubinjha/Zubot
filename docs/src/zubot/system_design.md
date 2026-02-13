@@ -66,7 +66,7 @@ This document captures the conceptual architecture of Zubot at the system level.
 
 ### Memory Signal Policy
 - Prioritize user <-> main-agent interaction.
-- Include high-signal task/worker outcomes.
+- Include task-agent queue/finalization milestones (`run_queued`, `run_finished`, `run_failed`, `run_blocked`).
 - Exclude routine low-value system chatter.
 
 ## Why SQLite For Summaries Is Acceptable

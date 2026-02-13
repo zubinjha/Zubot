@@ -129,8 +129,8 @@ Source modules:
 Raw ingestion event kinds used by summarization pipeline:
 - `user`
 - `main_agent`
-- `worker_event`
 - `task_agent_event`
+  - scheduler/task-agent milestones only (`run_queued`, `run_finished`, `run_failed`, `run_blocked`)
 
 Legacy/optional kinds that may exist from older snapshots or custom writers:
 - `tool_event`

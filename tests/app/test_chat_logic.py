@@ -496,8 +496,8 @@ def test_daily_memory_ingests_worker_task_tool_and_system_events(monkeypatch):
     kinds = {entry.get("kind") for entry in captured}
     assert "user" in kinds
     assert "main_agent" in kinds
-    assert "worker_event" in kinds
-    assert "task_agent_event" in kinds
+    assert "worker_event" not in kinds
+    assert "task_agent_event" not in kinds
     assert "tool_event" not in kinds
     assert "system" not in kinds
 

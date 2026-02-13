@@ -246,7 +246,10 @@ Responsibilities:
 - provide explicit session initialization API behavior (preload before first message)
 - refresh recent daily memory before each chat turn
 - append completed-turn entries to daily memory raw rows
-- ingest high-signal worker/task-agent outcomes into daily raw memory taxonomy (system/tool telemetry is excluded)
+- keep daily-memory persistence scoped to:
+  - user/main-agent completed chat turns
+  - central task-agent lifecycle milestones (`run_queued`, `run_finished`, `run_failed`, `run_blocked`)
+  - (worker internals, tool telemetry, and system chatter are excluded from daily-memory rows)
 - enqueue day-summary jobs on turn completion and kick background summary worker
 - expose session reset that clears in-memory state while preserving persisted daily memory
 - execute an iterative model/tool loop for LLM-routed requests:

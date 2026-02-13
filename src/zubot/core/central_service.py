@@ -183,7 +183,7 @@ class CentralService:
 
     @staticmethod
     def _is_high_signal_task_memory_event(event_type: str) -> bool:
-        return event_type in {"run_finished", "run_failed", "run_blocked"}
+        return event_type in {"run_queued", "run_finished", "run_failed", "run_blocked"}
 
     def _log_task_agent_event(self, *, event_type: str, profile_id: str, run_id: str, detail: str) -> None:
         text = f"{event_type} profile={profile_id} run_id={run_id} {detail}".strip()
@@ -224,18 +224,6 @@ class CentralService:
             memory = self._memory_manager.maybe_periodic_sweep(settings=self._memory_manager_settings())
         finalized_count = int(memory.get("finalized_count") or 0) if isinstance(memory, dict) else 0
         if finalized_count > 0:
-            append_daily_memory_entry(
-                day_str=local_day_str(),
-                session_id="central_service",
-                kind="system",
-                text=(
-                    "memory_manager_sweep "
-                    f"trigger={'completion' if on_completion else 'periodic'} "
-                    f"finalized_count={finalized_count} "
-                    f"finalized_days={memory.get('finalized_days')}"
-                ),
-                layer="raw",
-            )
             self._record_event(
                 event_type="memory_manager_sweep",
                 payload={
@@ -357,6 +345,21 @@ class CentralService:
     def tick(self) -> dict[str, Any]:
         settings = self._refresh_settings()
         enqueue = self._store.enqueue_due_runs()
+        queued_runs = enqueue.get("runs") if isinstance(enqueue, dict) else None
+        if isinstance(queued_runs, list):
+            for row in queued_runs:
+                if not isinstance(row, dict):
+                    continue
+                run_id = str(row.get("run_id") or "").strip()
+                profile_id = str(row.get("profile_id") or "").strip()
+                if not run_id or not profile_id:
+                    continue
+                self._log_task_agent_event(
+                    event_type="run_queued",
+                    profile_id=profile_id,
+                    run_id=run_id,
+                    detail="trigger=scheduled",
+                )
         dispatch = self._dispatch_available()
         housekeeping = self._run_housekeeping(on_completion=False)
         return {
@@ -381,6 +384,19 @@ class CentralService:
 
     def trigger_profile(self, *, profile_id: str, description: str | None = None) -> dict[str, Any]:
         out = self._store.enqueue_manual_run(profile_id=profile_id, description=description)
+        if out.get("ok"):
+            run_id = str(out.get("run_id") or "").strip()
+            clean_profile_id = str(profile_id or "").strip()
+            if run_id and clean_profile_id:
+                detail = "trigger=manual"
+                if isinstance(description, str) and description.strip():
+                    detail += f" description={description.strip()[:120]}"
+                self._log_task_agent_event(
+                    event_type="run_queued",
+                    profile_id=clean_profile_id,
+                    run_id=run_id,
+                    detail=detail,
+                )
         self._dispatch_available()
         return out
 

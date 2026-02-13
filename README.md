@@ -163,7 +163,7 @@ Choose one of these startup modes based on what you want to run.
   - summary snapshots (`daily_memory_summaries`)
   - status + queue metadata (`day_memory_status`, `memory_summary_jobs`)
 - Daily summaries are queue-driven from full raw-day replay (deduped per day) and processed by background worker.
-- Daily raw memory uses signal-first ingestion (user/main-agent interactions and meaningful task/worker outcomes; routine system chatter and tool-call telemetry are excluded).
+- Daily raw memory uses signal-first ingestion (user/main-agent interactions plus task queue/finalization milestones; worker internals, routine system chatter, and tool-call telemetry are excluded).
 - Session JSONL logging is optional (`memory.session_event_logging_enabled`) and disabled by default.
 - LLM-routed queries run through a registry-backed tool-call loop (tool schema -> tool execution -> final response).
 - Tool registry includes orchestration tools for worker management:

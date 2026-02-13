@@ -11,12 +11,11 @@ Current implementation:
 - Raw logs are transcript-style entries:
   - `[user]` for human messages
   - `[main_agent]` for assistant replies
-  - `[task_agent_event]` for high-signal central scheduler/task-agent outcomes
-  - `[worker_event]` for high-signal worker outcomes (completion/failure/blocked)
+  - `[task_agent_event]` for central scheduler lifecycle milestones (`run_queued`, `run_finished`, `run_failed`, `run_blocked`)
 - Signal filtering policy:
   - keep user/main-agent conversational intent as primary memory signal
-  - keep only milestone task/worker lifecycle outcomes
-  - drop routine system chatter, route/debug metadata, and tool-call telemetry from daily memory rows
+  - keep only milestone task lifecycle outcomes (queue + terminal status)
+  - drop worker internals, routine system chatter, route/debug metadata, and tool-call telemetry from daily memory rows
 - Summary rows are rewritten as snapshots on each successful summary job (not endlessly appended).
 - Summary generation is queue-driven (SQLite table `memory_summary_jobs` in `memory/central/zubot_core.db`):
   - chat-turn ingestion enqueues day summary jobs

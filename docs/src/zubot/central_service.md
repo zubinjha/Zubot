@@ -63,9 +63,13 @@ Indexes:
 5. Run housekeeping:
   - prune old completed run history rows
   - run debounced/periodic memory finalization sweeps for prior non-finalized days (full raw-day replay summary)
-  - emit structured memory-manager sweep events for observability
+  - emit structured memory-manager sweep events for observability (not persisted to daily-memory raw events)
 6. Memory ingestion behavior for task-agent events:
-  - append raw memory events (`task_agent_event`)
+  - append raw memory events (`task_agent_event`) for queue + terminal lifecycle milestones:
+    - `run_queued`
+    - `run_finished`
+    - `run_failed`
+    - `run_blocked`
   - increment day-memory counters
   - enqueue day-summary jobs with dedupe
   - kick background summary worker for non-blocking summary updates
