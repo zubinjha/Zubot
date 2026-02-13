@@ -25,6 +25,10 @@ Deeper architectural documentation lives in [docs/README.md](docs/README.md).
 - Tool registration is layered:
   - base/core tools in `src/zubot/core/tool_registry.py`
   - user-specific tools in `src/zubot/core/tool_registry_user.py`
+- Unregistered Google helper modules are available in `src/zubot/tools/kernel/`:
+  - OAuth token lifecycle helper (`google_auth.py`)
+  - Job application sheet helpers (`google_sheets_job_apps.py`)
+  - DOCX creation + Drive upload helpers (`google_drive_docs.py`)
 - Core agent runtime scaffolding in `src/zubot/core/`:
   - agent loop + event schemas
   - sub-agent runner scaffold + delegation path
@@ -84,3 +88,5 @@ For new agents or fresh sessions, use this order:
   - runtime panel with route, tool-call record, and last reply snapshot
   - auto session initialization on page load/session change
 - App chat uses unified LLM + registry tool loop (no keyword-based direct routing).
+
+

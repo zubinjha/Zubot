@@ -46,6 +46,49 @@ This document defines the initial tools scaffold in `src/zubot/tools/`.
     - `provider` (`hasdata`)
     - `source` (`hasdata_indeed_listing`, `hasdata_indeed_job`, or `*_error`)
     - `error` when request/parsing fails
+- `src/zubot/tools/kernel/google_auth.py` (unregistered helper)
+  - `get_google_access_token(force_refresh=False)`
+  - Reads OAuth config from `tool_profiles.user_specific.google_oauth`.
+  - Uses refresh token flow to mint access tokens on demand.
+  - Persists token state to `tool_profiles.user_specific.google_oauth.token_path`.
+  - Returns normalized payloads with:
+    - success source: `google_oauth_cache` or `google_oauth_refreshed`
+    - failure source: `google_oauth_error`
+    - `error_code` for config/refresh failures
+- `src/zubot/tools/kernel/google_sheets_job_apps.py` (unregistered helper)
+  - `list_job_app_rows(start_date=None, end_date=None)`
+  - `append_job_app_row(row)`
+  - `delete_job_app_row_by_key(job_key)`
+  - Reads spreadsheet id from:
+    - `tool_profiles.user_specific.google_drive.job_application_spreadsheet_id`
+  - Uses tab name `Job Applications` and fixed column schema:
+    - `JobKey`, `Company`, `Job Title`, `Location`, `Date Found`, `Date Applied`, `Status`, `Pay Range`, `Job Link`, `Source`, `Cover Letter`, `Notes`
+  - Date handling:
+    - accepts `YYYY-MM-DD` and `MM/DD/YYYY`
+    - normalizes to `YYYY-MM-DD` for comparisons/writes
+    - list filtering applies inclusive bounds to `Date Found`
+  - Append behavior:
+    - validates required row fields
+    - validates `Status` against allowed values
+    - enforces JobKey dedupe by checking existing `JobKey` values before append
+    - writes to the earliest available row where both `JobKey` and `Job Title` are empty
+  - Delete behavior:
+    - looks up `JobKey` in `A2:A`
+    - deletes the matching row via Sheets `batchUpdate` row delete
+    - fails safely when key is missing or duplicated
+- `src/zubot/tools/kernel/google_drive_docs.py` (unregistered helper)
+  - `create_local_docx(filename, title=None, paragraphs, output_dir="outputs/cover_letters")`
+  - `upload_file_to_google_drive(local_path, destination_path="Job Applications/Cover Letters", filename=None)`
+  - `create_and_upload_docx(filename, title=None, paragraphs, output_dir="outputs/cover_letters", destination_path="Job Applications/Cover Letters")`
+  - DOCX behavior:
+    - generates `.docx` files using `python-docx`
+    - writes local output under repo-relative paths (default `outputs/cover_letters`)
+    - validates non-empty paragraph content
+  - Drive upload behavior:
+    - resolves folder paths by name (for example `Job Applications/Cover Letters`) and auto-creates missing folders
+    - uploads via Drive multipart upload API
+    - checks name conflict in destination folder and appends timestamp suffix (`-YYYYMMDD-HHMMSS`) when needed
+    - returns normalized upload metadata (`drive_file_id`, `drive_file_name`, `destination_folder_id`, `web_view_link`)
 - `src/zubot/tools/kernel/weather.py`
   - `get_weather(location=None)`
   - `get_future_weather(location=None, horizon="daily", hours=24, days=7)`
@@ -92,9 +135,28 @@ This document defines the initial tools scaffold in `src/zubot/tools/`.
   - `api_key`
   - `base_url` (default `https://api.hasdata.com`)
   - `timeout_sec`
-- Google auth/drive config (for upcoming Google tools) lives under:
+- Google auth/drive config for Google helper modules lives under:
   - `tool_profiles.user_specific.google_oauth`
   - `tool_profiles.user_specific.google_drive`
+  - Google Drive DOCX helpers additionally use:
+    - `tool_profiles.user_specific.google_drive.default_upload_path`
+    - `tool_profiles.user_specific.google_drive.timeout_sec`
+
+## Google Token Lifecycle
+- Token path is loaded from:
+  - `tool_profiles.user_specific.google_oauth.token_path`
+- Runtime behavior:
+  - use cached token when present and not near expiry
+  - refresh on demand when token is missing, expired, or forced
+  - write refreshed token state atomically to avoid partial-file corruption
+- Failure behavior:
+  - invalid/expired refresh token surfaces a structured `google_oauth_error` payload
+  - token response shape errors surface `google_oauth_error` with `error_code`
+- Scope requirement:
+  - Drive upload helpers require a write-capable Drive scope such as `https://www.googleapis.com/auth/drive.file`
+  - changing scopes may require refreshing/reconsenting OAuth credentials before uploads work
+- Secret handling:
+  - credentials and refresh tokens are read from config/token file but not logged in tool outputs/docs.
 
 ## Registry
 

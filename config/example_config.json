@@ -107,12 +107,14 @@
                 "refresh_token": "XXXXXX",
                 "scopes": [
                     "https://www.googleapis.com/auth/spreadsheets",
-                    "https://www.googleapis.com/auth/drive.metadata.readonly"
+                    "https://www.googleapis.com/auth/drive.file"
                 ],
                 "token_uri": "https://oauth2.googleapis.com/token"
             },
             "google_drive": {
-                "job_application_spreadsheet_id": "XXXXXX"
+                "job_application_spreadsheet_id": "XXXXXX",
+                "default_upload_path": "Job Applications/Cover Letters",
+                "timeout_sec": 15
             }
         }
     }

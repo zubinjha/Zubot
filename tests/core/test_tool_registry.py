@@ -33,6 +33,12 @@ def test_list_tools_contains_expected_names():
         "write_json",
     }
     assert expected.issubset(names)
+    assert "get_google_access_token" not in names
+    assert "list_job_app_rows" not in names
+    assert "append_job_app_row" not in names
+    assert "create_local_docx" not in names
+    assert "upload_file_to_google_drive" not in names
+    assert "create_and_upload_docx" not in names
 
 
 def test_list_tools_can_filter_by_category():
