@@ -147,3 +147,66 @@ def get_max_concurrent_workers(config: dict[str, Any] | None = None) -> int:
         if isinstance(value, int) and value > 0:
             return value
     return 3
+
+
+def get_worker_runtime_config(config: dict[str, Any] | None = None) -> dict[str, int]:
+    payload = config or load_config()
+    loop_cfg = payload.get("agent_loop")
+    cfg = loop_cfg if isinstance(loop_cfg, dict) else {}
+    max_events = cfg.get("max_events_per_worker")
+    completed_retention = cfg.get("completed_worker_retention")
+    return {
+        "max_events_per_worker": int(max_events) if isinstance(max_events, int) and max_events > 0 else 200,
+        "completed_worker_retention": int(completed_retention)
+        if isinstance(completed_retention, int) and completed_retention > 0
+        else 200,
+    }
+
+
+def get_central_service_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return normalized central service config with defaults."""
+    payload = config or load_config()
+    central = payload.get("central_service")
+    cfg = central if isinstance(central, dict) else {}
+    return {
+        "enabled": bool(cfg.get("enabled", False)),
+        "poll_interval_sec": int(cfg.get("poll_interval_sec", 60)) if isinstance(cfg.get("poll_interval_sec", 60), int) else 60,
+        "task_runner_concurrency": int(cfg.get("task_runner_concurrency", 2))
+        if isinstance(cfg.get("task_runner_concurrency", 2), int)
+        else 2,
+        "scheduler_db_path": str(cfg.get("scheduler_db_path", "memory/central/zubot_core.db")),
+        "worker_slot_reserve_for_workers": int(cfg.get("worker_slot_reserve_for_workers", 2))
+        if isinstance(cfg.get("worker_slot_reserve_for_workers", 2), int)
+        else 2,
+        "run_history_retention_days": int(cfg.get("run_history_retention_days", 30))
+        if isinstance(cfg.get("run_history_retention_days", 30), int)
+        else 30,
+        "run_history_max_rows": int(cfg.get("run_history_max_rows", 5000))
+        if isinstance(cfg.get("run_history_max_rows", 5000), int)
+        else 5000,
+        "memory_manager_sweep_interval_sec": int(cfg.get("memory_manager_sweep_interval_sec", 12 * 60 * 60))
+        if isinstance(cfg.get("memory_manager_sweep_interval_sec", 12 * 60 * 60), int)
+        else 12 * 60 * 60,
+        "memory_manager_completion_debounce_sec": int(cfg.get("memory_manager_completion_debounce_sec", 5 * 60))
+        if isinstance(cfg.get("memory_manager_completion_debounce_sec", 5 * 60), int)
+        else 5 * 60,
+        "queue_warning_threshold": int(cfg.get("queue_warning_threshold", 25))
+        if isinstance(cfg.get("queue_warning_threshold", 25), int)
+        else 25,
+        "running_age_warning_sec": int(cfg.get("running_age_warning_sec", 1800))
+        if isinstance(cfg.get("running_age_warning_sec", 1800), int)
+        else 1800,
+    }
+
+
+def get_task_agent_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return task-agent profiles and schedules from config."""
+    payload = config or load_config()
+    task_agents = payload.get("task_agents")
+    cfg = task_agents if isinstance(task_agents, dict) else {}
+    profiles = cfg.get("profiles")
+    schedules = cfg.get("schedules")
+    return {
+        "profiles": profiles if isinstance(profiles, dict) else {},
+        "schedules": schedules if isinstance(schedules, list) else [],
+    }

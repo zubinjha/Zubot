@@ -179,3 +179,94 @@ def test_worker_forward_events_are_consumed_once():
     second = manager.list_forward_events(consume=True)
     assert second["ok"] is True
     assert second["count"] == 0
+
+
+def test_task_agent_spawn_respects_worker_reserve():
+    gate = Event()
+    manager = WorkerManager(runner=_BlockingRunner(gate), max_concurrent_workers=3)
+
+    first = manager.spawn_worker(
+        title="task-agent-1",
+        instructions="do task agent work",
+        requested_by="task_agent:profile_a",
+        reserve_for_workers=2,
+    )
+    assert first["ok"] is True
+
+    blocked = manager.spawn_worker(
+        title="task-agent-2",
+        instructions="do more task agent work",
+        requested_by="task_agent:profile_b",
+        reserve_for_workers=2,
+    )
+    assert blocked["ok"] is False
+    assert blocked["error"] == "task_agent_worker_reserve_exceeded"
+    assert blocked["retryable"] is True
+
+    # Main-agent worker path remains available.
+    main_agent = manager.spawn_worker(
+        title="main-agent",
+        instructions="interactive request",
+        requested_by="main_agent",
+        reserve_for_workers=2,
+    )
+    assert main_agent["ok"] is True
+
+    gate.set()
+    assert manager.wait_for_idle(timeout_sec=2.0) is True
+
+
+def test_worker_manager_caps_events_per_worker():
+    class _Runner:
+        def run_task(self, task, **_kwargs):  # noqa: ANN001
+            return {
+                "ok": True,
+                "result": {
+                    "task_id": task.task_id,
+                    "status": "success",
+                    "summary": "ok",
+                    "artifacts": [],
+                    "error": None,
+                    "trace": [],
+                },
+            }
+
+    manager = WorkerManager(runner=_Runner(), max_concurrent_workers=1, max_events_per_worker=10)
+    out = manager.spawn_worker(title="event-heavy", instructions="start")
+    assert out["ok"] is True
+    wid = out["worker"]["worker_id"]
+    assert manager.wait_for_idle(timeout_sec=1.0) is True
+
+    for idx in range(20):
+        msg = manager.message_worker(worker_id=wid, message=f"msg {idx}")
+        assert msg["ok"] is True
+        assert manager.wait_for_idle(timeout_sec=1.0) is True
+
+    worker = manager.get_worker(wid)["worker"]
+    assert worker["event_count"] <= 10
+
+
+def test_worker_manager_prunes_completed_workers_by_retention():
+    class _Runner:
+        def run_task(self, task, **_kwargs):  # noqa: ANN001
+            return {
+                "ok": True,
+                "result": {
+                    "task_id": task.task_id,
+                    "status": "success",
+                    "summary": "ok",
+                    "artifacts": [],
+                    "error": None,
+                    "trace": [],
+                },
+            }
+
+    manager = WorkerManager(runner=_Runner(), max_concurrent_workers=1, completed_worker_retention=10)
+    for idx in range(25):
+        out = manager.spawn_worker(title=f"w{idx}", instructions=f"task {idx}")
+        assert out["ok"] is True
+    assert manager.wait_for_idle(timeout_sec=2.0) is True
+
+    listed = manager.list_workers()
+    assert listed["ok"] is True
+    assert listed["runtime"]["total_workers"] <= 10

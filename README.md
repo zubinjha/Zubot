@@ -8,6 +8,7 @@ Primary use cases:
 - future job automation
 
 Deeper architectural documentation lives in [docs/README.md](docs/README.md).
+Operations guidance for long-running mode lives in [docs/src/zubot/operations.md](docs/src/zubot/operations.md).
 
 ## Current State
 - Architecture-first project with core context contracts in `context/`.
@@ -33,6 +34,7 @@ Deeper architectural documentation lives in [docs/README.md](docs/README.md).
   - agent loop + event schemas
   - sub-agent runner scaffold + delegation path
   - worker manager (cap=3, queueing, lifecycle state, worker context reset)
+  - central service scaffold for scheduled task-agent runs (SQLite-backed queue/store)
   - config-driven LLM client (OpenRouter adapter)
   - centralized tool registry and dispatch helpers
   - context loading/assembly pipeline
@@ -40,6 +42,12 @@ Deeper architectural documentation lives in [docs/README.md](docs/README.md).
   - token estimation + budget checks
   - session event persistence + daily memory helpers
   - SQLite-backed day-status index for summary/finalization tracking
+- Daemon-first runtime facade:
+  - shared runtime service in `src/zubot/runtime/service.py`
+  - daemon entrypoint in `src/zubot/daemon/main.py`
+- Task-agent identity context files:
+  - `context/TASK_AGENT.md`
+  - `context/TASK_SOUL.md`
 - Automated tests in `tests/` with `pytest`.
 
 ## Agent Resume Checklist
@@ -58,9 +66,37 @@ For new agents or fresh sessions, use this order:
 - User-specific tool secrets/config now live under:
   - `tool_profiles.user_specific.*`
 
+## Local Runtime (Primary)
+- Preferred startup path is daemon-first:
+  - `source .venv/bin/activate`
+  - `python -m src.zubot.daemon.main`
+- This starts runtime ownership (user-facing agent + workers + central scheduler) and local app server in one process.
+- Optional headless runtime mode (no app server):
+  - `python -m src.zubot.daemon.main --no-app`
+
+## Usage
+Choose one of these startup modes based on what you want to run.
+
+1. Full local stack (recommended):
+   - Starts Zubot runtime + local user-facing app together.
+   - `source .venv/bin/activate`
+   - `python -m src.zubot.daemon.main`
+
+2. Zubot standalone runtime (no UI):
+   - Starts runtime only (user-facing agent runtime, workers, task-agent scheduler).
+   - `source .venv/bin/activate`
+   - `python -m src.zubot.daemon.main --no-app`
+
+3. App-only local view (UI iteration mode):
+   - Starts just the local app process.
+   - `source .venv/bin/activate`
+   - `python -m uvicorn app.main:app --reload --port 8000`
+   - If central scheduler is needed in this mode, start it via:
+     - `POST /api/central/start`
+
 ## Local Web Chat (Test UI)
 - Minimal local app lives in `app/`.
-- Run:
+- Direct app run (client surface only) for UI iteration:
   - `source .venv/bin/activate`
   - `python -m uvicorn app.main:app --reload --port 8000`
 - Open: `http://127.0.0.1:8000`
@@ -73,6 +109,14 @@ For new agents or fresh sessions, use this order:
   - `POST /api/workers/{id}/message`
   - `GET /api/workers/{id}`
   - `GET /api/workers`
+- Central service endpoints:
+  - `GET /api/central/status`
+  - `POST /api/central/start`
+  - `POST /api/central/stop`
+  - `GET /api/central/schedules`
+  - `GET /api/central/runs`
+  - `GET /api/central/metrics`
+  - `POST /api/central/trigger/{profile_id}`
 - Session reset clears chat working context but preserves local daily memory files.
 - Daily memory is split into raw logs and summary snapshots under `memory/daily/`.
 - Session JSONL logging is optional (`memory.session_event_logging_enabled`) and disabled by default.
@@ -85,8 +129,7 @@ For new agents or fresh sessions, use this order:
   - live in-flight progress states (thinking/context/tool-check phases)
   - post-response tool-chain summary in Progress (exact tool names + status)
   - worker status panel (up to 3 shown) with per-worker kill control
+  - task-agent panel with central runtime status + recent outcomes
   - runtime panel with route, tool-call record, and last reply snapshot
   - auto session initialization on page load/session change
 - App chat uses unified LLM + registry tool loop (no keyword-based direct routing).
-
-

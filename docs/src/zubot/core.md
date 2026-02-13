@@ -75,6 +75,8 @@ Current helper surface:
 - `get_provider_config()`
 - `get_default_model()`
 - `get_max_concurrent_workers()`
+- `get_central_service_config()`
+- `get_task_agent_config()`
 - `clear_config_cache()`
 
 Design note:
@@ -177,6 +179,16 @@ Responsibilities:
 - track `messages_since_last_summary` and finalization state
 - support pending-day queries for startup finalization workflows
 
+## Memory Manager
+
+Primary module:
+- `src/zubot/core/memory_manager.py`
+
+Responsibilities:
+- perform periodic sweeps for prior non-finalized day summaries
+- perform completion-triggered debounced sweeps from central runtime hooks
+- finalize pending days by writing summary snapshots and marking day status finalized
+
 ## Daily Memory
 
 Primary module:
@@ -202,15 +214,31 @@ Primary module:
 
 Responsibilities:
 - maintain per-session runtime state (`recent_events`, rolling summary, facts)
+- enforce bounded in-memory session retention (TTL + max active sessions)
 - provide explicit session initialization API behavior (preload before first message)
 - refresh recent daily memory before each chat turn
 - append completed-turn entries to the current daily memory file
+- ingest worker/task-agent/tool/system events into daily raw memory taxonomy
 - expose session reset that clears in-memory state while preserving persisted daily memory
 - execute an iterative model/tool loop for LLM-routed requests:
   - include tool schemas from `tool_registry`
   - execute model tool calls through `invoke_tool(...)`
   - append tool outputs back into the model message stream
   - stop on final assistant text or max tool-loop step guard
+
+## Runtime Facade + Daemon
+
+Primary modules:
+- `src/zubot/runtime/service.py`
+- `src/zubot/daemon/main.py`
+
+Responsibilities:
+- provide one runtime authority for:
+  - chat/session operations
+  - worker operations
+  - central scheduler/task-agent operations
+- support daemon-first local startup (`python -m src.zubot.daemon.main`)
+- keep app endpoints as a thin local client layer over runtime service
 
 ## Sub-Agent Runtime
 
@@ -249,3 +277,89 @@ Responsibilities:
 - emit worker lifecycle events with forwarding policy hook:
   - `should_forward_worker_event_to_user(...)` (v1: always `True`)
 - expose forwardable worker event feed (`list_forward_events`) for main-agent context injection
+
+## Task Scheduler Store
+
+Primary module:
+- `src/zubot/core/task_scheduler_store.py`
+
+Responsibilities:
+- persist schedule definitions and run queue state in SQLite
+- sync configured schedules from `task_agents.schedules`
+- enqueue due runs based on interval cadence or calendar wall-clock cadence
+- enqueue manual runs for on-demand profile triggers
+- claim queued runs deterministically for consumer processing
+- record run completion status (`done`, `failed`, `blocked`) and update schedule last-run metadata
+- persist completion snapshots into `run_history` for bounded historical reporting
+
+Default DB path:
+- `memory/central/zubot_core.db`
+- override via `central_service.scheduler_db_path`
+- schema evolution reference: `docs/src/zubot/central_db_schema.md`
+
+## Task-Agent Runner
+
+Primary module:
+- `src/zubot/core/task_agent_runner.py`
+
+Responsibilities:
+- resolve task-agent profile config from `task_agents.profiles`
+- generate textual run descriptions for user-facing check-in
+- resolve and validate configured `model_alias`
+- apply profile-level `tool_access`/`skill_access`/`preload_files`
+- load task-agent base context identity:
+  - `context/KERNEL.md`
+  - `context/TASK_AGENT.md`
+  - `context/TASK_SOUL.md`
+  - `context/USER.md`
+- load recent daily summary context for run continuity
+- execute profile runs through `SubAgentRunner` and return normalized run result payloads
+
+Behavior note:
+- execution is profile-driven and bounded by configured tool/skill/context access
+- deeper per-profile handlers and orchestration hooks are added incrementally
+
+## Worker Capacity Policy
+
+Primary module:
+- `src/zubot/core/worker_capacity_policy.py`
+
+Responsibilities:
+- define reusable capacity checks for task-agent initiated worker escalation
+- preserve configurable worker-slot reserve boundaries in policy code
+- enforce reserve-aware dispatch in `WorkerManager.spawn_worker(...)` when `requested_by` is a task-agent identity
+
+## Central Service
+
+Primary module:
+- `src/zubot/core/central_service.py`
+
+Responsibilities:
+- run a single-process scheduler/consumer loop for task-agent jobs
+- sync schedule config into the scheduler store
+- enqueue due runs on each poll
+- consume queued runs with bounded concurrency (`central_service.task_runner_concurrency`)
+- run housekeeping for 24/7 safety:
+  - prune completed run history via retention policy
+  - run memory-manager sweeps (periodic + completion-debounced)
+- expose central runtime status and task-agent check-in view
+
+Status/check-in surface:
+- reports service runtime state:
+  - `running`
+  - `enabled_in_config`
+  - poll/concurrency settings
+- reports queue/runtime counts:
+  - queued/running runs
+- reports per-profile check-in:
+  - `free`/`queued`/`running`
+  - current run description
+  - queue position (when queued)
+  - last result summary/error
+- main-agent check-in helper:
+  - registry tool `get_task_agent_checkin` returns structured status plus concise text summary
+
+Activation:
+- runtime is implemented but disabled by default via `central_service.enabled`
+- daemon startup (`python -m src.zubot.daemon.main`) auto-starts central loop only when config-enabled
+- app startup initializes runtime in client mode and does not own central lifecycle

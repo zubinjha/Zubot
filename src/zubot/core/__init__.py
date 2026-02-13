@@ -16,16 +16,20 @@ from .daily_memory import (
 from .fact_memory import extract_facts_from_events, extract_facts_from_text
 from .config_loader import (
     clear_config_cache,
+    get_central_service_config,
     get_default_model,
     get_home_location,
     get_model_config,
     get_model_by_id,
     get_model_by_alias,
+    get_task_agent_config,
+    get_worker_runtime_config,
     get_provider_config,
     get_timezone,
     load_config,
     resolve_config_path,
 )
+from .central_service import get_central_service
 from .llm_client import call_llm
 from .memory_index import (
     ensure_memory_index_schema,
@@ -36,6 +40,7 @@ from .memory_index import (
     mark_day_summarized,
     memory_index_path,
 )
+from .memory_manager import MemoryManager, MemoryManagerSettings
 from .path_policy import (
     can_read,
     can_write,
@@ -79,6 +84,8 @@ __all__ = [
     "clear_config_cache",
     "call_llm",
     "cleanup_session_logs_older_than",
+    "get_central_service",
+    "get_central_service_config",
     "estimate_messages_tokens",
     "estimate_payload_tokens",
     "estimate_text_tokens",
@@ -97,6 +104,8 @@ __all__ = [
     "get_model_by_alias",
     "get_model_token_limits",
     "get_provider_config",
+    "get_task_agent_config",
+    "get_worker_runtime_config",
     "get_timezone",
     "load_base_context",
     "load_config",
@@ -107,6 +116,8 @@ __all__ = [
     "mark_day_finalized",
     "mark_day_summarized",
     "memory_index_path",
+    "MemoryManager",
+    "MemoryManagerSettings",
     "normalize_repo_path",
     "repo_root",
     "resolve_config_path",

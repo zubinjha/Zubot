@@ -62,6 +62,7 @@ class SubAgentRunner:
         max_steps: int = 4,
         max_tool_calls: int = 3,
         timeout_sec: float = 20.0,
+        allow_orchestration_tools: bool = False,
     ) -> dict[str, Any]:
         envelope = self._as_task(task)
         started = monotonic()
@@ -172,6 +173,7 @@ class SubAgentRunner:
                     max_steps=max_steps,
                     max_tool_calls=max_tool_calls,
                     allowed_tools=envelope.tool_access,
+                    allow_orchestration_tools=allow_orchestration_tools,
                 )
                 if loop_error is not None:
                     result = WorkerResult(
@@ -303,7 +305,11 @@ class SubAgentRunner:
         return {"ok": False, "result": result.to_dict(), "events": recent_events}
 
     @staticmethod
-    def _tool_schemas_for_worker(allowed_tools: list[str]) -> tuple[list[dict[str, Any]], set[str]]:
+    def _tool_schemas_for_worker(
+        allowed_tools: list[str],
+        *,
+        allow_orchestration_tools: bool = False,
+    ) -> tuple[list[dict[str, Any]], set[str]]:
         from .tool_registry import list_tools
 
         def _param_schema(meta: dict[str, Any] | None) -> dict[str, Any]:
@@ -331,7 +337,7 @@ class SubAgentRunner:
             category = tool.get("category")
             if not isinstance(name, str) or not name:
                 continue
-            if category == "orchestration":
+            if category == "orchestration" and not allow_orchestration_tools:
                 continue
             if allowed_set and name not in allowed_set:
                 continue
@@ -400,10 +406,14 @@ class SubAgentRunner:
         max_steps: int,
         max_tool_calls: int,
         allowed_tools: list[str],
+        allow_orchestration_tools: bool = False,
     ) -> tuple[dict[str, Any], str, list[dict[str, Any]], str | None]:
         from .tool_registry import invoke_tool
 
-        tool_schemas, registered_names = self._tool_schemas_for_worker(allowed_tools)
+        tool_schemas, registered_names = self._tool_schemas_for_worker(
+            allowed_tools,
+            allow_orchestration_tools=allow_orchestration_tools,
+        )
         working_messages = list(messages)
         executed_tools: list[dict[str, Any]] = []
         tool_calls_used = 0

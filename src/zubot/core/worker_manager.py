@@ -10,10 +10,11 @@ from typing import Any
 from uuid import uuid4
 
 from .agent_types import TaskEnvelope
-from .config_loader import get_max_concurrent_workers
+from .config_loader import get_max_concurrent_workers, get_worker_runtime_config, load_config
 from .context_loader import load_base_context
 from .sub_agent_runner import SubAgentRunner
 from .worker_policy import should_forward_worker_event_to_user
+from .worker_capacity_policy import can_dispatch_task_agent_worker
 
 WorkerLifecycleStatus = str
 
@@ -91,11 +92,15 @@ class WorkerManager:
         *,
         runner: SubAgentRunner | None = None,
         max_concurrent_workers: int = 3,
+        max_events_per_worker: int = 200,
+        completed_worker_retention: int = 200,
     ) -> None:
         if max_concurrent_workers <= 0:
             raise ValueError("max_concurrent_workers must be >= 1")
         self._runner = runner or SubAgentRunner()
         self._max_concurrent_workers = max_concurrent_workers
+        self._max_events_per_worker = max(10, int(max_events_per_worker))
+        self._completed_worker_retention = max(10, int(completed_worker_retention))
         self._workers: dict[str, WorkerRecord] = {}
         self._ready_queue: deque[str] = deque()
         self._running_threads: dict[str, Thread] = {}
@@ -131,6 +136,32 @@ class WorkerManager:
         event["forward_to_user"] = should_forward_worker_event_to_user(event, main_context)
         event["forwarded"] = False
         worker.events.append(event)
+        if len(worker.events) > self._max_events_per_worker:
+            worker.events = worker.events[-self._max_events_per_worker :]
+
+    @staticmethod
+    def _is_completed_worker(worker: WorkerRecord) -> bool:
+        return worker.status in {"done", "failed", "cancelled"} and not worker.pending_tasks
+
+    def _prune_completed_workers_locked(self) -> None:
+        candidates = [
+            worker
+            for worker_id, worker in self._workers.items()
+            if worker_id not in self._running_threads and self._is_completed_worker(worker)
+        ]
+        if len(candidates) <= self._completed_worker_retention:
+            return
+        ordered = sorted(
+            candidates,
+            key=lambda worker: (
+                worker.finished_at or "",
+                worker.started_at or "",
+                worker.worker_id,
+            ),
+        )
+        overflow = len(candidates) - self._completed_worker_retention
+        for worker in ordered[:overflow]:
+            self._workers.pop(worker.worker_id, None)
 
     def _ensure_queued_locked(self, worker_id: str) -> None:
         if worker_id not in self._ready_queue:
@@ -171,6 +202,7 @@ class WorkerManager:
 
         if not self._running_threads and not self._ready_queue:
             self._idle_event.set()
+        self._prune_completed_workers_locked()
 
     @staticmethod
     def _build_preload_context(preload_files: list[str]) -> dict[str, str]:
@@ -279,6 +311,8 @@ class WorkerManager:
         skill_access: list[str] | None = None,
         preload_files: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        requested_by: str = "main_agent",
+        reserve_for_workers: int = 0,
     ) -> dict[str, Any]:
         clean_title = title.strip()
         clean_instructions = instructions.strip()
@@ -287,10 +321,35 @@ class WorkerManager:
         if not clean_instructions:
             return {"ok": False, "error": "instructions are required"}
 
+        requested = requested_by.strip() or "main_agent"
+        is_task_agent = requested.startswith("task_agent:")
+        if is_task_agent:
+            with self._lock:
+                used_slots = len(self._running_threads) + len(self._ready_queue)
+            can_dispatch = can_dispatch_task_agent_worker(
+                running_count=used_slots,
+                max_concurrent_workers=self._max_concurrent_workers,
+                reserve_for_workers=reserve_for_workers,
+            )
+            if not can_dispatch:
+                return {
+                    "ok": False,
+                    "error": "task_agent_worker_reserve_exceeded",
+                    "source": "worker_capacity_policy",
+                    "retryable": True,
+                    "requested_by": requested,
+                    "reserve_for_workers": max(0, reserve_for_workers),
+                    "runtime": {
+                        "max_concurrent_workers": self._max_concurrent_workers,
+                        "used_slots": used_slots,
+                        "available_for_task_agent": max(0, self._max_concurrent_workers - max(0, reserve_for_workers)),
+                    },
+                }
+
         task = TaskEnvelope.create(
             instructions=clean_instructions,
             model_tier=model_tier if model_tier in {"low", "medium", "high"} else "medium",  # type: ignore[arg-type]
-            requested_by="main_agent",
+            requested_by=requested,
             tool_access=tool_access or [],
             skill_access=skill_access or [],
             metadata={
@@ -318,6 +377,7 @@ class WorkerManager:
             self._workers[worker_id] = record
             self._ensure_queued_locked(worker_id)
             self._dispatch_locked()
+            self._prune_completed_workers_locked()
             payload = record.to_dict()
             running_count = len(self._running_threads)
             queued_count = len(self._ready_queue)
@@ -362,6 +422,7 @@ class WorkerManager:
             self._record_event(worker, event_type="worker_message_enqueued", payload={"task_id": task.task_id})
             self._ensure_queued_locked(worker_id)
             self._dispatch_locked()
+            self._prune_completed_workers_locked()
             return {"ok": True, "worker": worker.to_dict()}
 
     def cancel_worker(self, worker_id: str) -> dict[str, Any]:
@@ -383,6 +444,7 @@ class WorkerManager:
             else:
                 self._record_event(worker, event_type="worker_cancel_requested")
             self._dispatch_locked()
+            self._prune_completed_workers_locked()
             return {"ok": True, "worker": worker.to_dict()}
 
     def reset_worker_context(self, worker_id: str) -> dict[str, Any]:
@@ -463,5 +525,13 @@ def get_worker_manager() -> WorkerManager:
             limit = get_max_concurrent_workers()
         except Exception:
             limit = 3
-        _WORKER_MANAGER = WorkerManager(max_concurrent_workers=limit)
+        try:
+            runtime_cfg = get_worker_runtime_config(load_config())
+        except Exception:
+            runtime_cfg = {"max_events_per_worker": 200, "completed_worker_retention": 200}
+        _WORKER_MANAGER = WorkerManager(
+            max_concurrent_workers=limit,
+            max_events_per_worker=int(runtime_cfg.get("max_events_per_worker", 200)),
+            completed_worker_retention=int(runtime_cfg.get("completed_worker_retention", 200)),
+        )
     return _WORKER_MANAGER

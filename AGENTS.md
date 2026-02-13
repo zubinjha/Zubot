@@ -11,12 +11,16 @@ This file defines how agents should operate inside this repository.
 2. Read `context/AGENT.md`, `context/SOUL.md`, and `context/USER.md`.
 3. Read `docs/README.md` and the relevant component docs.
 4. Load config via `src/zubot/core/config_loader.py` (do not parse config ad hoc).
+5. Prefer daemon-first local runtime startup (`python -m src.zubot.daemon.main`) unless intentionally doing UI-only iteration.
 
 ## Source Of Truth
 - Runtime config: `config/config.json` (ignored, local only).
 - Config schema reference: `config/example_config.json` (tracked).
 - Kernel assumptions: `src/zubot/core/KERNEL.md`.
 - Config structure rule: keep `config/config.json` and `config/example_config.json` schema-aligned in the same change set (example file uses placeholders only).
+- Central runtime config contracts live under:
+  - `central_service.*`
+  - `task_agents.*`
 
 ## Tooling Conventions
 - Kernel tools live in `src/zubot/tools/kernel/`.
@@ -47,3 +51,4 @@ This file defines how agents should operate inside this repository.
   - `README.md` for current project status and entrypoint guidance
   - relevant files in `docs/` for component contracts and structure
   - `docs/src/zubot/tools.md` whenever tool config paths or registry layering changes
+  - `docs/src/zubot/central_service.md` when scheduler/queue/check-in contracts change

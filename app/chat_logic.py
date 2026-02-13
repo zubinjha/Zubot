@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from time import monotonic
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -26,6 +27,7 @@ from src.zubot.core.memory_index import (
 from src.zubot.core.session_store import append_session_events
 from src.zubot.core.tool_registry import invoke_tool, list_tools
 from src.zubot.core.config_loader import load_config
+from src.zubot.core.central_service import get_central_service
 from src.zubot.core.worker_manager import get_worker_manager
 
 MAX_RECENT_EVENTS = 60
@@ -34,6 +36,8 @@ DAILY_MEMORY_MAX_BUFFER_ITEMS = 24
 MAX_TOOL_LOOP_STEPS = 4
 SUMMARY_MAX_INPUT_TOKENS = 4000
 SUMMARY_MAX_RECURSION_DEPTH = 6
+DEFAULT_SESSION_TTL_MINUTES = 12 * 60
+DEFAULT_MAX_ACTIVE_SESSIONS = 24
 
 
 @dataclass
@@ -44,6 +48,7 @@ class SessionRuntime:
     preloaded_daily_context: dict[str, str] = field(default_factory=dict)
     daily_turn_buffer: list[dict[str, Any]] = field(default_factory=list)
     turns_since_daily_flush: int = 0
+    last_touched_mono: float = field(default_factory=monotonic)
 
 
 _SESSIONS: dict[str, SessionRuntime] = {}
@@ -62,12 +67,60 @@ def _autoload_summary_days() -> int:
     return 2
 
 
+def _session_retention_policy() -> tuple[int, int]:
+    ttl_minutes = DEFAULT_SESSION_TTL_MINUTES
+    max_sessions = DEFAULT_MAX_ACTIVE_SESSIONS
+    try:
+        cfg = load_config()
+    except Exception:
+        return ttl_minutes, max_sessions
+    memory_cfg = cfg.get("memory")
+    if not isinstance(memory_cfg, dict):
+        return ttl_minutes, max_sessions
+    ttl_val = memory_cfg.get("session_ttl_minutes")
+    max_val = memory_cfg.get("max_active_sessions")
+    if isinstance(ttl_val, int) and ttl_val > 0:
+        ttl_minutes = ttl_val
+    if isinstance(max_val, int) and max_val > 0:
+        max_sessions = max_val
+    return ttl_minutes, max_sessions
+
+
+def _prune_sessions() -> None:
+    ttl_minutes, max_sessions = _session_retention_policy()
+    now_mono = monotonic()
+    ttl_sec = ttl_minutes * 60
+
+    stale_ids = [
+        sid
+        for sid, runtime in _SESSIONS.items()
+        if now_mono - float(runtime.last_touched_mono) > ttl_sec
+    ]
+    for sid in stale_ids:
+        runtime = _SESSIONS.get(sid)
+        if runtime is not None:
+            _flush_daily_summary(runtime, session_id=sid, reason="session_ttl_prune")
+        _SESSIONS.pop(sid, None)
+
+    if len(_SESSIONS) <= max_sessions:
+        return
+    ordered = sorted(_SESSIONS.items(), key=lambda item: float(item[1].last_touched_mono))
+    overflow = len(_SESSIONS) - max_sessions
+    for sid, runtime in ordered[:overflow]:
+        _flush_daily_summary(runtime, session_id=sid, reason="session_count_prune")
+        _SESSIONS.pop(sid, None)
+
+
 def _get_session(session_id: str) -> SessionRuntime:
     ensure_memory_index_schema()
+    _prune_sessions()
     runtime = _SESSIONS.get(session_id)
     if runtime is None:
         runtime = SessionRuntime(preloaded_daily_context=load_recent_daily_memory(days=_autoload_summary_days()))
         _SESSIONS[session_id] = runtime
+        _prune_sessions()
+        runtime = _SESSIONS.get(session_id) or runtime
+    runtime.last_touched_mono = monotonic()
     return runtime
 
 
@@ -175,6 +228,8 @@ def _log_daily_turn(
     reply: str,
     tool_execution: list[dict[str, Any]] | None = None,
     worker_events: list[dict[str, Any]] | None = None,
+    task_agent_events: list[dict[str, Any]] | None = None,
+    system_events: list[str] | None = None,
 ) -> None:
     runtime = _get_session(session_id)
     day = local_day_str()
@@ -209,6 +264,30 @@ def _log_daily_turn(
         metadata={"tools": ",".join(tools_used) if tools_used else None},
     )
 
+    for tool in tool_execution or []:
+        if not isinstance(tool, dict):
+            continue
+        tool_name = str(tool.get("name") or "tool?")
+        tool_ok = bool(tool.get("result_ok", True))
+        tool_error = str(tool.get("error") or "").strip()
+        tool_text = f"{tool_name} ok={tool_ok}" + (f" error={tool_error}" if tool_error else "")
+        runtime.daily_turn_buffer.append(
+            {
+                "day": day,
+                "speaker": "tool_event",
+                "route": route,
+                "text": _clean_text(tool_text),
+            }
+        )
+        _log_daily_transcript_event(
+            session_id=session_id,
+            day=day,
+            speaker="tool_event",
+            text=tool_text,
+            route=route,
+            metadata={"tool_name": tool_name, "ok": tool_ok},
+        )
+
     for event in worker_events or []:
         if not isinstance(event, dict):
             continue
@@ -232,6 +311,49 @@ def _log_daily_turn(
             text=worker_text,
             route=route,
             metadata={"worker_id": worker_id, "event_type": event_type},
+        )
+
+    for event in task_agent_events or []:
+        if not isinstance(event, dict):
+            continue
+        event_type = str(event.get("type") or "task_agent_event")
+        payload = event.get("payload")
+        payload_text = json.dumps(payload, ensure_ascii=False) if payload is not None else "{}"
+        task_text = f"{event_type}: {payload_text}"
+        runtime.daily_turn_buffer.append(
+            {
+                "day": day,
+                "speaker": "task_agent_event",
+                "route": route,
+                "text": _clean_text(task_text),
+            }
+        )
+        _log_daily_transcript_event(
+            session_id=session_id,
+            day=day,
+            speaker="task_agent_event",
+            text=task_text,
+            route=route,
+            metadata={"event_type": event_type},
+        )
+
+    for system_event in system_events or []:
+        if not isinstance(system_event, str) or not system_event.strip():
+            continue
+        runtime.daily_turn_buffer.append(
+            {
+                "day": day,
+                "speaker": "system",
+                "route": route,
+                "text": _clean_text(system_event),
+            }
+        )
+        _log_daily_transcript_event(
+            session_id=session_id,
+            day=day,
+            speaker="system",
+            text=system_event,
+            route=route,
         )
 
     increment_day_message_count(day=day, amount=1)
@@ -298,6 +420,8 @@ def _summarize_entries_batch(entries: list[dict[str, Any]]) -> str:
             return True
         if speaker == "worker_event" and len(text) < 40:
             return True
+        if speaker == "task_agent_event" and len(text) < 40:
+            return True
         if len(text) < 24:
             return True
 
@@ -331,7 +455,10 @@ def _summarize_entries_batch(entries: list[dict[str, Any]]) -> str:
         "Transcript format:\n"
         "- [user] text from human\n"
         "- [main_agent] assistant reply\n"
-        "- [worker_event] worker-to-main event payload\n\n"
+        "- [worker_event] worker-to-main event payload\n"
+        "- [task_agent_event] central scheduler/task-agent lifecycle event\n"
+        "- [tool_event] significant tool or integration event\n"
+        "- [system] orchestration/runtime status event\n\n"
         "Requirements:\n"
         "- Focus on meaningful work only: what was done conceptually, how it was done, and the outcome.\n"
         "- Do not include idle chat, acknowledgments, or repetitive low-signal exchanges.\n"
@@ -519,6 +646,21 @@ def _load_forwardable_worker_events() -> list[dict[str, Any]]:
     return out
 
 
+def _load_forwardable_task_agent_events() -> list[dict[str, Any]]:
+    try:
+        payload = get_central_service().list_forward_events(consume=True)
+    except Exception:
+        return []
+    events = payload.get("events")
+    if not isinstance(events, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for event in events:
+        if isinstance(event, dict):
+            out.append(event)
+    return out
+
+
 def _parse_tool_call(tool_call: dict[str, Any], idx: int) -> tuple[str | None, dict[str, Any], str]:
     call_id = str(tool_call.get("id") or f"tool_call_{idx}")
     fn = tool_call.get("function")
@@ -663,12 +805,18 @@ def handle_chat_message(
             context_bundle["facts"] = dict(runtime.facts)
 
         forwarded_worker_events = _load_forwardable_worker_events()
+        forwarded_task_agent_events = _load_forwardable_task_agent_events()
+        worker_runtime_text = _worker_runtime_snapshot_text()
         turn_events = [
             *runtime.recent_events,
-            {"event_type": "system", "payload": {"worker_runtime": _worker_runtime_snapshot_text()}},
+            {"event_type": "system", "payload": {"worker_runtime": worker_runtime_text}},
             *[
                 {"event_type": "system", "payload": {"worker_event": event}}
                 for event in forwarded_worker_events
+            ],
+            *[
+                {"event_type": "system", "payload": {"task_agent_event": event}}
+                for event in forwarded_task_agent_events
             ],
             {"event_type": "user_message", "payload": {"text": text}},
         ]
@@ -693,6 +841,15 @@ def handle_chat_message(
                 reply=reply,
                 tool_execution=executed_tools,
                 worker_events=forwarded_worker_events,
+                task_agent_events=forwarded_task_agent_events,
+                system_events=[
+                    f"worker_runtime: {worker_runtime_text}",
+                    (
+                        "forwarded_events "
+                        f"worker={len(forwarded_worker_events)} "
+                        f"task_agent={len(forwarded_task_agent_events)}"
+                    ),
+                ],
             )
             _persist_session_turn(session_id, user_text=text, reply=reply, route="llm.main_agent")
             return {
@@ -716,6 +873,13 @@ def handle_chat_message(
                             if evt.get("event_type") == "system"
                             and isinstance(evt.get("payload"), dict)
                             and "worker_event" in evt["payload"]
+                        ),
+                        "forwarded_task_agent_events_injected": sum(
+                            1
+                            for evt in turn_events
+                            if evt.get("event_type") == "system"
+                            and isinstance(evt.get("payload"), dict)
+                            and "task_agent_event" in evt["payload"]
                         ),
                     },
                 },

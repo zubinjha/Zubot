@@ -5,7 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from src.zubot.core.central_service import get_central_service, summarize_task_agent_check_in
+from src.zubot.core.config_loader import get_central_service_config, load_config
 from src.zubot.core.tool_registry_user import register_user_specific_tools
+from src.zubot.core.worker_manager import get_worker_manager
 from src.zubot.tools.data.json_tools import read_json, write_json
 from src.zubot.tools.data.text_search import search_text
 from src.zubot.tools.kernel.filesystem import append_file, list_dir, path_exists, read_file, stat_path, write_file
@@ -20,7 +23,6 @@ from src.zubot.tools.kernel.weather import (
 )
 from src.zubot.tools.kernel.web_fetch import fetch_url
 from src.zubot.tools.kernel.web_search import web_search
-from src.zubot.core.worker_manager import get_worker_manager
 
 ToolHandler = Callable[..., dict[str, Any]]
 _TOOLS_WITH_DEFAULT_LOCATION = {
@@ -108,6 +110,62 @@ class ToolRegistry:
         }
 
 
+def _get_task_agent_checkin(*, include_runs: bool = False, runs_limit: int = 20) -> dict[str, Any]:
+    try:
+        service = get_central_service()
+        status = service.status()
+    except Exception as exc:  # pragma: no cover - defensive guard
+        return {"ok": False, "source": "central_service_checkin_error", "error": str(exc)}
+
+    if not isinstance(status, dict) or status.get("ok") is not True:
+        return {
+            "ok": False,
+            "source": "central_service_checkin_error",
+            "error": "Failed to retrieve central service status.",
+        }
+
+    task_agents = status.get("task_agents") if isinstance(status.get("task_agents"), list) else []
+    out: dict[str, Any] = {
+        "ok": True,
+        "source": "central_service_checkin",
+        "summary": summarize_task_agent_check_in(task_agents),
+        "service": status.get("service"),
+        "runtime": status.get("runtime"),
+        "task_agents": task_agents,
+    }
+
+    if include_runs:
+        safe_limit = max(1, min(200, int(runs_limit)))
+        runs_payload = service.list_runs(limit=safe_limit)
+        out["runs"] = runs_payload.get("runs") if isinstance(runs_payload, dict) else []
+
+    return out
+
+
+def _spawn_task_agent_worker(**kwargs: Any) -> dict[str, Any]:
+    requested_by = str(kwargs.get("requested_by") or "task_agent:unknown").strip() or "task_agent:unknown"
+    if not requested_by.startswith("task_agent:"):
+        requested_by = f"task_agent:{requested_by}"
+
+    try:
+        central_cfg = get_central_service_config(load_config())
+    except Exception:
+        central_cfg = {"worker_slot_reserve_for_workers": 2}
+    reserve = int(central_cfg.get("worker_slot_reserve_for_workers", 2))
+
+    return get_worker_manager().spawn_worker(
+        title=str(kwargs.get("title") or ""),
+        instructions=str(kwargs.get("instructions") or ""),
+        model_tier=str(kwargs.get("model_tier") or "medium"),
+        tool_access=list(kwargs.get("tool_access") or []),
+        skill_access=list(kwargs.get("skill_access") or []),
+        preload_files=list(kwargs.get("preload_files") or []),
+        metadata=dict(kwargs.get("metadata") or {}),
+        requested_by=requested_by,
+        reserve_for_workers=max(0, reserve),
+    )
+
+
 def _create_default_registry() -> ToolRegistry:
     registry = ToolRegistry()
 
@@ -122,6 +180,7 @@ def _create_default_registry() -> ToolRegistry:
                 skill_access=list(kwargs.get("skill_access") or []),
                 preload_files=list(kwargs.get("preload_files") or []),
                 metadata=dict(kwargs.get("metadata") or {}),
+                requested_by=str(kwargs.get("requested_by") or "main_agent"),
             ),
             category="orchestration",
             description="Spawn a worker task with title + instructions (max 3 concurrent).",
@@ -133,6 +192,25 @@ def _create_default_registry() -> ToolRegistry:
                 "skill_access": {"type": "array", "required": False},
                 "preload_files": {"type": "array", "required": False},
                 "metadata": {"type": "object", "required": False},
+                "requested_by": {"type": "string", "required": False},
+            },
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="spawn_task_agent_worker",
+            handler=_spawn_task_agent_worker,
+            category="orchestration",
+            description="Spawn a worker on behalf of a task agent with reserve-aware capacity gating.",
+            parameters={
+                "title": {"type": "string", "required": True},
+                "instructions": {"type": "string", "required": True},
+                "model_tier": {"type": "string", "required": False},
+                "tool_access": {"type": "array", "required": False},
+                "skill_access": {"type": "array", "required": False},
+                "preload_files": {"type": "array", "required": False},
+                "metadata": {"type": "object", "required": False},
+                "requested_by": {"type": "string", "required": False},
             },
         )
     )
@@ -198,6 +276,21 @@ def _create_default_registry() -> ToolRegistry:
             category="orchestration",
             description="List worker events to forward through main agent.",
             parameters={"consume": {"type": "boolean", "required": False}},
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="get_task_agent_checkin",
+            handler=lambda **kwargs: _get_task_agent_checkin(
+                include_runs=bool(kwargs.get("include_runs", False)),
+                runs_limit=kwargs.get("runs_limit", 20),
+            ),
+            category="orchestration",
+            description="Return task-agent check-in status with concise textual summary.",
+            parameters={
+                "include_runs": {"type": "boolean", "required": False},
+                "runs_limit": {"type": "integer", "required": False},
+            },
         )
     )
     register_user_specific_tools(registry, ToolSpec)
