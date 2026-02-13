@@ -119,7 +119,10 @@ Raw ingestion event kinds used by summarization pipeline:
 - `main_agent`
 - `worker_event`
 - `task_agent_event`
+
+Legacy/optional kinds that may exist from older snapshots or custom writers:
 - `tool_event`
+- `system`
 
 ## Legacy Migration Behavior
 

@@ -308,12 +308,25 @@ class CentralService:
                 status = "failed"
             summary = result.get("summary") if isinstance(result.get("summary"), str) else None
             error = result.get("error") if isinstance(result.get("error"), str) else None
+            retryable_error = bool(result.get("retryable_error", False))
+            attempts_used = result.get("attempts_used") if isinstance(result.get("attempts_used"), int) else None
+            attempts_configured = (
+                result.get("attempts_configured")
+                if isinstance(result.get("attempts_configured"), int)
+                else None
+            )
             self._store.complete_run(run_id=run_id, status=status, summary=summary, error=error)
             detail = f"status={status}"
             if summary:
                 detail += f" summary={summary[:160]}"
             if error:
                 detail += f" error={error[:160]}"
+            if status in {"failed", "blocked"}:
+                detail += f" retryable_error={retryable_error}"
+                if attempts_used is not None:
+                    detail += f" attempts_used={attempts_used}"
+                if attempts_configured is not None:
+                    detail += f" attempts_configured={attempts_configured}"
             self._log_task_agent_event(event_type="run_finished", profile_id=profile_id, run_id=run_id, detail=detail)
         except Exception as exc:
             self._store.complete_run(run_id=run_id, status="failed", summary=None, error=str(exc))

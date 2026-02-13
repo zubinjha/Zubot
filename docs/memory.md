@@ -13,11 +13,10 @@ Current implementation:
   - `[main_agent]` for assistant replies
   - `[task_agent_event]` for high-signal central scheduler/task-agent outcomes
   - `[worker_event]` for high-signal worker outcomes (completion/failure/blocked)
-  - `[tool_event]` only for high-signal tool outcomes (failures and side-effecting writes)
 - Signal filtering policy:
   - keep user/main-agent conversational intent as primary memory signal
-  - drop routine system chatter (worker runtime snapshots/forward counts)
-  - suppress low-value tool/worker/task noise unless it materially changes progress
+  - keep only milestone task/worker lifecycle outcomes
+  - drop routine system chatter, route/debug metadata, and tool-call telemetry from daily memory rows
 - Summary rows are rewritten as snapshots on each successful summary job (not endlessly appended).
 - Summary generation is queue-driven (SQLite table `memory_summary_jobs` in `memory/central/zubot_core.db`):
   - chat-turn ingestion enqueues day summary jobs
@@ -26,6 +25,11 @@ Current implementation:
 - Summary execution is handled by background worker thread (`src/zubot/core/memory_summary_worker.py`) so chat/task flows are not blocked by summarization work.
 - Startup and periodic sweeps finalize prior pending days by summarizing the full raw day transcript.
 - Daily summarization prompt is explicitly transcript-aware (it knows all entry types above).
+- Summary output target is narrative and decision-focused:
+  - What user wanted
+  - Key decisions
+  - What was executed
+  - Final state
 - If a summary batch is too large for safe model input, summarization recursively splits the batch into segments, summarizes each segment, then merges summaries.
 - Chat context autoloads summary snapshots first (default: today + yesterday) and falls back to trimmed raw-day snapshots when summary rows are not yet available.
 - Resetting a chat session clears in-memory conversation context only; persisted DB memory remains.

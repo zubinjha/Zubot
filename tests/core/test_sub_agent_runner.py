@@ -144,3 +144,29 @@ def test_sub_agent_runner_tool_access_blocks_unallowed_tool(monkeypatch):
     assert out["ok"] is True
     tool_artifact = next(item for item in out["result"]["artifacts"] if item.get("type") == "tool_execution")
     assert tool_artifact["data"][0]["result_ok"] is False
+
+
+def test_sub_agent_runner_llm_failure_includes_retry_metadata():
+    def failing_llm(*, messages, model=None, tools=None, **_kwargs):
+        _ = messages, model, tools
+        return {
+            "ok": False,
+            "error": "provider timeout",
+            "retryable_error": True,
+            "attempts_used": 4,
+            "attempts_configured": 4,
+            "retry_backoff_schedule_sec": [1.0, 3.0, 5.0],
+            "provider": "openrouter",
+            "model": "openai/gpt-5-mini",
+        }
+
+    runner = SubAgentRunner(llm_caller=failing_llm)
+    task = TaskEnvelope.create(instructions="fail this run")
+    out = runner.run_task(task, max_steps=3)
+    assert out["ok"] is False
+    assert out["result"]["status"] == "failed"
+    llm_failure = next(item for item in out["result"]["artifacts"] if item.get("type") == "llm_failure")
+    data = llm_failure["data"]
+    assert data["retryable_error"] is True
+    assert data["attempts_used"] == 4
+    assert data["attempts_configured"] == 4

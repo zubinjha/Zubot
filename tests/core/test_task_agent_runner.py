@@ -180,3 +180,39 @@ def test_run_profile_maps_needs_user_input_to_blocked(monkeypatch: pytest.Monkey
     assert out["ok"] is False
     assert out["status"] == "blocked"
     assert out["summary"] == "Need data"
+
+
+def test_run_profile_surfaces_llm_retry_metadata(monkeypatch: pytest.MonkeyPatch, cfg_path: Path):
+    class _RetryMetaRunner:
+        def run_task(self, task, **kwargs):  # noqa: ANN001
+            _ = kwargs
+            return {
+                "ok": False,
+                "result": {
+                    "task_id": task.task_id,
+                    "status": "failed",
+                    "summary": "failed",
+                    "artifacts": [
+                        {
+                            "type": "llm_failure",
+                            "data": {
+                                "retryable_error": True,
+                                "attempts_used": 4,
+                                "attempts_configured": 4,
+                            },
+                        }
+                    ],
+                    "error": "provider timeout",
+                    "trace": [],
+                },
+            }
+
+    runner = TaskAgentRunner(runner=_RetryMetaRunner())
+    monkeypatch.setattr("src.zubot.core.task_agent_runner.load_base_context", lambda **_kwargs: {})
+    monkeypatch.setattr("src.zubot.core.task_agent_runner.load_recent_daily_memory", lambda **_kwargs: {})
+    out = runner.run_profile(profile_id="profile_a")
+    assert out["ok"] is False
+    assert out["status"] == "failed"
+    assert out["retryable_error"] is True
+    assert out["attempts_used"] == 4
+    assert out["attempts_configured"] == 4

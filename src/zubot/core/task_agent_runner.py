@@ -99,6 +99,21 @@ class TaskAgentRunner:
                 out.append(tool_name)
         return out
 
+    @staticmethod
+    def _extract_llm_failure_meta(result: dict[str, Any]) -> dict[str, Any]:
+        artifacts = result.get("artifacts")
+        if not isinstance(artifacts, list):
+            return {}
+        for item in artifacts:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") != "llm_failure":
+                continue
+            data = item.get("data")
+            if isinstance(data, dict):
+                return data
+        return {}
+
     def _resolve_model_alias(self, profile: dict[str, Any]) -> tuple[bool, str, str | None]:
         model_alias = str(profile.get("model_alias") or "medium").strip() or "medium"
         try:
@@ -199,6 +214,14 @@ class TaskAgentRunner:
 
         summary = result.get("summary") if isinstance(result.get("summary"), str) else None
         error = result.get("error") if isinstance(result.get("error"), str) else None
+        llm_failure = self._extract_llm_failure_meta(result)
+        attempts_used = llm_failure.get("attempts_used") if isinstance(llm_failure.get("attempts_used"), int) else None
+        attempts_configured = (
+            llm_failure.get("attempts_configured")
+            if isinstance(llm_failure.get("attempts_configured"), int)
+            else None
+        )
+        retryable_error = bool(llm_failure.get("retryable_error", False))
         if summary is None:
             summary = f"{profile_name} run completed (model={model_alias})." if status == "done" else None
         if error is None and run_out.get("ok") is not True:
@@ -214,4 +237,7 @@ class TaskAgentRunner:
             "model_alias": model_alias,
             "used_tool_access": tool_list,
             "used_skill_access": skill_list,
+            "retryable_error": retryable_error,
+            "attempts_used": attempts_used,
+            "attempts_configured": attempts_configured,
         }

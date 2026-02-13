@@ -111,6 +111,8 @@ Responsibilities:
 - execute provider request
 - normalize response payload shape (`text`, `tool_calls`, `usage`, `error`)
 - retry transient provider network failures (DNS/timeouts/5xx/429) with bounded backoff
+- default retry schedule is `1s, 3s, 5s` (4 total attempts including initial call)
+- return retry metadata (`attempts_used`, `attempts_configured`, `retryable_error`) on both success and failure
 
 ## Tool Registry
 
@@ -244,7 +246,7 @@ Responsibilities:
 - provide explicit session initialization API behavior (preload before first message)
 - refresh recent daily memory before each chat turn
 - append completed-turn entries to daily memory raw rows
-- ingest worker/task-agent/tool/system events into daily raw memory taxonomy
+- ingest high-signal worker/task-agent outcomes into daily raw memory taxonomy (system/tool telemetry is excluded)
 - enqueue day-summary jobs on turn completion and kick background summary worker
 - expose session reset that clears in-memory state while preserving persisted daily memory
 - execute an iterative model/tool loop for LLM-routed requests:

@@ -50,6 +50,25 @@ class SubAgentRunner:
     def _default_model_for_tier(tier: str) -> str:
         return {"low": "low", "medium": "medium", "high": "high"}.get(tier, "medium")
 
+    @staticmethod
+    def _llm_failure_artifact(llm_result: dict[str, Any], *, loop_error: str) -> dict[str, Any]:
+        attempts_used = llm_result.get("attempts_used")
+        attempts_configured = llm_result.get("attempts_configured")
+        retryable_error = bool(llm_result.get("retryable_error", False))
+        backoff_schedule = llm_result.get("retry_backoff_schedule_sec")
+        return {
+            "type": "llm_failure",
+            "data": {
+                "error": str(loop_error or llm_result.get("error") or "llm_error"),
+                "retryable_error": retryable_error,
+                "attempts_used": int(attempts_used) if isinstance(attempts_used, int) else None,
+                "attempts_configured": int(attempts_configured) if isinstance(attempts_configured, int) else None,
+                "retry_backoff_schedule_sec": backoff_schedule if isinstance(backoff_schedule, list) else None,
+                "provider": llm_result.get("provider"),
+                "model": llm_result.get("model"),
+            },
+        }
+
     def run_task(
         self,
         task: TaskEnvelope | dict[str, Any],
@@ -176,11 +195,15 @@ class SubAgentRunner:
                     allow_orchestration_tools=allow_orchestration_tools,
                 )
                 if loop_error is not None:
+                    artifacts: list[dict[str, Any]] = [{"type": "tool_execution", "data": executed_tools}]
+                    if isinstance(llm_result, dict):
+                        artifacts.append(self._llm_failure_artifact(llm_result, loop_error=loop_error))
                     result = WorkerResult(
                         task_id=envelope.task_id,
                         status="failed",
                         summary="Worker LLM call failed.",
                         error=loop_error,
+                        artifacts=artifacts,
                         trace=trace,
                     )
                     return {"ok": False, "result": result.to_dict(), "events": recent_events}
@@ -278,6 +301,7 @@ class SubAgentRunner:
                     status="failed",
                     summary="Worker LLM step failed.",
                     error=str(llm_result.get("error") or "llm_error"),
+                    artifacts=[self._llm_failure_artifact(llm_result, loop_error=str(llm_result.get("error") or "llm_error"))],
                     trace=trace,
                 )
                 return {"ok": False, "result": result.to_dict(), "events": recent_events}

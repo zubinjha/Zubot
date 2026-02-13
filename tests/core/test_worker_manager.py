@@ -270,3 +270,41 @@ def test_worker_manager_prunes_completed_workers_by_retention():
     listed = manager.list_workers()
     assert listed["ok"] is True
     assert listed["runtime"]["total_workers"] <= 10
+
+
+def test_worker_blocked_event_includes_retry_metadata():
+    class _Runner:
+        def run_task(self, task, **_kwargs):  # noqa: ANN001
+            return {
+                "ok": False,
+                "result": {
+                    "task_id": task.task_id,
+                    "status": "failed",
+                    "summary": "failed",
+                    "artifacts": [
+                        {
+                            "type": "llm_failure",
+                            "data": {
+                                "retryable_error": True,
+                                "attempts_used": 4,
+                                "attempts_configured": 4,
+                            },
+                        }
+                    ],
+                    "error": "provider timeout",
+                    "trace": [],
+                },
+            }
+
+    manager = WorkerManager(runner=_Runner(), max_concurrent_workers=1)
+    out = manager.spawn_worker(title="retry", instructions="test")
+    assert out["ok"] is True
+    assert manager.wait_for_idle(timeout_sec=1.0) is True
+
+    events = manager.list_forward_events(consume=True)
+    blocked = [evt for evt in events.get("events", []) if evt.get("type") == "worker_blocked"]
+    assert blocked
+    payload = blocked[-1]["payload"]
+    assert payload["retryable_error"] is True
+    assert payload["attempts_used"] == 4
+    assert payload["attempts_configured"] == 4

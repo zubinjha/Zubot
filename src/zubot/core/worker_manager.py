@@ -117,6 +117,23 @@ class WorkerManager:
             session_summary=None,
         )
 
+    @staticmethod
+    def _extract_llm_failure_meta(result: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(result, dict):
+            return {}
+        artifacts = result.get("artifacts")
+        if not isinstance(artifacts, list):
+            return {}
+        for item in artifacts:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") != "llm_failure":
+                continue
+            data = item.get("data")
+            if isinstance(data, dict):
+                return data
+        return {}
+
     def _record_event(
         self,
         worker: WorkerRecord,
@@ -280,10 +297,24 @@ class WorkerManager:
                         payload={"summary": result_payload.get("summary")},
                     )
                 elif worker.status == "failed":
+                    llm_failure = self._extract_llm_failure_meta(worker.result)
                     self._record_event(
                         worker,
                         event_type="worker_blocked",
-                        payload={"error": worker.error or "worker_failed"},
+                        payload={
+                            "error": worker.error or "worker_failed",
+                            "retryable_error": bool(llm_failure.get("retryable_error", False)),
+                            "attempts_used": (
+                                int(llm_failure["attempts_used"])
+                                if isinstance(llm_failure.get("attempts_used"), int)
+                                else None
+                            ),
+                            "attempts_configured": (
+                                int(llm_failure["attempts_configured"])
+                                if isinstance(llm_failure.get("attempts_configured"), int)
+                                else None
+                            ),
+                        },
                     )
                 else:
                     self._record_event(

@@ -36,9 +36,8 @@ def _daily_summary_model_enabled() -> bool:
 
 def _entry_to_line(entry: dict[str, Any]) -> str:
     speaker = str(entry.get("speaker", "unknown"))
-    route = str(entry.get("route", "unknown"))
     text = str(entry.get("text", ""))
-    return f"- [{speaker}] route={route} text={text}"
+    return f"- [{speaker}] {text}"
 
 
 def _entries_token_estimate(entries: list[dict[str, Any]]) -> int:
@@ -51,15 +50,6 @@ def _split_entries_recursive(entries: list[dict[str, Any]]) -> tuple[list[dict[s
     return entries[:mid], entries[mid:]
 
 
-def _parse_route_from_text(text: str) -> str:
-    for token in text.split():
-        if token.startswith("route="):
-            route = token[6:].strip()
-            if route:
-                return route
-    return "daily.raw"
-
-
 def _load_day_raw_entries(*, day: str, root: Path | None = None) -> list[dict[str, Any]]:
     rows = list_day_raw_entries(day=day, root=root)
     out: list[dict[str, Any]] = []
@@ -68,29 +58,19 @@ def _load_day_raw_entries(*, day: str, root: Path | None = None) -> list[dict[st
         text = _clean_text(str(row.get("text") or ""), max_chars=4000)
         if not text:
             continue
-        out.append({"day": day, "speaker": kind, "route": _parse_route_from_text(text), "text": text})
+        out.append({"day": day, "speaker": kind, "text": text})
     return out
 
 
 def _is_low_signal(entry: dict[str, Any]) -> bool:
-    route = str(entry.get("route", "")).strip().lower()
     speaker = str(entry.get("speaker", "")).strip().lower()
     text = " ".join(str(entry.get("text", "")).strip().lower().split())
 
-    # Keep user/main/task interactions as primary memory signal.
-    if speaker in {"user", "main_agent", "task_agent_event"}:
-        return False
-
-    # Tool/system chatter is usually low signal unless there is an explicit failure.
-    if speaker in {"system", "tool_event"}:
-        return ("error=" not in text) and ("ok=false" not in text) and ("failed" not in text)
-
-    if speaker == "worker_event":
-        return not any(token in text for token in ("failed", "error", "blocked", "completed", "done"))
-
-    if route.startswith("llm.error_fallback"):
+    if speaker not in {"user", "main_agent", "task_agent_event", "worker_event"}:
         return True
-    if len(text) < 24:
+    if len(text) < 8:
+        return True
+    if speaker in {"worker_event", "task_agent_event"} and len(text) < 20:
         return True
 
     low_signal_markers = {
@@ -105,34 +85,59 @@ def _is_low_signal(entry: dict[str, Any]) -> bool:
         "sounds good",
         "got it",
     }
-    return any(marker in text for marker in low_signal_markers)
+    return text in low_signal_markers
+
+
+def _narrative_fallback(entries: list[dict[str, Any]]) -> str:
+    if not entries:
+        return (
+            "- What user wanted: no clear request captured.\n"
+            "- Key decisions: none recorded.\n"
+            "- What was executed: no concrete actions recorded.\n"
+            "- Final state: no stable outcome captured."
+        )
+
+    user_msgs = [str(item.get("text", "")).strip() for item in entries if str(item.get("speaker", "")).strip().lower() == "user"]
+    agent_msgs = [str(item.get("text", "")).strip() for item in entries if str(item.get("speaker", "")).strip().lower() == "main_agent"]
+    task_msgs = [
+        str(item.get("text", "")).strip()
+        for item in entries
+        if str(item.get("speaker", "")).strip().lower() in {"task_agent_event", "worker_event"}
+    ]
+    key_user = "; ".join([msg for msg in user_msgs[:2] if msg]) or "no clear request captured."
+    key_agent = "; ".join([msg for msg in agent_msgs[:2] if msg]) or "no explicit recommendation recorded."
+    key_tasks = "; ".join([msg for msg in task_msgs[-2:] if msg]) or "no concrete task lifecycle events recorded."
+    final_state = next((msg for msg in reversed(agent_msgs) if msg), "no stable outcome captured.")
+    return (
+        f"- What user wanted: {key_user}\n"
+        f"- Key decisions: {key_agent}\n"
+        f"- What was executed: {key_tasks}\n"
+        f"- Final state: {final_state}"
+    )
 
 
 def _summarize_entries_batch(entries: list[dict[str, Any]]) -> str:
     signal_entries = [entry for entry in entries if not _is_low_signal(entry)]
     entries_for_summary = signal_entries or entries
 
-    route_counts: dict[str, int] = {}
-    for entry in entries_for_summary:
-        route = str(entry.get("route", "unknown"))
-        route_counts[route] = route_counts.get(route, 0) + 1
-
     raw_lines = "\n".join(_entry_to_line(entry) for entry in entries_for_summary)[:12000]
     prompt = (
-        "Summarize this raw daily transcript into compact daily memory bullets.\n"
+        "Summarize this raw daily transcript into concise narrative memory bullets.\n"
         "Transcript format:\n"
         "- [user] text from human\n"
         "- [main_agent] assistant reply\n"
         "- [worker_event] worker-to-main event payload\n"
         "- [task_agent_event] central scheduler/task-agent lifecycle event\n"
-        "- [tool_event] significant tool or integration event\n"
-        "- [system] orchestration/runtime status event\n\n"
+        "- Other entries may exist; ignore low-signal/internal noise.\n\n"
         "Requirements:\n"
-        "- Focus on meaningful work only: what was done conceptually, how it was done, and the outcome.\n"
-        "- Do not include idle chat, acknowledgments, or repetitive low-signal exchanges.\n"
-        "- Include decisions, design choices, and concrete progress state.\n"
-        "- Mention worker activity only when it materially changed progress.\n"
-        "- Include next step only if explicit.\n"
+        "- Use this exact 4-bullet structure:\n"
+        "  - What user wanted\n"
+        "  - Key decisions\n"
+        "  - What was executed\n"
+        "  - Final state\n"
+        "- Focus only on meaningful user-agent collaboration and task outcomes.\n"
+        "- Do not include routes, internal metadata, tool call traces, or telemetry counts.\n"
+        "- Mention next step only if explicit.\n"
         "- Keep it concise and factual.\n\n"
         f"Transcript:\n{raw_lines}"
     )
@@ -148,16 +153,7 @@ def _summarize_entries_batch(entries: list[dict[str, Any]]) -> str:
         if llm.get("ok") and isinstance(llm.get("text"), str) and llm["text"].strip():
             return " ".join(llm["text"].strip().split())
 
-    route_summary = ", ".join(f"{route} x{count}" for route, count in sorted(route_counts.items()))
-    highlights = "; ".join(
-        f"{entry.get('speaker', 'unknown')}='{str(entry.get('text', ''))[:90]}' -> {entry.get('route', 'unknown')}"
-        for entry in entries_for_summary[-3:]
-    )
-    return (
-        f"- Signal entries: {len(entries_for_summary)} of {len(entries)}\n"
-        f"- Routes: {route_summary}\n"
-        f"- Highlights: {highlights}"
-    )
+    return _narrative_fallback(entries_for_summary)
 
 
 def summarize_entries(entries: list[dict[str, Any]], *, depth: int = 0) -> str:

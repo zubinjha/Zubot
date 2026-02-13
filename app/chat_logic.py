@@ -191,20 +191,6 @@ def _clean_text(value: str, *, max_chars: int = 2000) -> str:
     return " ".join(value.strip().split())[:max_chars]
 
 
-def _is_high_signal_tool_event(tool_name: str, *, ok: bool, error: str) -> bool:
-    if not ok or bool(error.strip()):
-        return True
-    side_effect_prefixes = (
-        "append_",
-        "delete_",
-        "update_",
-        "write_",
-        "upload_",
-        "create_",
-    )
-    return tool_name.startswith(side_effect_prefixes)
-
-
 def _is_high_signal_worker_event(event_type: str, payload: Any) -> bool:
     e = event_type.strip().lower()
     if any(token in e for token in ("complete", "done", "fail", "error", "blocked", "cancel")):
@@ -244,23 +230,14 @@ def _log_daily_transcript_event(
     clean = _clean_text(text)
     if not clean:
         return
-    route_txt = f" route={route}" if route else ""
-    meta_txt = ""
-    if isinstance(metadata, dict) and metadata:
-        pairs: list[str] = []
-        for key in sorted(metadata):
-            value = metadata.get(key)
-            if value is None:
-                continue
-            pairs.append(f"{key}={value}")
-        if pairs:
-            meta_txt = " " + " ".join(pairs)
+    _ = route
+    _ = metadata
 
     append_daily_memory_entry(
         day_str=day,
         session_id=session_id,
         kind=speaker,
-        text=f"{clean}{route_txt}{meta_txt}",
+        text=clean,
         layer="raw",
     )
 
@@ -302,24 +279,6 @@ def _log_daily_turn(
         route=route,
         metadata={"tools": ",".join(tools_used) if tools_used else None},
     )
-
-    for tool in tool_execution or []:
-        if not isinstance(tool, dict):
-            continue
-        tool_name = str(tool.get("name") or "tool?")
-        tool_ok = bool(tool.get("result_ok", True))
-        tool_error = str(tool.get("error") or "").strip()
-        if not _is_high_signal_tool_event(tool_name, ok=tool_ok, error=tool_error):
-            continue
-        tool_text = f"{tool_name} ok={tool_ok}" + (f" error={tool_error}" if tool_error else "")
-        _log_daily_transcript_event(
-            session_id=session_id,
-            day=day,
-            speaker="tool_event",
-            text=tool_text,
-            route=route,
-            metadata={"tool_name": tool_name, "ok": tool_ok},
-        )
 
     for event in worker_events or []:
         if not isinstance(event, dict):
@@ -377,9 +336,8 @@ def _flush_daily_summary(*, session_id: str, reason: str) -> dict[str, Any]:
 
 def _entry_to_line(entry: dict[str, Any]) -> str:
     speaker = str(entry.get("speaker", "unknown"))
-    route = str(entry.get("route", "unknown"))
     text = str(entry.get("text", ""))
-    return f"- [{speaker}] route={route} text={text}"
+    return f"- [{speaker}] {text}"
 
 
 def _entries_token_estimate(entries: list[dict[str, Any]]) -> int:
@@ -393,18 +351,42 @@ def _split_entries_recursive(entries: list[dict[str, Any]]) -> tuple[list[dict[s
 
 
 def _summarize_entries_batch(entries: list[dict[str, Any]]) -> str:
+    def _narrative_fallback(lines: list[dict[str, Any]]) -> str:
+        if not lines:
+            return (
+                "- What user wanted: no clear request captured.\n"
+                "- Key decisions: none recorded.\n"
+                "- What was executed: no concrete actions recorded.\n"
+                "- Final state: no stable outcome captured."
+            )
+
+        user_msgs = [str(item.get("text", "")).strip() for item in lines if str(item.get("speaker", "")).strip().lower() == "user"]
+        agent_msgs = [str(item.get("text", "")).strip() for item in lines if str(item.get("speaker", "")).strip().lower() == "main_agent"]
+        task_msgs = [
+            str(item.get("text", "")).strip()
+            for item in lines
+            if str(item.get("speaker", "")).strip().lower() in {"task_agent_event", "worker_event"}
+        ]
+        key_user = "; ".join([msg for msg in user_msgs[:2] if msg]) or "no clear request captured."
+        key_agent = "; ".join([msg for msg in agent_msgs[:2] if msg]) or "no explicit recommendation recorded."
+        key_tasks = "; ".join([msg for msg in task_msgs[-2:] if msg]) or "no concrete task lifecycle events recorded."
+        final_state = next((msg for msg in reversed(agent_msgs) if msg), "no stable outcome captured.")
+        return (
+            f"- What user wanted: {key_user}\n"
+            f"- Key decisions: {key_agent}\n"
+            f"- What was executed: {key_tasks}\n"
+            f"- Final state: {final_state}"
+        )
+
     def _is_low_signal(entry: dict[str, Any]) -> bool:
-        route = str(entry.get("route", "")).strip().lower()
         speaker = str(entry.get("speaker", "")).strip().lower()
         text = " ".join(str(entry.get("text", "")).strip().lower().split())
 
-        if route.startswith("llm.error_fallback"):
+        if speaker not in {"user", "main_agent", "task_agent_event", "worker_event"}:
             return True
-        if speaker == "worker_event" and len(text) < 40:
+        if len(text) < 8:
             return True
-        if speaker == "task_agent_event" and len(text) < 40:
-            return True
-        if len(text) < 24:
+        if speaker in {"worker_event", "task_agent_event"} and len(text) < 20:
             return True
 
         low_signal_markers = {
@@ -419,33 +401,33 @@ def _summarize_entries_batch(entries: list[dict[str, Any]]) -> str:
             "sounds good",
             "got it",
         }
-        return any(marker in text for marker in low_signal_markers)
+        return text in low_signal_markers
 
     signal_entries = [entry for entry in entries if not _is_low_signal(entry)]
     entries_for_summary = signal_entries or entries
-
-    route_counts: dict[str, int] = {}
-    for entry in entries_for_summary:
-        route = str(entry.get("route", "unknown"))
-        route_counts[route] = route_counts.get(route, 0) + 1
 
     raw_lines = "\n".join(
         _entry_to_line(entry) for entry in entries_for_summary
     )[:12000]
     prompt = (
-        "Summarize this raw daily transcript into compact daily memory bullets.\n"
+        "Summarize this raw daily transcript into concise narrative memory bullets.\n"
         "Transcript format:\n"
         "- [user] text from human\n"
         "- [main_agent] assistant reply\n"
         "- [worker_event] worker-to-main event payload\n"
         "- [task_agent_event] central scheduler/task-agent lifecycle event\n"
-        "- [tool_event] significant tool or integration event\n"
-        "- [system] orchestration/runtime status event\n\n"
+        "- Other entries may exist; ignore low-signal/internal noise.\n\n"
         "Requirements:\n"
+        "- Use this exact 4-bullet structure:\n"
+        "  - What user wanted\n"
+        "  - Key decisions\n"
+        "  - What was executed\n"
+        "  - Final state\n"
         "- Focus on meaningful work only: what was done conceptually, how it was done, and the outcome.\n"
         "- Do not include idle chat, acknowledgments, or repetitive low-signal exchanges.\n"
         "- Include decisions, design choices, and concrete progress state.\n"
         "- Mention worker activity only when it materially changed progress.\n"
+        "- Do not include routes, internal metadata, tool call traces, or telemetry counts.\n"
         "- Include next step only if explicit.\n"
         "- Keep it concise and factual.\n\n"
         f"Transcript:\n{raw_lines}"
@@ -462,16 +444,7 @@ def _summarize_entries_batch(entries: list[dict[str, Any]]) -> str:
         model_summary = " ".join(llm["text"].strip().split())
         return model_summary
 
-    route_summary = ", ".join(f"{route} x{count}" for route, count in sorted(route_counts.items()))
-    highlights = "; ".join(
-        f"{entry.get('speaker', 'unknown')}='{str(entry.get('text', ''))[:90]}' -> {entry.get('route', 'unknown')}"
-        for entry in entries_for_summary[-3:]
-    )
-    return (
-        f"- Signal entries: {len(entries_for_summary)} of {len(entries)}\n"
-        f"- Routes: {route_summary}\n"
-        f"- Highlights: {highlights}"
-    )
+    return _narrative_fallback(entries_for_summary)
 
 
 def _summarize_turns_recursive(entries: list[dict[str, Any]], *, depth: int = 0) -> str:

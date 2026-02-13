@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from urllib.error import HTTPError
 
 import pytest
 
@@ -118,3 +119,57 @@ def test_call_llm_does_not_retry_non_retryable_error(configured_openrouter, monk
     assert result["ok"] is False
     assert "invalid payload" in result["error"]
     assert attempts["n"] == 1
+
+
+def test_call_llm_retries_wrapped_http_transient_error(configured_openrouter, monkeypatch):
+    attempts = {"n": 0}
+    sleeps: list[float] = []
+
+    def flaky_wrapped_http(**kwargs):
+        _ = kwargs
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            # Mimic provider wrapper behavior: RuntimeError with HTTPError as cause.
+            cause = HTTPError("https://example.com", 503, "Service Unavailable", hdrs=None, fp=None)
+            raise RuntimeError("HTTP 503: temporary upstream failure") from cause
+        return {
+            "ok": True,
+            "provider": "openrouter",
+            "model": "openai/gpt-5-mini",
+            "text": "hello",
+            "tool_calls": None,
+            "finish_reason": "stop",
+            "usage": {"total_tokens": 10},
+            "raw": {},
+            "error": None,
+        }
+
+    monkeypatch.setattr("src.zubot.core.llm_client.call_openrouter", flaky_wrapped_http)
+    monkeypatch.setattr("src.zubot.core.llm_client.sleep", lambda s: sleeps.append(float(s)))
+    result = call_llm(messages=[{"role": "user", "content": "Hi"}])
+    assert result["ok"] is True
+    assert attempts["n"] == 3
+    assert sleeps == [1.0, 3.0]
+    assert result["attempts_used"] == 3
+    assert result["attempts_configured"] == 4
+
+
+def test_call_llm_failure_includes_retry_metadata(configured_openrouter, monkeypatch):
+    attempts = {"n": 0}
+    sleeps: list[float] = []
+
+    def always_timeout(**kwargs):
+        _ = kwargs
+        attempts["n"] += 1
+        raise URLError("timed out")
+
+    monkeypatch.setattr("src.zubot.core.llm_client.call_openrouter", always_timeout)
+    monkeypatch.setattr("src.zubot.core.llm_client.sleep", lambda s: sleeps.append(float(s)))
+    result = call_llm(messages=[{"role": "user", "content": "Hi"}])
+    assert result["ok"] is False
+    assert result["retryable_error"] is True
+    assert result["attempts_used"] == 4
+    assert result["attempts_configured"] == 4
+    assert result["retry_backoff_schedule_sec"] == [1.0, 3.0, 5.0]
+    assert sleeps == [1.0, 3.0, 5.0]
+    assert attempts["n"] == 4

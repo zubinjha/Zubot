@@ -276,7 +276,7 @@ def test_daily_summary_fallback_prefers_signal_turns(monkeypatch):
             {"route": "llm.error_fallback", "speaker": "main_agent", "text": "provider unavailable"},
         ],
     )
-    assert "Signal entries" in out
+    assert "What user wanted" in out
     assert "implemented weather tool wiring" in out or "added parser and tests" in out
 
 
@@ -502,7 +502,7 @@ def test_daily_memory_ingests_worker_task_tool_and_system_events(monkeypatch):
     assert "system" not in kinds
 
 
-def test_daily_memory_keeps_high_signal_tool_failures(monkeypatch):
+def test_daily_memory_ignores_tool_events(monkeypatch):
     chat_logic._SESSIONS.clear()
     captured: list[dict] = []
     calls = {"n": 0}
@@ -555,4 +555,4 @@ def test_daily_memory_keeps_high_signal_tool_failures(monkeypatch):
     result = handle_chat_message("status?", allow_llm_fallback=True, session_id="ingest-tool-failure")
     assert result["ok"] is True
     kinds = {entry.get("kind") for entry in captured}
-    assert "tool_event" in kinds
+    assert "tool_event" not in kinds
