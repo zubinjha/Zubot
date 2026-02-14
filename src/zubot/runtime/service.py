@@ -98,6 +98,10 @@ class RuntimeService:
         mod = self._chat_logic_module()
         return mod.reset_session_context(session_id)
 
+    def session_context_snapshot(self, *, session_id: str = "default") -> dict[str, Any]:
+        mod = self._chat_logic_module()
+        return mod.get_session_context_snapshot(session_id)
+
     def central_status(self) -> dict[str, Any]:
         return get_central_service().status()
 

@@ -31,6 +31,17 @@ class _FakeRuntimeService:
     def reset_session(self, *, session_id: str = "default"):
         return {"ok": True, "reset": True, "session_id": session_id}
 
+    def session_context_snapshot(self, *, session_id: str = "default"):
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "snapshot": {
+                "session_id": session_id,
+                "user_message": "hello",
+                "assembled": {"messages": [{"role": "user", "content": "hello"}]},
+            },
+        }
+
     def central_status(self):
         return {
             "ok": True,
@@ -127,6 +138,16 @@ def test_session_reset_endpoint(monkeypatch):
     body = res.json()
     assert body["ok"] is True
     assert body["reset"] is True
+
+
+def test_session_context_endpoint(monkeypatch):
+    monkeypatch.setattr("app.main.get_runtime_service", lambda: _FakeRuntimeService())
+    res = client.post("/api/session/context", json={"session_id": "ctx-1"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ok"] is True
+    assert body["session_id"] == "ctx-1"
+    assert body["snapshot"]["session_id"] == "ctx-1"
 
 
 def test_central_endpoints(monkeypatch):

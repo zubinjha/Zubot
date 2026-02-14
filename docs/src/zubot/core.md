@@ -100,6 +100,7 @@ Responsibilities:
 Main-agent turn behavior (chat path):
 - per user turn, auto-inject compact location/time runtime context
 - include forwarded task-agent lifecycle events
+- persist latest assembled context snapshot per session for UI/API inspection (`/api/session/context`)
 - exclude internal low-signal chatter from persisted daily memory rows
 
 ## Scheduler + Queue Store

@@ -24,6 +24,10 @@ class InitRequest(BaseModel):
     session_id: str = "default"
 
 
+class SessionContextRequest(BaseModel):
+    session_id: str = "default"
+
+
 class TriggerTaskProfileRequest(BaseModel):
     description: str | None = None
 
@@ -68,6 +72,11 @@ def reset_session(req: ResetRequest) -> dict:
 @app.post("/api/session/init")
 def init_session(req: InitRequest) -> dict:
     return get_runtime_service().init_session(session_id=req.session_id)
+
+
+@app.post("/api/session/context")
+def session_context(req: SessionContextRequest) -> dict:
+    return get_runtime_service().session_context_snapshot(session_id=req.session_id)
 
 
 @app.get("/api/central/status")
@@ -497,6 +506,7 @@ def index() -> HTMLResponse:
     button:active { transform: translateY(1px); }
     button.primary { border-color: #7ec8b5; background: #e9fff8; }
     button.warn { border-color: #f1c98b; background: #fff3df; }
+    button.ghost { background: #fff; }
 
     .status {
       min-height: 20px;
@@ -568,6 +578,96 @@ def index() -> HTMLResponse:
       word-break: break-word;
     }
 
+    .context-dialog {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 0;
+      width: min(900px, 94vw);
+      max-height: 86vh;
+      box-shadow: 0 14px 40px rgba(37, 48, 42, 0.15);
+    }
+
+    .context-dialog::backdrop {
+      background: rgba(23, 28, 24, 0.3);
+    }
+
+    .context-head {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      justify-content: space-between;
+      background: #fcfaf5;
+    }
+
+    .context-head-title {
+      font-family: "Space Grotesk", sans-serif;
+      font-size: 0.92rem;
+      font-weight: 600;
+    }
+
+    .context-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .context-body {
+      padding: 10px 12px 14px;
+      overflow: auto;
+      max-height: calc(86vh - 60px);
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.76rem;
+      line-height: 1.4;
+    }
+
+    .json-node {
+      margin-left: 10px;
+      border-left: 1px dashed #d9d4ca;
+      padding-left: 8px;
+    }
+
+    .json-summary {
+      cursor: pointer;
+      list-style: none;
+      display: inline-block;
+    }
+
+    .json-summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .json-summary::before {
+      content: '>';
+      margin-right: 6px;
+      color: var(--muted);
+    }
+
+    details[open] > .json-summary::before {
+      content: 'v';
+    }
+
+    .json-key {
+      color: #195f4e;
+    }
+
+    .json-type {
+      color: #7a7368;
+      margin-left: 6px;
+    }
+
+    .json-atom {
+      color: #2f3f36;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    .context-muted {
+      color: var(--muted);
+    }
+
     @media (max-width: 900px) {
       .app {
         grid-template-columns: 1fr;
@@ -600,6 +700,7 @@ def index() -> HTMLResponse:
           <div class="row">
             <button class="primary" onclick="sendMsg()">Send</button>
             <button class="warn" onclick="resetSession()">Reset Session</button>
+            <button class="ghost" onclick="openContextDialog()">Context JSON</button>
           </div>
           <div id="status" class="status"></div>
         </div>
@@ -693,6 +794,19 @@ def index() -> HTMLResponse:
     </aside>
   </div>
 
+  <dialog id="context-dialog" class="context-dialog">
+    <div class="context-head">
+      <div class="context-head-title">Session Context Snapshot</div>
+      <div class="context-actions">
+        <button class="ghost" id="context-download-btn">Download</button>
+        <button class="warn" id="context-close-btn">Close</button>
+      </div>
+    </div>
+    <div id="context-body" class="context-body">
+      <div class="context-muted">No snapshot loaded yet.</div>
+    </div>
+  </dialog>
+
   <script>
     // Compatibility fallback: activates only if the richer UI script failed to initialize.
     (function () {
@@ -717,6 +831,11 @@ def index() -> HTMLResponse:
           onDone(xhr.status, body);
         };
         xhr.send(JSON.stringify(payload || {}));
+      }
+      function getSessionId() {
+        var sessionInput = el('session');
+        var sid = sessionInput && sessionInput.value ? String(sessionInput.value).trim() : 'default';
+        return sid || 'default';
       }
       function extractToolCalls(data) {
         if (data && data.data && data.data.tool_execution && data.data.tool_execution.length) {
@@ -859,8 +978,7 @@ def index() -> HTMLResponse:
           });
         };
         window.resetSession = function () {
-          var sessionInput = el('session');
-          var sessionId = sessionInput && sessionInput.value ? String(sessionInput.value).trim() : 'default';
+          var sessionId = getSessionId();
           setBusyStatus(true, 'Resetting session...');
           postJson('/api/session/reset', { session_id: sessionId }, function (_status, body) {
             appendMessage('bot', body && body.note ? body.note : 'Session reset.');
@@ -876,11 +994,36 @@ def index() -> HTMLResponse:
             refreshCentralStatusOnly();
           });
         };
+        window.openContextDialog = function () {
+          var sessionId = getSessionId();
+          postJson('/api/session/context', { session_id: sessionId }, function (_status, body) {
+            var dialogEl = el('context-dialog');
+            var bodyEl = el('context-body');
+            if (bodyEl) {
+              var payload = body && body.ok ? body.snapshot : body;
+              bodyEl.innerHTML = '';
+              var pre = document.createElement('pre');
+              pre.textContent = JSON.stringify(payload || { ok: false, error: 'empty_response' }, null, 2);
+              bodyEl.appendChild(pre);
+            }
+            if (dialogEl && typeof dialogEl.showModal === 'function') {
+              dialogEl.showModal();
+            }
+          });
+        };
         var msgInput = el('msg');
         if (msgInput && !msgInput.__zubotFallbackBound) {
           msgInput.__zubotFallbackBound = true;
           msgInput.addEventListener('keydown', function (e) {
             if (e && e.key === 'Enter') window.sendMsg();
+          });
+        }
+        var closeBtn = el('context-close-btn');
+        var dialogEl = el('context-dialog');
+        if (closeBtn && dialogEl && !closeBtn.__zubotFallbackBound) {
+          closeBtn.__zubotFallbackBound = true;
+          closeBtn.addEventListener('click', function () {
+            if (typeof dialogEl.close === 'function') dialogEl.close();
           });
         }
         refreshCentralStatusOnly();
@@ -924,6 +1067,11 @@ def index() -> HTMLResponse:
     const scheduleFrequencyMinutes = document.getElementById('sched-frequency-minutes');
     const scheduleCalendarRows = document.getElementById('sched-calendar-time-rows');
     const scheduleFormStatus = document.getElementById('sched-form-status');
+    const contextDialogEl = document.getElementById('context-dialog');
+    const contextBodyEl = document.getElementById('context-body');
+    const contextCloseBtnEl = document.getElementById('context-close-btn');
+    const contextDownloadBtnEl = document.getElementById('context-download-btn');
+    let latestContextSnapshot = null;
     let currentUiTab = 'chat';
     let cachedSchedules = [];
     let scheduleEditingId = null;
@@ -1451,6 +1599,73 @@ def index() -> HTMLResponse:
       lastResponseEl.textContent = JSON.stringify(payload, null, 2);
     }
 
+    function escapeHtml(value) {
+      return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function renderJsonNode(value, key = null, depth = 0) {
+      const keyHtml = key !== null ? `<span class="json-key">${escapeHtml(key)}</span>: ` : '';
+      if (value === null || typeof value !== 'object') {
+        return `<div>${keyHtml}<span class="json-atom">${escapeHtml(JSON.stringify(value))}</span></div>`;
+      }
+      const isArray = Array.isArray(value);
+      const entries = isArray ? value.map((v, i) => [String(i), v]) : Object.entries(value);
+      const openByDefault = depth <= 1;
+      const summary = `${keyHtml}<span class="json-atom">${isArray ? '[' : '{'}</span><span class="json-type">${entries.length} item(s)</span><span class="json-atom">${isArray ? ']' : '}'}</span>`;
+      if (!entries.length) {
+        return `<div>${keyHtml}<span class="json-atom">${isArray ? '[]' : '{}'}</span></div>`;
+      }
+      const children = entries.map(([childKey, childValue]) => renderJsonNode(childValue, childKey, depth + 1)).join('');
+      return `<details ${openByDefault ? 'open' : ''}><summary class="json-summary">${summary}</summary><div class="json-node">${children}</div></details>`;
+    }
+
+    async function fetchSessionContextSnapshot(sessionId) {
+      const res = await fetch('/api/session/context', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ session_id: sessionId }),
+      });
+      return res.json();
+    }
+
+    function getSessionId() {
+      const value = (document.getElementById('session').value || 'default').trim();
+      return value || 'default';
+    }
+
+    function renderContextDialogPayload(payload) {
+      if (!contextBodyEl) return;
+      if (!payload || !payload.ok) {
+        contextBodyEl.innerHTML = `<div class="context-muted">${escapeHtml(payload && payload.message ? payload.message : 'No context snapshot available.')}</div>`;
+        return;
+      }
+      latestContextSnapshot = payload.snapshot || null;
+      contextBodyEl.innerHTML = renderJsonNode(payload.snapshot || {}, null, 0);
+    }
+
+    async function openContextDialog() {
+      const sessionId = getSessionId();
+      if (contextBodyEl) {
+        contextBodyEl.innerHTML = '<div class="context-muted">Loading context snapshot...</div>';
+      }
+      if (contextDialogEl && typeof contextDialogEl.showModal === 'function') {
+        contextDialogEl.showModal();
+      }
+      try {
+        const payload = await fetchSessionContextSnapshot(sessionId);
+        renderContextDialogPayload(payload);
+      } catch (_err) {
+        if (contextBodyEl) {
+          contextBodyEl.innerHTML = '<div class="context-muted">Failed to load context snapshot.</div>';
+        }
+      }
+    }
+
     function setProgressFromResponse(data) {
       const route = data && data.route ? data.route : 'unknown route';
       const tools = extractToolCalls(data);
@@ -1641,6 +1856,27 @@ def index() -> HTMLResponse:
     window.refreshScheduleManager = refreshScheduleManager;
     window.saveSchedule = saveSchedule;
     window.addCalendarRunTimeRow = addCalendarRunTimeRow;
+    window.openContextDialog = openContextDialog;
+
+    if (contextCloseBtnEl && contextDialogEl) {
+      contextCloseBtnEl.addEventListener('click', () => {
+        contextDialogEl.close();
+      });
+    }
+    if (contextDownloadBtnEl) {
+      contextDownloadBtnEl.addEventListener('click', () => {
+        if (!latestContextSnapshot) return;
+        const blob = new Blob([JSON.stringify(latestContextSnapshot, null, 2)], { type: 'application/json' });
+        const href = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = href;
+        a.download = `zubot_context_snapshot_${getSessionId()}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(href);
+      });
+    }
 
     setInterval(() => {
       refreshCentralStatus();

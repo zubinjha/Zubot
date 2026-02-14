@@ -1,6 +1,11 @@
 import app.chat_logic as chat_logic
 import pytest
-from app.chat_logic import handle_chat_message, initialize_session_context, reset_session_context
+from app.chat_logic import (
+    get_session_context_snapshot,
+    handle_chat_message,
+    initialize_session_context,
+    reset_session_context,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -73,6 +78,31 @@ def test_initialize_session_context_auto_finalizes_prior_days(monkeypatch):
     assert out["preload"]["auto_finalized_days"] == ["2026-02-10"]
     assert summaries[0]["day"] == "2026-02-10"
     assert summaries[0]["finalize"] is True
+
+
+def test_get_session_context_snapshot_returns_last_assembled_context(monkeypatch):
+    monkeypatch.setattr(chat_logic, "call_llm", lambda **kwargs: {"ok": True, "text": "hello"})
+    monkeypatch.setattr(
+        chat_logic,
+        "load_context_bundle",
+        lambda **kwargs: {"base": {"context/AGENT.md": "x"}, "supplemental": {"context/a.md": "a"}},
+    )
+    monkeypatch.setattr(
+        chat_logic,
+        "invoke_tool",
+        lambda name, **kwargs: (
+            {"ok": True, "city": "Austin", "timezone": "America/Chicago", "source": "test"}
+            if name == "get_location"
+            else {"ok": True, "iso_local": "2026-02-14T12:00:00-06:00", "timezone": "America/Chicago", "source": "test"}
+        ),
+    )
+    session_id = "ctx-snapshot"
+    handle_chat_message("show context", allow_llm_fallback=True, session_id=session_id)
+    out = get_session_context_snapshot(session_id)
+    assert out["ok"] is True
+    assert out["snapshot"]["session_id"] == session_id
+    assert out["snapshot"]["user_message"] == "show context"
+    assert len(out["snapshot"]["assembled"]["messages"]) >= 1
 
 
 def test_handle_chat_message_llm_session_id_in_debug(monkeypatch):

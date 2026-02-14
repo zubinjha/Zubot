@@ -134,6 +134,7 @@ Choose one of these startup modes based on what you want to run.
 - Open: `http://127.0.0.1:8000`
 - Supports `session_id` scoping and session reset via `/api/session/reset`.
 - Supports explicit session initialization via `/api/session/init`.
+- Supports fetching the latest assembled per-session context snapshot via `/api/session/context`.
 - Runtime behavior model:
   - task-agent work is scheduled/triggered into central queue (`defined_task_runs`) and then claimed by central service
   - queue controls are task-run centric (`trigger` and `kill run`)
@@ -169,6 +170,7 @@ Choose one of these startup modes based on what you want to run.
   - task-runtime status panel with queue/run visibility
   - task-agent panel with central runtime status + recent outcomes
   - runtime panel with route, tool-call record, and last reply snapshot
+  - on-demand "Context JSON" dialog with collapsible full-context snapshot + JSON download
   - auto session initialization on page load/session change
 - App chat uses unified LLM + registry tool loop (no keyword-based direct routing).
 

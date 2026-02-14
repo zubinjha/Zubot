@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 from time import monotonic
 from dataclasses import dataclass, field
@@ -44,6 +45,7 @@ class SessionRuntime:
     session_summary: str | None = None
     facts: dict[str, str] = field(default_factory=dict)
     preloaded_daily_context: dict[str, str] = field(default_factory=dict)
+    last_context_snapshot: dict[str, Any] | None = None
     last_touched_mono: float = field(default_factory=monotonic)
 
 
@@ -177,6 +179,23 @@ def reset_session_context(session_id: str) -> dict[str, Any]:
         "session_id": session_id,
         "reset": True,
         "note": "Session context reset. Daily memory remains persisted.",
+    }
+
+
+def get_session_context_snapshot(session_id: str) -> dict[str, Any]:
+    runtime = _get_session(session_id)
+    snapshot = runtime.last_context_snapshot
+    if not isinstance(snapshot, dict):
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "error": "no_snapshot",
+            "message": "No assembled context snapshot is available for this session yet.",
+        }
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "snapshot": deepcopy(snapshot),
     }
 
 
@@ -702,6 +721,20 @@ def handle_chat_message(
             recent_events=turn_events,
             session_summary=runtime.session_summary,
         )
+        runtime.last_context_snapshot = {
+            "session_id": session_id,
+            "user_message": text,
+            "context_bundle": deepcopy(context_bundle),
+            "turn_events": deepcopy(turn_events),
+            "assembled": {
+                "messages": deepcopy(assembled.get("messages", [])),
+                "token_estimate": assembled.get("token_estimate"),
+                "kept_recent_message_count": assembled.get("kept_recent_message_count"),
+                "dropped_recent_event_count": assembled.get("dropped_recent_event_count"),
+                "updated_session_summary": assembled.get("updated_session_summary"),
+                "updated_facts": deepcopy(assembled.get("updated_facts", {})),
+            },
+        }
         runtime.session_summary = assembled.get("updated_session_summary")
         updated_facts = assembled.get("updated_facts")
         if isinstance(updated_facts, dict):
