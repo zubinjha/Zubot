@@ -24,7 +24,6 @@ This document describes the v1 central runtime scaffold for scheduled task-agent
 - `poll_interval_sec`
 - `task_runner_concurrency`
 - `scheduler_db_path`
-- `worker_slot_reserve_for_workers`
 - `run_history_retention_days`
 - `run_history_max_rows`
 - `memory_manager_sweep_interval_sec`
@@ -43,11 +42,11 @@ Default DB path:
 Tables:
 - `defined_tasks`
   - schedule metadata + cadence + last run info
-  - supports `interval` and `calendar` schedule modes
+  - supports `frequency` and `calendar` schedule modes
 - `defined_tasks_run_times`
   - optional calendar-mode run-time rows (multiple `HH:MM` entries per defined task)
 - `defined_task_runs`
-  - queued/running/completed run lifecycle records
+  - queued/running/terminal run lifecycle records
 - `defined_task_run_history`
   - completion snapshots for historical reporting/pruning
 
@@ -60,11 +59,14 @@ Indexes:
 2. Claim queued runs (`status = running`) under concurrency cap.
 3. Execute via `TaskAgentRunner`.
 4. Write completion status (`done`/`failed`/`blocked`) and schedule last-run metadata.
-5. Run housekeeping:
+5. Support explicit run kill:
+  - queued run -> immediate `blocked`
+  - running run -> cancellation requested, executor terminates subprocess and finalizes `blocked`
+6. Run housekeeping:
   - prune old completed run history rows
   - run debounced/periodic memory finalization sweeps for prior non-finalized days (full raw-day replay summary)
   - emit structured memory-manager sweep events for observability (not persisted to daily-memory raw events)
-6. Memory ingestion behavior for task-agent events:
+7. Memory ingestion behavior for task-agent events:
   - append raw memory events (`task_agent_event`) for queue + terminal lifecycle milestones:
     - `run_queued`
     - `run_finished`
@@ -73,6 +75,7 @@ Indexes:
   - increment day-memory counters
   - enqueue day-summary jobs with dedupe
   - kick background summary worker for non-blocking summary updates
+  - do not persist routine central internal/system events to daily memory
 
 ## Check-In Contract
 
@@ -88,6 +91,27 @@ Per profile status includes:
   - error
   - finished_at
 
+## Task Progress Event Contract
+
+Forwarded task events (`type = task_agent_event`) include normalized payload fields:
+- `task_id`
+- `task_name`
+- `run_id`
+- `status`:
+  - `queued`
+  - `running`
+  - `progress`
+  - `completed`
+  - `failed`
+  - `killed`
+- optional:
+  - `message`
+  - `percent` (0-100)
+- timestamps:
+  - `started_at`
+  - `updated_at`
+  - `finished_at`
+
 ## API Surface
 - `GET /api/central/status`
 - `POST /api/central/start`
@@ -99,6 +123,7 @@ Per profile status includes:
 - `GET /api/central/runs`
 - `GET /api/central/metrics`
 - `POST /api/central/trigger/{task_id}`
+- `POST /api/central/runs/{run_id}/kill`
 
 ## Future Direction
 - merge scheduler store + memory index into a unified sqlite authority

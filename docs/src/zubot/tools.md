@@ -173,7 +173,7 @@ Behavior:
 - registry exposes metadata as a machine-readable tool contract for model calls
 - runtime dispatch should go through `invoke_tool(name, **kwargs)` instead of importing tool handlers ad hoc
 - weather/time tools auto-inject `get_location()` when `location` is omitted or explicitly `null`
-- task-agent worker escalation should use `spawn_task_agent_worker` (reserve-aware) instead of `spawn_worker`
+- task orchestration is queue-centric (`enqueue_task`, `kill_task_run`, `list_task_runs`) instead of worker-centric spawning.
 
 LLM integration:
 - `app/chat_logic.py` builds OpenAI-style tool schemas from registry metadata each turn
@@ -182,14 +182,9 @@ LLM integration:
 
 Current registered tools:
 - Orchestration:
-  - `spawn_worker`
-  - `spawn_task_agent_worker`
-  - `message_worker`
-  - `cancel_worker`
-  - `reset_worker_context`
-  - `get_worker`
-  - `list_workers`
-  - `list_worker_events`
+  - `enqueue_task`
+  - `kill_task_run`
+  - `list_task_runs`
   - `get_task_agent_checkin`
 - Kernel:
   - `get_location`

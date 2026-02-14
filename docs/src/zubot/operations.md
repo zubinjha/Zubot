@@ -8,7 +8,7 @@ This runbook covers practical operation of Zubot for long-running local usage.
    - `source .venv/bin/activate`
 2. Confirm central runtime config:
    - `central_service.enabled = true`
-   - `central_service.poll_interval_sec` and `task_runner_concurrency` set to desired values
+   - `central_service.poll_interval_sec` (default `3600`) and `task_runner_concurrency` (current default `3`) set to desired values
 3. Start daemon (runtime-first):
    - `python -m src.zubot.daemon.main`
    - optional host/port override: `python -m src.zubot.daemon.main --host 127.0.0.1 --port 8000`
@@ -52,10 +52,16 @@ Use `GET /api/central/metrics` and monitor:
 - `runtime.oldest_queued_age_sec`
 - `runtime.longest_running_age_sec`
 - `runtime.warnings`
+- `runtime.active_runs`
+- `runtime.queued_runs_preview`
 
 Warning semantics:
 - `queue_depth_high`: queued runs crossed configured threshold.
 - `running_task_stale`: longest running task crossed configured age threshold.
+
+Operational control:
+- enqueue manual task run: `POST /api/central/trigger/{task_id}`
+- kill queued/running run: `POST /api/central/runs/{run_id}/kill`
 
 ## Retention and Pruning
 

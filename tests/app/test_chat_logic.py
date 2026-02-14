@@ -280,56 +280,7 @@ def test_daily_summary_fallback_prefers_signal_turns(monkeypatch):
     assert "implemented weather tool wiring" in out or "added parser and tests" in out
 
 
-def test_handle_chat_message_injects_forwarded_worker_events(monkeypatch):
-    class _FakeManager:
-        def list_workers(self):
-            return {
-                "ok": True,
-                "workers": [],
-                "runtime": {"running_count": 0, "queued_count": 0, "max_concurrent_workers": 3},
-            }
-
-        def list_forward_events(self, consume=True):
-            _ = consume
-            return {
-                "ok": True,
-                "events": [
-                    {
-                        "event_id": "wevt_1",
-                        "worker_id": "worker_1",
-                        "worker_title": "Research",
-                        "type": "worker_completed",
-                        "timestamp": "2026-01-01T00:00:00+00:00",
-                        "payload": {"summary": "done"},
-                    }
-                ],
-            }
-
-    monkeypatch.setattr(chat_logic, "get_worker_manager", lambda: _FakeManager())
-    monkeypatch.setattr(chat_logic, "call_llm", lambda **kwargs: {"ok": True, "text": "ack"})
-    monkeypatch.setattr(
-        chat_logic,
-        "load_context_bundle",
-        lambda **kwargs: {"base": {"context/AGENT.md": "x"}, "supplemental": {}},
-    )
-    result = handle_chat_message("status?", allow_llm_fallback=True, session_id="worker-forward")
-    assert result["ok"] is True
-    assert result["data"]["context_debug"]["forwarded_worker_events_injected"] == 1
-
-
 def test_handle_chat_message_injects_forwarded_task_agent_events(monkeypatch):
-    class _FakeManager:
-        def list_workers(self):
-            return {
-                "ok": True,
-                "workers": [],
-                "runtime": {"running_count": 0, "queued_count": 0, "max_concurrent_workers": 3},
-            }
-
-        def list_forward_events(self, consume=True):
-            _ = consume
-            return {"ok": True, "events": []}
-
     class _FakeCentral:
         def list_forward_events(self, consume=True):
             _ = consume
@@ -345,7 +296,6 @@ def test_handle_chat_message_injects_forwarded_task_agent_events(monkeypatch):
                 ],
             }
 
-    monkeypatch.setattr(chat_logic, "get_worker_manager", lambda: _FakeManager())
     monkeypatch.setattr(chat_logic, "get_central_service", lambda: _FakeCentral())
     monkeypatch.setattr(chat_logic, "call_llm", lambda **kwargs: {"ok": True, "text": "ack"})
     monkeypatch.setattr(
@@ -358,37 +308,30 @@ def test_handle_chat_message_injects_forwarded_task_agent_events(monkeypatch):
     assert result["data"]["context_debug"]["forwarded_task_agent_events_injected"] == 1
 
 
-def test_handle_chat_message_keeps_worker_context_isolated(monkeypatch):
+def test_handle_chat_message_injects_time_location_context(monkeypatch):
     captured = {"messages": None}
-    secret = "WORKER_INTERNAL_SECRET_SHOULD_NOT_LEAK"
-
-    class _FakeManager:
-        def list_workers(self):
-            return {
-                "ok": True,
-                "workers": [
-                    {
-                        "worker_id": "worker_1",
-                        "title": "Research Task",
-                        "status": "running",
-                        "cancel_requested": False,
-                        # Simulate accidental internal fields in manager output.
-                        "context_session_dump": secret,
-                        "facts_raw": {"internal": secret},
-                    }
-                ],
-                "runtime": {"running_count": 1, "queued_count": 0, "max_concurrent_workers": 3},
-            }
-
-        def list_forward_events(self, consume=True):
-            _ = consume
-            return {"ok": True, "events": []}
+    calls = {"n": 0}
 
     def fake_call_llm(**kwargs):
         captured["messages"] = kwargs.get("messages")
         return {"ok": True, "text": "ok"}
 
-    monkeypatch.setattr(chat_logic, "get_worker_manager", lambda: _FakeManager())
+    def fake_invoke_tool(name, **kwargs):
+        _ = kwargs
+        calls["n"] += 1
+        if name == "get_location":
+            return {"ok": True, "city": "Worthington", "timezone": "America/New_York", "source": "config"}
+        if name == "get_current_time":
+            return {
+                "ok": True,
+                "iso_utc": "2026-01-01T00:00:00+00:00",
+                "iso_local": "2025-12-31T19:00:00-05:00",
+                "timezone": "America/New_York",
+                "source": "time",
+            }
+        return {"ok": False, "error": "unknown"}
+
+    monkeypatch.setattr(chat_logic, "invoke_tool", fake_invoke_tool)
     monkeypatch.setattr(chat_logic, "call_llm", fake_call_llm)
     monkeypatch.setattr(
         chat_logic,
@@ -397,9 +340,10 @@ def test_handle_chat_message_keeps_worker_context_isolated(monkeypatch):
     )
     result = handle_chat_message("check status", allow_llm_fallback=True, session_id="worker-isolation")
     assert result["ok"] is True
-
     all_content = " ".join(str(msg.get("content", "")) for msg in (captured["messages"] or []))
-    assert secret not in all_content
+    assert "RuntimeTimeLocation" in all_content
+    assert calls["n"] >= 2
+    assert result["data"]["context_debug"]["time_location_context_injected"] is True
 
 
 def test_session_pruning_respects_max_active_sessions(monkeypatch):
@@ -417,30 +361,6 @@ def test_daily_memory_ingests_worker_task_tool_and_system_events(monkeypatch):
     chat_logic._SESSIONS.clear()
     captured: list[dict] = []
     calls = {"n": 0}
-
-    class _FakeManager:
-        def list_workers(self):
-            return {
-                "ok": True,
-                "workers": [],
-                "runtime": {"running_count": 0, "queued_count": 0, "max_concurrent_workers": 3},
-            }
-
-        def list_forward_events(self, consume=True):
-            _ = consume
-            return {
-                "ok": True,
-                "events": [
-                    {
-                        "event_id": "wevt_1",
-                        "worker_id": "worker_1",
-                        "worker_title": "Research",
-                        "type": "worker_completed",
-                        "timestamp": "2026-01-01T00:00:00+00:00",
-                        "payload": {"summary": "done"},
-                    }
-                ],
-            }
 
     class _FakeCentral:
         def list_forward_events(self, consume=True):
@@ -473,7 +393,6 @@ def test_daily_memory_ingests_worker_task_tool_and_system_events(monkeypatch):
             }
         return {"ok": True, "text": "ack", "tool_calls": None}
 
-    monkeypatch.setattr(chat_logic, "get_worker_manager", lambda: _FakeManager())
     monkeypatch.setattr(chat_logic, "get_central_service", lambda: _FakeCentral())
     monkeypatch.setattr(chat_logic, "call_llm", fake_call_llm)
     monkeypatch.setattr(chat_logic, "invoke_tool", lambda name, **kwargs: {"ok": True, "name": name})
@@ -496,7 +415,6 @@ def test_daily_memory_ingests_worker_task_tool_and_system_events(monkeypatch):
     kinds = {entry.get("kind") for entry in captured}
     assert "user" in kinds
     assert "main_agent" in kinds
-    assert "worker_event" not in kinds
     assert "task_agent_event" not in kinds
     assert "tool_event" not in kinds
     assert "system" not in kinds
@@ -506,18 +424,6 @@ def test_daily_memory_ignores_tool_events(monkeypatch):
     chat_logic._SESSIONS.clear()
     captured: list[dict] = []
     calls = {"n": 0}
-
-    class _FakeManager:
-        def list_workers(self):
-            return {
-                "ok": True,
-                "workers": [],
-                "runtime": {"running_count": 0, "queued_count": 0, "max_concurrent_workers": 3},
-            }
-
-        def list_forward_events(self, consume=True):
-            _ = consume
-            return {"ok": True, "events": []}
 
     def fake_call_llm(**kwargs):
         calls["n"] += 1
@@ -535,7 +441,6 @@ def test_daily_memory_ignores_tool_events(monkeypatch):
             }
         return {"ok": True, "text": "ack", "tool_calls": None}
 
-    monkeypatch.setattr(chat_logic, "get_worker_manager", lambda: _FakeManager())
     monkeypatch.setattr(chat_logic, "call_llm", fake_call_llm)
     monkeypatch.setattr(chat_logic, "invoke_tool", lambda name, **kwargs: {"ok": False, "error": "boom", "name": name})
     monkeypatch.setattr(

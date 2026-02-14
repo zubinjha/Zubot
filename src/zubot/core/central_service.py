@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from threading import Event, RLock, Thread
 from typing import Any
 from uuid import uuid4
@@ -19,10 +20,9 @@ from .task_scheduler_store import TaskSchedulerStore, resolve_scheduler_db_path
 @dataclass(slots=True)
 class CentralServiceSettings:
     enabled: bool = False
-    poll_interval_sec: int = 60
+    poll_interval_sec: int = 3600
     task_runner_concurrency: int = 2
     scheduler_db_path: str = "memory/central/zubot_core.db"
-    worker_slot_reserve_for_workers: int = 2
     run_history_retention_days: int = 30
     run_history_max_rows: int = 5000
     memory_manager_sweep_interval_sec: int = 12 * 60 * 60
@@ -42,10 +42,9 @@ def _load_central_settings() -> CentralServiceSettings:
         return CentralServiceSettings()
 
     enabled = bool(central.get("enabled", False))
-    poll = central.get("poll_interval_sec", 60)
+    poll = central.get("poll_interval_sec", 3600)
     conc = central.get("task_runner_concurrency", 2)
     db_path = central.get("scheduler_db_path", "memory/central/zubot_core.db")
-    reserve = central.get("worker_slot_reserve_for_workers", 2)
     retention_days = central.get("run_history_retention_days", 30)
     history_max_rows = central.get("run_history_max_rows", 5000)
     memory_sweep_sec = central.get("memory_manager_sweep_interval_sec", 12 * 60 * 60)
@@ -55,10 +54,9 @@ def _load_central_settings() -> CentralServiceSettings:
 
     return CentralServiceSettings(
         enabled=enabled,
-        poll_interval_sec=int(poll) if isinstance(poll, int) and poll > 0 else 60,
+        poll_interval_sec=int(poll) if isinstance(poll, int) and poll > 0 else 3600,
         task_runner_concurrency=int(conc) if isinstance(conc, int) and conc > 0 else 2,
         scheduler_db_path=str(db_path) if isinstance(db_path, str) and db_path.strip() else "memory/central/zubot_core.db",
-        worker_slot_reserve_for_workers=int(reserve) if isinstance(reserve, int) and reserve >= 0 else 2,
         run_history_retention_days=int(retention_days) if isinstance(retention_days, int) and retention_days >= 0 else 30,
         run_history_max_rows=int(history_max_rows) if isinstance(history_max_rows, int) and history_max_rows >= 0 else 5000,
         memory_manager_sweep_interval_sec=int(memory_sweep_sec) if isinstance(memory_sweep_sec, int) and memory_sweep_sec > 0 else 12 * 60 * 60,
@@ -137,6 +135,7 @@ class CentralService:
         self._loop_thread: Thread | None = None
         self._active_threads: dict[str, Thread] = {}
         self._active_descriptions: dict[str, str] = {}
+        self._cancel_events: dict[str, Event] = {}
         self._events: list[dict[str, Any]] = []
 
     @staticmethod
@@ -185,7 +184,56 @@ class CentralService:
     def _is_high_signal_task_memory_event(event_type: str) -> bool:
         return event_type in {"run_queued", "run_finished", "run_failed", "run_blocked"}
 
-    def _log_task_agent_event(self, *, event_type: str, profile_id: str, run_id: str, detail: str) -> None:
+    @staticmethod
+    def _extract_run_status_from_detail(detail: str) -> str | None:
+        match = re.search(r"\bstatus=(done|failed|blocked)\b", detail)
+        if match:
+            return str(match.group(1))
+        return None
+
+    @staticmethod
+    def _progress_status_for_event(*, event_type: str, detail: str, run_status: str | None) -> str:
+        normalized = (run_status or "").strip().lower() or None
+        if normalized is None:
+            normalized = CentralService._extract_run_status_from_detail(detail)
+
+        if event_type == "run_queued":
+            return "queued"
+        if event_type == "run_started":
+            return "running"
+        if event_type == "run_progress":
+            return "progress"
+        if event_type == "run_failed":
+            return "failed"
+        if event_type == "run_blocked":
+            low = detail.lower()
+            if "killed_by" in low or "killed" in low:
+                return "killed"
+            return "failed"
+        if event_type == "run_finished":
+            if normalized == "done":
+                return "completed"
+            if normalized == "failed":
+                return "failed"
+            if normalized == "blocked":
+                low = detail.lower()
+                if "killed_by" in low or "killed" in low:
+                    return "killed"
+                return "failed"
+            return "completed"
+        return "progress"
+
+    def _log_task_agent_event(
+        self,
+        *,
+        event_type: str,
+        profile_id: str,
+        run_id: str,
+        detail: str,
+        run_status: str | None = None,
+        progress_message: str | None = None,
+        percent: int | None = None,
+    ) -> None:
         text = f"{event_type} profile={profile_id} run_id={run_id} {detail}".strip()
         day = local_day_str()
         if self._is_high_signal_task_memory_event(event_type):
@@ -201,9 +249,34 @@ class CentralService:
             worker = get_memory_summary_worker()
             worker.start()
             worker.kick()
+
+        task_profiles = _load_task_profiles()
+        task_name = str(task_profiles.get(profile_id, {}).get("name") or profile_id)
+        run_row = self._store.get_run(run_id=run_id)
+        progress_payload = {
+            "event_type": event_type,
+            "task_id": profile_id,
+            "task_name": task_name,
+            "run_id": run_id,
+            "status": self._progress_status_for_event(
+                event_type=event_type,
+                detail=detail,
+                run_status=run_status,
+            ),
+            "message": (
+                progress_message.strip()[:240]
+                if isinstance(progress_message, str) and progress_message.strip()
+                else detail[:240]
+            ),
+            "percent": int(percent) if isinstance(percent, int) and 0 <= int(percent) <= 100 else None,
+            "started_at": run_row.get("started_at") if isinstance(run_row, dict) else None,
+            "updated_at": self._utc_now_iso(),
+            "finished_at": run_row.get("finished_at") if isinstance(run_row, dict) else None,
+            "detail": detail,
+        }
         self._record_event(
             event_type="task_agent_event",
-            payload={"event_type": event_type, "profile_id": profile_id, "run_id": run_id, "detail": detail},
+            payload=progress_payload,
             forward_to_user=True,
         )
 
@@ -274,10 +347,20 @@ class CentralService:
         run_id = str(claimed.get("run_id") or "")
         profile_id = str(claimed.get("profile_id") or "")
         payload = claimed.get("payload") if isinstance(claimed.get("payload"), dict) else {}
+        with self._lock:
+            cancel_event = self._cancel_events.get(run_id)
         self._log_task_agent_event(event_type="run_started", profile_id=profile_id, run_id=run_id, detail="started")
+        self._log_task_agent_event(
+            event_type="run_progress",
+            profile_id=profile_id,
+            run_id=run_id,
+            detail="progress=10 message=task execution started",
+            percent=10,
+            progress_message="task execution started",
+        )
 
         try:
-            result = self._runner.run_profile(profile_id=profile_id, payload=payload)
+            result = self._runner.run_profile(profile_id=profile_id, payload=payload, cancel_event=cancel_event)
             status = str(result.get("status") or "done")
             if status not in {"done", "failed", "blocked"}:
                 status = "failed"
@@ -302,7 +385,13 @@ class CentralService:
                     detail += f" attempts_used={attempts_used}"
                 if attempts_configured is not None:
                     detail += f" attempts_configured={attempts_configured}"
-            self._log_task_agent_event(event_type="run_finished", profile_id=profile_id, run_id=run_id, detail=detail)
+            self._log_task_agent_event(
+                event_type="run_finished",
+                profile_id=profile_id,
+                run_id=run_id,
+                detail=detail,
+                run_status=status,
+            )
         except Exception as exc:
             self._store.complete_run(run_id=run_id, status="failed", summary=None, error=str(exc))
             self._log_task_agent_event(
@@ -315,6 +404,7 @@ class CentralService:
             with self._lock:
                 self._active_descriptions.pop(run_id, None)
                 self._active_threads.pop(run_id, None)
+                self._cancel_events.pop(run_id, None)
             self._run_housekeeping(on_completion=True)
 
     def _dispatch_available(self) -> dict[str, Any]:
@@ -336,6 +426,7 @@ class CentralService:
             thread = Thread(target=self._execute_claimed_run, args=(claimed,), daemon=True)
             with self._lock:
                 self._active_descriptions[run_id] = desc
+                self._cancel_events[run_id] = Event()
                 self._active_threads[run_id] = thread
             thread.start()
             started += 1
@@ -369,7 +460,6 @@ class CentralService:
                 "poll_interval_sec": settings.poll_interval_sec,
                 "task_runner_concurrency": settings.task_runner_concurrency,
                 "scheduler_db_path": settings.scheduler_db_path,
-                "worker_slot_reserve_for_workers": settings.worker_slot_reserve_for_workers,
                 "run_history_retention_days": settings.run_history_retention_days,
                 "run_history_max_rows": settings.run_history_max_rows,
                 "memory_manager_sweep_interval_sec": settings.memory_manager_sweep_interval_sec,
@@ -399,6 +489,54 @@ class CentralService:
                 )
         self._dispatch_available()
         return out
+
+    def kill_run(self, *, run_id: str, requested_by: str = "main_agent") -> dict[str, Any]:
+        clean_run_id = str(run_id or "").strip()
+        if not clean_run_id:
+            return {"ok": False, "error": "run_id is required."}
+
+        row = self._store.get_run(run_id=clean_run_id)
+        if row is None:
+            return {"ok": False, "error": "run not found"}
+
+        profile_id = str(row.get("profile_id") or "unknown")
+        status = str(row.get("status") or "")
+        if status in {"done", "failed", "blocked"}:
+            return {"ok": True, "run_id": clean_run_id, "status": status, "already_terminal": True}
+
+        if status == "queued":
+            out = self._store.cancel_run(run_id=clean_run_id, reason=f"killed_by_user:{requested_by}")
+            if out.get("ok"):
+                self._log_task_agent_event(
+                    event_type="run_blocked",
+                    profile_id=profile_id,
+                    run_id=clean_run_id,
+                    detail=f"killed_by={requested_by} state=queued",
+                )
+            self._run_housekeeping(on_completion=True)
+            return out
+
+        if status == "running":
+            with self._lock:
+                cancel_event = self._cancel_events.get(clean_run_id)
+            if cancel_event is None:
+                return {"ok": False, "error": "run is not currently managed by active executor"}
+            cancel_event.set()
+            self._log_task_agent_event(
+                event_type="run_blocked",
+                profile_id=profile_id,
+                run_id=clean_run_id,
+                detail=f"killed_by={requested_by} state=running cancel_requested=true",
+            )
+            return {
+                "ok": True,
+                "run_id": clean_run_id,
+                "status": "running",
+                "cancel_requested": True,
+                "already_terminal": False,
+            }
+
+        return {"ok": False, "error": f"unsupported run status `{status}`"}
 
     def list_defined_tasks(self) -> dict[str, Any]:
         tasks = _load_task_profiles()
@@ -548,6 +686,10 @@ class CentralService:
         if isinstance(longest_running, (int, float)) and longest_running >= settings.running_age_warning_sec > 0:
             warnings.append("running_task_stale")
 
+        runs = self._store.list_runs(limit=200)
+        active_runs = [row for row in runs if str(row.get("status") or "") == "running"]
+        queued_preview = [row for row in runs if str(row.get("status") or "") == "queued"][:10]
+
         return {
             "ok": True,
             "service": {
@@ -556,7 +698,6 @@ class CentralService:
                 "poll_interval_sec": settings.poll_interval_sec,
                 "task_runner_concurrency": settings.task_runner_concurrency,
                 "scheduler_db_path": str(self._store.db_path),
-                "worker_slot_reserve_for_workers": settings.worker_slot_reserve_for_workers,
                 "run_history_retention_days": settings.run_history_retention_days,
                 "run_history_max_rows": settings.run_history_max_rows,
                 "memory_manager_sweep_interval_sec": settings.memory_manager_sweep_interval_sec,
@@ -571,6 +712,8 @@ class CentralService:
                 "task_event_buffer_count": event_buffer_count,
                 **metrics,
                 "warnings": warnings,
+                "active_runs": active_runs,
+                "queued_runs_preview": queued_preview,
             },
             "task_agents": self._check_in_payload(),
         }

@@ -81,7 +81,7 @@ def test_trigger_profile_runs_and_updates_last_result(configured_central, monkey
         {
             "describe_run": staticmethod(lambda *, profile_id, payload=None: f"{profile_id}: fake run"),
             "run_profile": staticmethod(
-                lambda *, profile_id, payload=None: {
+                lambda *, profile_id, payload=None, cancel_event=None: {
                     "ok": True,
                     "status": "done",
                     "summary": f"{profile_id} done",
@@ -124,6 +124,57 @@ def test_start_stop_lifecycle(configured_central):
     stopped = service.stop()
     assert stopped["ok"] is True
     assert service.status()["service"]["running"] is False
+
+
+def test_kill_run_cancels_running_task(configured_central):
+    service = CentralService()
+
+    class _BlockingRunner:
+        @staticmethod
+        def describe_run(*, profile_id, payload=None):
+            return f"{profile_id}: blocked run"
+
+        @staticmethod
+        def run_profile(*, profile_id, payload=None, cancel_event=None):
+            deadline = time.time() + 2.0
+            while time.time() < deadline:
+                if cancel_event is not None and cancel_event.is_set():
+                    return {
+                        "ok": False,
+                        "status": "blocked",
+                        "summary": None,
+                        "error": "killed_by_user",
+                        "current_description": "killed",
+                    }
+                time.sleep(0.02)
+            return {
+                "ok": True,
+                "status": "done",
+                "summary": "ok",
+                "error": None,
+                "current_description": "done",
+            }
+
+    service._runner = _BlockingRunner()  # noqa: SLF001
+    trigger = service.trigger_profile(profile_id="profile_a", description="manual")
+    assert trigger["ok"] is True
+    run_id = str(trigger["run_id"])
+
+    kill = service.kill_run(run_id=run_id, requested_by="test")
+    assert kill["ok"] is True
+
+    deadline = time.time() + 2.0
+    terminal_status = None
+    while time.time() < deadline:
+        runs = service.list_runs(limit=10)["runs"]
+        current = next((row for row in runs if row.get("run_id") == run_id), None)
+        if current and current.get("status") in {"blocked", "failed", "done"}:
+            terminal_status = current.get("status")
+            if terminal_status == "blocked":
+                break
+        time.sleep(0.05)
+
+    assert terminal_status == "blocked"
 
 
 def test_list_schedules_reads_from_db(configured_central):
@@ -183,7 +234,8 @@ def test_central_service_concurrency_respects_setting(configured_central):
             return f"{profile_id}: blocked run"
 
         @staticmethod
-        def run_profile(*, profile_id, payload=None):
+        def run_profile(*, profile_id, payload=None, cancel_event=None):
+            _ = cancel_event
             with guard:
                 active["count"] += 1
                 active["peak"] = max(active["peak"], active["count"])
@@ -252,7 +304,7 @@ def test_metrics_include_recent_events(configured_central):
         {
             "describe_run": staticmethod(lambda *, profile_id, payload=None: f"{profile_id}: fake run"),
             "run_profile": staticmethod(
-                lambda *, profile_id, payload=None: {
+                lambda *, profile_id, payload=None, cancel_event=None: {
                     "ok": True,
                     "status": "done",
                     "summary": f"{profile_id} done",
@@ -275,7 +327,13 @@ def test_metrics_include_recent_events(configured_central):
     metrics = service.metrics()
     assert metrics["ok"] is True
     assert isinstance(metrics.get("recent_events"), list)
-    assert any(event.get("type") == "task_agent_event" for event in metrics["recent_events"])
+    progress_events = [event for event in metrics["recent_events"] if event.get("type") == "task_agent_event"]
+    assert progress_events
+    payload = progress_events[-1].get("payload", {})
+    assert isinstance(payload, dict)
+    assert payload.get("task_id") == "profile_a"
+    assert payload.get("run_id")
+    assert payload.get("status") in {"queued", "running", "progress", "completed", "failed", "killed"}
 
 
 def test_status_emits_queue_pressure_warning(configured_central):
@@ -288,7 +346,8 @@ def test_status_emits_queue_pressure_warning(configured_central):
             return f"{profile_id}: blocked"
 
         @staticmethod
-        def run_profile(*, profile_id, payload=None):
+        def run_profile(*, profile_id, payload=None, cancel_event=None):
+            _ = cancel_event
             gate.wait(timeout=2.0)
             return {
                 "ok": True,
@@ -316,3 +375,45 @@ def test_status_emits_queue_pressure_warning(configured_central):
     gate.set()
     service.stop()
     assert warned is True
+
+
+def test_status_includes_active_and_queue_run_views(configured_central):
+    service = CentralService()
+    service._settings.task_runner_concurrency = 1  # noqa: SLF001
+    gate = Event()
+
+    class _BlockingRunner:
+        @staticmethod
+        def describe_run(*, profile_id, payload=None):
+            return f"{profile_id}: blocked"
+
+        @staticmethod
+        def run_profile(*, profile_id, payload=None, cancel_event=None):
+            _ = cancel_event
+            gate.wait(timeout=2.0)
+            return {
+                "ok": True,
+                "status": "done",
+                "summary": "ok",
+                "error": None,
+                "current_description": "done",
+            }
+
+    service._runner = _BlockingRunner()  # noqa: SLF001
+    service.trigger_profile(profile_id="profile_a", description="r1")
+    service.trigger_profile(profile_id="profile_a", description="r2")
+
+    deadline = time.time() + 1.5
+    observed = None
+    while time.time() < deadline:
+        runtime = service.status().get("runtime", {})
+        if runtime.get("running_count", 0) >= 1 and runtime.get("queued_count", 0) >= 1:
+            observed = runtime
+            break
+        time.sleep(0.02)
+
+    gate.set()
+    service.stop()
+    assert observed is not None
+    assert isinstance(observed.get("active_runs"), list)
+    assert isinstance(observed.get("queued_runs_preview"), list)

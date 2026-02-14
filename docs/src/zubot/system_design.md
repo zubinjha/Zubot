@@ -7,19 +7,14 @@ This document captures the conceptual architecture of Zubot at the system level.
 ### 1) User-Facing Agent (Main Agent)
 - Primary chat-facing agent.
 - Handles direct user interaction.
-- Can inspect worker/task-agent status and orchestrate follow-up actions.
+- Can inspect task-agent queue status and orchestrate follow-up actions.
 - Operates through the runtime/app chat path.
 
 ### 2) Task Agents
 - Profile-driven agents executed by the central scheduler runtime.
 - Runs are queue-based (`queued` -> `running` -> terminal status).
 - Intended for recurring or structured jobs (for example job search workflows).
-- Can request worker help via reserve-aware task-agent worker tooling.
-
-### 3) Worker Agents
-- Execution helpers for scoped sub-tasks.
-- Managed by worker manager with concurrency/queue constraints.
-- Separate control path from task-agent run queue.
+- Task-agent slots are fixed-concurrency and consume queued tasks when idle.
 
 ## Runtime Topology
 
@@ -36,7 +31,7 @@ This document captures the conceptual architecture of Zubot at the system level.
 ### Task-Agent Queue
 - Backed by SQLite (`memory/central/zubot_core.db`).
 - Primary tables: `defined_tasks`, `defined_tasks_run_times`, `defined_task_runs`, `defined_task_run_history`.
-- Supports interval and wall-clock schedule modes.
+- Supports frequency and wall-clock schedule modes.
 
 ### Memory Summary Queue
 - Backed by SQLite (`memory_summary_jobs`).
@@ -51,7 +46,7 @@ This document captures the conceptual architecture of Zubot at the system level.
 
 ### Invocation Pattern
 - User-facing agent uses model tool-calls routed through registry dispatch.
-- Task/worker runs can be scoped by allowed tool lists.
+- Task runs are queued/claimed through central service and exposed via task-oriented orchestration tools.
 
 ## Memory and Database Layers
 

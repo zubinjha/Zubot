@@ -3,7 +3,9 @@
 Automated tests are tracked in `tests/`.
 
 Current layout:
-- `tests/tools/`: validates output contracts for `src/zubot/tools/*`
+- `tests/app/`: API/chat/UI-surface behavior
+- `tests/core/`: runtime, scheduler, memory, and config contracts
+- `tests/tools/`: tool module contract/unit tests
 
 Execution:
 - `source .venv/bin/activate`

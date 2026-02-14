@@ -1,6 +1,6 @@
 import json
-import subprocess
 from pathlib import Path
+from threading import Event
 
 import pytest
 
@@ -58,12 +58,19 @@ def test_run_profile_missing_task_returns_failed(runner_with_tasks: TaskAgentRun
 
 
 def test_run_profile_predefined_task_success(monkeypatch: pytest.MonkeyPatch, runner_with_tasks: TaskAgentRunner):
-    def fake_run(*args, **kwargs):  # noqa: ANN002, ANN003
-        _ = args
-        _ = kwargs
-        return subprocess.CompletedProcess(args=["python"], returncode=0, stdout="all good\n", stderr="")
+    class _FakePopen:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            _ = args
+            _ = kwargs
+            self.returncode = 0
 
-    monkeypatch.setattr("src.zubot.core.task_agent_runner.subprocess.run", fake_run)
+        def poll(self):
+            return self.returncode
+
+        def communicate(self):
+            return ("all good\n", "")
+
+    monkeypatch.setattr("src.zubot.core.task_agent_runner.subprocess.Popen", _FakePopen)
     out = runner_with_tasks.run_profile(profile_id="script_task", payload={"trigger": "manual"})
     assert out["ok"] is True
     assert out["status"] == "done"
@@ -72,13 +79,56 @@ def test_run_profile_predefined_task_success(monkeypatch: pytest.MonkeyPatch, ru
 
 
 def test_run_profile_predefined_task_failure(monkeypatch: pytest.MonkeyPatch, runner_with_tasks: TaskAgentRunner):
-    def fake_run(*args, **kwargs):  # noqa: ANN002, ANN003
-        _ = args
-        _ = kwargs
-        return subprocess.CompletedProcess(args=["python"], returncode=2, stdout="", stderr="boom")
+    class _FakePopen:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            _ = args
+            _ = kwargs
+            self.returncode = 2
 
-    monkeypatch.setattr("src.zubot.core.task_agent_runner.subprocess.run", fake_run)
+        def poll(self):
+            return self.returncode
+
+        def communicate(self):
+            return ("", "boom")
+
+    monkeypatch.setattr("src.zubot.core.task_agent_runner.subprocess.Popen", _FakePopen)
     out = runner_with_tasks.run_profile(profile_id="script_task")
     assert out["ok"] is False
     assert out["status"] == "failed"
     assert "boom" in str(out["error"])
+
+
+def test_run_profile_predefined_task_cancelled(monkeypatch: pytest.MonkeyPatch, runner_with_tasks: TaskAgentRunner):
+    class _FakePopen:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            _ = args
+            _ = kwargs
+            self.returncode = None
+            self._terminated = False
+
+        def poll(self):
+            if self._terminated:
+                return 143
+            return None
+
+        def terminate(self):
+            self._terminated = True
+            self.returncode = 143
+
+        def wait(self, timeout=None):
+            _ = timeout
+            return self.returncode
+
+        def kill(self):
+            self._terminated = True
+            self.returncode = 137
+
+        def communicate(self):
+            return ("", "")
+
+    monkeypatch.setattr("src.zubot.core.task_agent_runner.subprocess.Popen", _FakePopen)
+    cancel = Event()
+    cancel.set()
+    out = runner_with_tasks.run_profile(profile_id="script_task", cancel_event=cancel)
+    assert out["ok"] is False
+    assert out["status"] == "blocked"

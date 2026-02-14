@@ -6,9 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from src.zubot.core.central_service import get_central_service, summarize_task_agent_check_in
-from src.zubot.core.config_loader import get_central_service_config, load_config
 from src.zubot.core.tool_registry_user import register_user_specific_tools
-from src.zubot.core.worker_manager import get_worker_manager
 from src.zubot.tools.data.json_tools import read_json, write_json
 from src.zubot.tools.data.text_search import search_text
 from src.zubot.tools.kernel.filesystem import append_file, list_dir, path_exists, read_file, stat_path, write_file
@@ -142,28 +140,28 @@ def _get_task_agent_checkin(*, include_runs: bool = False, runs_limit: int = 20)
     return out
 
 
-def _spawn_task_agent_worker(**kwargs: Any) -> dict[str, Any]:
-    requested_by = str(kwargs.get("requested_by") or "task_agent:unknown").strip() or "task_agent:unknown"
-    if not requested_by.startswith("task_agent:"):
-        requested_by = f"task_agent:{requested_by}"
+def _enqueue_task(**kwargs: Any) -> dict[str, Any]:
+    task_id = str(kwargs.get("task_id") or "").strip()
+    if not task_id:
+        return {"ok": False, "error": "task_id is required.", "source": "tool_registry"}
+    description_raw = kwargs.get("description")
+    description = str(description_raw).strip() if isinstance(description_raw, str) and description_raw.strip() else None
+    return get_central_service().trigger_profile(profile_id=task_id, description=description)
 
-    try:
-        central_cfg = get_central_service_config(load_config())
-    except Exception:
-        central_cfg = {"worker_slot_reserve_for_workers": 2}
-    reserve = int(central_cfg.get("worker_slot_reserve_for_workers", 2))
 
-    return get_worker_manager().spawn_worker(
-        title=str(kwargs.get("title") or ""),
-        instructions=str(kwargs.get("instructions") or ""),
-        model_tier=str(kwargs.get("model_tier") or "medium"),
-        tool_access=list(kwargs.get("tool_access") or []),
-        skill_access=list(kwargs.get("skill_access") or []),
-        preload_files=list(kwargs.get("preload_files") or []),
-        metadata=dict(kwargs.get("metadata") or {}),
-        requested_by=requested_by,
-        reserve_for_workers=max(0, reserve),
-    )
+def _kill_task_run(**kwargs: Any) -> dict[str, Any]:
+    run_id = str(kwargs.get("run_id") or "").strip()
+    if not run_id:
+        return {"ok": False, "error": "run_id is required.", "source": "tool_registry"}
+    requested_by = str(kwargs.get("requested_by") or "main_agent").strip() or "main_agent"
+    return get_central_service().kill_run(run_id=run_id, requested_by=requested_by)
+
+
+def _list_task_runs(**kwargs: Any) -> dict[str, Any]:
+    limit_raw = kwargs.get("limit", 50)
+    limit = int(limit_raw) if isinstance(limit_raw, int) else 50
+    safe_limit = max(1, min(200, limit))
+    return get_central_service().list_runs(limit=safe_limit)
 
 
 def _create_default_registry() -> ToolRegistry:
@@ -171,111 +169,35 @@ def _create_default_registry() -> ToolRegistry:
 
     registry.register(
         ToolSpec(
-            name="spawn_worker",
-            handler=lambda **kwargs: get_worker_manager().spawn_worker(
-                title=str(kwargs.get("title") or ""),
-                instructions=str(kwargs.get("instructions") or ""),
-                model_tier=str(kwargs.get("model_tier") or "medium"),
-                tool_access=list(kwargs.get("tool_access") or []),
-                skill_access=list(kwargs.get("skill_access") or []),
-                preload_files=list(kwargs.get("preload_files") or []),
-                metadata=dict(kwargs.get("metadata") or {}),
-                requested_by=str(kwargs.get("requested_by") or "main_agent"),
-            ),
+            name="enqueue_task",
+            handler=_enqueue_task,
             category="orchestration",
-            description="Spawn a worker task with title + instructions (max 3 concurrent).",
+            description="Queue a predefined task by task_id for task-agent execution.",
             parameters={
-                "title": {"type": "string", "required": True},
-                "instructions": {"type": "string", "required": True},
-                "model_tier": {"type": "string", "required": False},
-                "tool_access": {"type": "array", "required": False},
-                "skill_access": {"type": "array", "required": False},
-                "preload_files": {"type": "array", "required": False},
-                "metadata": {"type": "object", "required": False},
+                "task_id": {"type": "string", "required": True},
+                "description": {"type": "string", "required": False},
+            },
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="kill_task_run",
+            handler=_kill_task_run,
+            category="orchestration",
+            description="Kill/cancel a queued or running task run by run_id.",
+            parameters={
+                "run_id": {"type": "string", "required": True},
                 "requested_by": {"type": "string", "required": False},
             },
         )
     )
     registry.register(
         ToolSpec(
-            name="spawn_task_agent_worker",
-            handler=_spawn_task_agent_worker,
+            name="list_task_runs",
+            handler=_list_task_runs,
             category="orchestration",
-            description="Spawn a worker on behalf of a task agent with reserve-aware capacity gating.",
-            parameters={
-                "title": {"type": "string", "required": True},
-                "instructions": {"type": "string", "required": True},
-                "model_tier": {"type": "string", "required": False},
-                "tool_access": {"type": "array", "required": False},
-                "skill_access": {"type": "array", "required": False},
-                "preload_files": {"type": "array", "required": False},
-                "metadata": {"type": "object", "required": False},
-                "requested_by": {"type": "string", "required": False},
-            },
-        )
-    )
-    registry.register(
-        ToolSpec(
-            name="message_worker",
-            handler=lambda **kwargs: get_worker_manager().message_worker(
-                worker_id=str(kwargs.get("worker_id") or ""),
-                message=str(kwargs.get("message") or ""),
-                model_tier=str(kwargs.get("model_tier") or "medium"),
-            ),
-            category="orchestration",
-            description="Queue a follow-up message/task for an existing worker.",
-            parameters={
-                "worker_id": {"type": "string", "required": True},
-                "message": {"type": "string", "required": True},
-                "model_tier": {"type": "string", "required": False},
-            },
-        )
-    )
-    registry.register(
-        ToolSpec(
-            name="cancel_worker",
-            handler=lambda **kwargs: get_worker_manager().cancel_worker(str(kwargs.get("worker_id") or "")),
-            category="orchestration",
-            description="Cancel a queued/running worker and clear pending tasks.",
-            parameters={"worker_id": {"type": "string", "required": True}},
-        )
-    )
-    registry.register(
-        ToolSpec(
-            name="reset_worker_context",
-            handler=lambda **kwargs: get_worker_manager().reset_worker_context(str(kwargs.get("worker_id") or "")),
-            category="orchestration",
-            description="Reset a non-running worker's scoped context session.",
-            parameters={"worker_id": {"type": "string", "required": True}},
-        )
-    )
-    registry.register(
-        ToolSpec(
-            name="get_worker",
-            handler=lambda **kwargs: get_worker_manager().get_worker(str(kwargs.get("worker_id") or "")),
-            category="orchestration",
-            description="Get state for one worker by id.",
-            parameters={"worker_id": {"type": "string", "required": True}},
-        )
-    )
-    registry.register(
-        ToolSpec(
-            name="list_workers",
-            handler=lambda **_kwargs: get_worker_manager().list_workers(),
-            category="orchestration",
-            description="List all workers and runtime queue counts.",
-            parameters={},
-        )
-    )
-    registry.register(
-        ToolSpec(
-            name="list_worker_events",
-            handler=lambda **kwargs: get_worker_manager().list_forward_events(
-                consume=bool(kwargs.get("consume", True))
-            ),
-            category="orchestration",
-            description="List worker events to forward through main agent.",
-            parameters={"consume": {"type": "boolean", "required": False}},
+            description="List recent task runs from the central queue store.",
+            parameters={"limit": {"type": "integer", "required": False}},
         )
     )
     registry.register(

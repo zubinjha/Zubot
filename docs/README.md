@@ -9,6 +9,7 @@ Folder docs:
 - [docs/testing.md](testing.md): test layout and execution conventions
 - [docs/src/zubot/core.md](src/zubot/core.md): kernel/runtime assumptions
 - [docs/src/zubot/system_design.md](src/zubot/system_design.md): conceptual architecture (agent hierarchy, tools, memory, DB layers)
+- [docs/src/zubot/handoff.md](src/zubot/handoff.md): current checkpoint + quick resume guide for new agents
 - [docs/src/zubot/central_service.md](src/zubot/central_service.md): central scheduler/queue runtime contracts
 - [docs/src/zubot/central_db_schema.md](src/zubot/central_db_schema.md): scheduler + memory SQLite schema and convergence plan
 - [docs/src/zubot/operations.md](src/zubot/operations.md): long-run startup/restart/monitoring runbook

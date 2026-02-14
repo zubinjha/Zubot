@@ -46,25 +46,8 @@ class _FakeCentral:
     def trigger_profile(self, *, profile_id: str, description: str | None = None) -> dict[str, Any]:
         return {"ok": True, "profile_id": profile_id, "description": description}
 
-
-class _FakeWorker:
-    def spawn_worker(self, **kwargs) -> dict[str, Any]:
-        return {"ok": True, "worker": {"worker_id": "w1", "title": kwargs.get("title", "")}}
-
-    def cancel_worker(self, worker_id: str) -> dict[str, Any]:
-        return {"ok": True, "worker": {"worker_id": worker_id, "status": "cancelled"}}
-
-    def reset_worker_context(self, worker_id: str) -> dict[str, Any]:
-        return {"ok": True, "worker": {"worker_id": worker_id, "status": "done"}}
-
-    def message_worker(self, *, worker_id: str, message: str, model_tier: str = "medium") -> dict[str, Any]:
-        return {"ok": True, "worker": {"worker_id": worker_id}, "message": message, "model_tier": model_tier}
-
-    def get_worker(self, worker_id: str) -> dict[str, Any]:
-        return {"ok": True, "worker": {"worker_id": worker_id, "status": "done"}}
-
-    def list_workers(self) -> dict[str, Any]:
-        return {"ok": True, "workers": [], "runtime": {"running_count": 0, "queued_count": 0}}
+    def kill_run(self, *, run_id: str, requested_by: str = "main_agent") -> dict[str, Any]:
+        return {"ok": True, "run_id": run_id, "requested_by": requested_by}
 
 
 class _FakeMemoryWorker:
@@ -81,7 +64,6 @@ class _FakeMemoryWorker:
 def test_runtime_service_start_respects_central_enable_flag(monkeypatch):
     central = _FakeCentral(enabled=True, running=False)
     monkeypatch.setattr("src.zubot.runtime.service.get_central_service", lambda: central)
-    monkeypatch.setattr("src.zubot.runtime.service.get_worker_manager", lambda: _FakeWorker())
     monkeypatch.setattr("src.zubot.runtime.service.get_memory_summary_worker", lambda: _FakeMemoryWorker())
 
     svc = RuntimeService()
@@ -94,7 +76,6 @@ def test_runtime_service_start_respects_central_enable_flag(monkeypatch):
 def test_runtime_service_start_in_client_mode_does_not_start_central(monkeypatch):
     central = _FakeCentral(enabled=True, running=False)
     monkeypatch.setattr("src.zubot.runtime.service.get_central_service", lambda: central)
-    monkeypatch.setattr("src.zubot.runtime.service.get_worker_manager", lambda: _FakeWorker())
     monkeypatch.setattr("src.zubot.runtime.service.get_memory_summary_worker", lambda: _FakeMemoryWorker())
 
     svc = RuntimeService()
@@ -107,7 +88,6 @@ def test_runtime_service_start_in_client_mode_does_not_start_central(monkeypatch
 def test_runtime_service_stop_stops_running_central(monkeypatch):
     central = _FakeCentral(enabled=True, running=True)
     monkeypatch.setattr("src.zubot.runtime.service.get_central_service", lambda: central)
-    monkeypatch.setattr("src.zubot.runtime.service.get_worker_manager", lambda: _FakeWorker())
     monkeypatch.setattr("src.zubot.runtime.service.get_memory_summary_worker", lambda: _FakeMemoryWorker())
 
     svc = RuntimeService()
@@ -137,7 +117,6 @@ def test_runtime_service_delegates_chat_module(monkeypatch):
             return {"ok": True, "reset": True, "session_id": session_id}
 
     monkeypatch.setattr("src.zubot.runtime.service.get_central_service", lambda: _FakeCentral())
-    monkeypatch.setattr("src.zubot.runtime.service.get_worker_manager", lambda: _FakeWorker())
     monkeypatch.setattr("src.zubot.runtime.service.get_memory_summary_worker", lambda: _FakeMemoryWorker())
     monkeypatch.setattr(RuntimeService, "_chat_logic_module", staticmethod(lambda: _FakeChat))
 
@@ -154,7 +133,6 @@ def test_runtime_service_delegates_chat_module(monkeypatch):
 def test_runtime_service_central_schedule_crud(monkeypatch):
     central = _FakeCentral()
     monkeypatch.setattr("src.zubot.runtime.service.get_central_service", lambda: central)
-    monkeypatch.setattr("src.zubot.runtime.service.get_worker_manager", lambda: _FakeWorker())
     monkeypatch.setattr("src.zubot.runtime.service.get_memory_summary_worker", lambda: _FakeMemoryWorker())
 
     svc = RuntimeService()
@@ -175,3 +153,24 @@ def test_runtime_service_central_schedule_crud(monkeypatch):
     deleted = svc.central_delete_schedule(schedule_id="sched_x")
     assert deleted["ok"] is True
     assert deleted["deleted"] == 1
+
+
+def test_runtime_service_health_reports_task_runtime(monkeypatch):
+    central = _FakeCentral()
+    monkeypatch.setattr("src.zubot.runtime.service.get_central_service", lambda: central)
+    monkeypatch.setattr("src.zubot.runtime.service.get_memory_summary_worker", lambda: _FakeMemoryWorker())
+
+    svc = RuntimeService()
+    out = svc.health()
+    assert out["ok"] is True
+    assert "task_runtime" in out
+
+
+def test_runtime_service_delegates_run_kill(monkeypatch):
+    central = _FakeCentral()
+    monkeypatch.setattr("src.zubot.runtime.service.get_central_service", lambda: central)
+    monkeypatch.setattr("src.zubot.runtime.service.get_memory_summary_worker", lambda: _FakeMemoryWorker())
+    svc = RuntimeService()
+    out = svc.central_kill_run(run_id="run_1", requested_by="ui")
+    assert out["ok"] is True
+    assert out["run_id"] == "run_1"

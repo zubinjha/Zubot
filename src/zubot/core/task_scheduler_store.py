@@ -767,6 +767,35 @@ class TaskSchedulerStore:
             "payload": payload if isinstance(payload, dict) else {},
         }
 
+    def get_run(self, *, run_id: str) -> dict[str, Any] | None:
+        clean_run_id = str(run_id or "").strip()
+        if not clean_run_id:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT run_id, schedule_id, profile_id, status, queued_at, started_at, finished_at, summary, error, payload_json
+                FROM defined_task_runs
+                WHERE run_id = ?;
+                """,
+                (clean_run_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = json.loads(row["payload_json"]) if row["payload_json"] else {}
+        return {
+            "run_id": row["run_id"],
+            "schedule_id": row["schedule_id"],
+            "profile_id": row["profile_id"],
+            "status": row["status"],
+            "queued_at": row["queued_at"],
+            "started_at": row["started_at"],
+            "finished_at": row["finished_at"],
+            "summary": row["summary"],
+            "error": row["error"],
+            "payload": payload if isinstance(payload, dict) else {},
+        }
+
     def complete_run(
         self,
         *,
@@ -833,6 +862,38 @@ class TaskSchedulerStore:
                 )
 
         return {"ok": True, "run_id": run_id, "status": status}
+
+    def cancel_run(self, *, run_id: str, reason: str = "killed_by_user") -> dict[str, Any]:
+        clean_run_id = str(run_id or "").strip()
+        if not clean_run_id:
+            return {"ok": False, "error": "run_id is required."}
+
+        row = self.get_run(run_id=clean_run_id)
+        if row is None:
+            return {"ok": False, "error": "run not found"}
+
+        status = str(row.get("status") or "")
+        if status in {"done", "failed", "blocked"}:
+            return {
+                "ok": True,
+                "run_id": clean_run_id,
+                "status": status,
+                "already_terminal": True,
+            }
+        if status == "queued":
+            out = self.complete_run(run_id=clean_run_id, status="blocked", summary=None, error=reason)
+            if out.get("ok"):
+                out["already_terminal"] = False
+            return out
+        if status == "running":
+            return {
+                "ok": True,
+                "run_id": clean_run_id,
+                "status": "running",
+                "cancel_requested": True,
+                "already_terminal": False,
+            }
+        return {"ok": False, "error": f"unsupported run status `{status}`"}
 
     def list_runs(self, *, limit: int = 50) -> list[dict[str, Any]]:
         safe_limit = max(1, min(500, int(limit)))

@@ -15,7 +15,7 @@ class _FakeRuntimeService:
             "source": "runtime_service",
             "runtime": {"started": True},
             "central": {"running": False},
-            "workers": {"running_count": 0, "queued_count": 0},
+            "task_runtime": {"running_count": 0, "queued_count": 0},
         }
 
     def start(self, **kwargs):
@@ -30,29 +30,6 @@ class _FakeRuntimeService:
 
     def reset_session(self, *, session_id: str = "default"):
         return {"ok": True, "reset": True, "session_id": session_id}
-
-    def spawn_worker(self, **kwargs):
-        return {"ok": True, "worker": {"worker_id": "worker_test", "title": kwargs.get("title"), "status": "queued"}}
-
-    def cancel_worker(self, *, worker_id: str):
-        return {"ok": True, "worker": {"worker_id": worker_id, "status": "cancelled"}}
-
-    def reset_worker_context(self, *, worker_id: str):
-        return {"ok": True, "worker": {"worker_id": worker_id, "status": "done"}}
-
-    def message_worker(self, *, worker_id: str, message: str, model_tier: str = "medium"):
-        return {
-            "ok": True,
-            "worker": {"worker_id": worker_id, "status": "queued"},
-            "message": message,
-            "model_tier": model_tier,
-        }
-
-    def get_worker(self, *, worker_id: str):
-        return {"ok": True, "worker": {"worker_id": worker_id, "status": "done"}}
-
-    def list_workers(self):
-        return {"ok": True, "workers": [], "runtime": {"running_count": 0, "queued_count": 0}}
 
     def central_status(self):
         return {
@@ -112,6 +89,9 @@ class _FakeRuntimeService:
     def central_trigger_profile(self, *, profile_id: str, description: str | None = None):
         return {"ok": True, "profile_id": profile_id, "description": description}
 
+    def central_kill_run(self, *, run_id: str, requested_by: str = "main_agent"):
+        return {"ok": True, "run_id": run_id, "requested_by": requested_by}
+
 
 def test_health_endpoint_uses_runtime_service(monkeypatch):
     monkeypatch.setattr("app.main.get_runtime_service", lambda: _FakeRuntimeService())
@@ -147,38 +127,6 @@ def test_session_reset_endpoint(monkeypatch):
     body = res.json()
     assert body["ok"] is True
     assert body["reset"] is True
-
-
-def test_worker_endpoints(monkeypatch):
-    monkeypatch.setattr("app.main.get_runtime_service", lambda: _FakeRuntimeService())
-
-    spawn = client.post(
-        "/api/workers/spawn",
-        json={"title": "Research", "instructions": "Look up X", "model_tier": "low"},
-    )
-    assert spawn.status_code == 200
-    assert spawn.json()["ok"] is True
-    worker_id = spawn.json()["worker"]["worker_id"]
-
-    listed = client.get("/api/workers")
-    assert listed.status_code == 200
-    assert listed.json()["ok"] is True
-
-    got = client.get(f"/api/workers/{worker_id}")
-    assert got.status_code == 200
-    assert got.json()["ok"] is True
-
-    msg = client.post(f"/api/workers/{worker_id}/message", json={"message": "continue"})
-    assert msg.status_code == 200
-    assert msg.json()["ok"] is True
-
-    reset = client.post(f"/api/workers/{worker_id}/reset-context")
-    assert reset.status_code == 200
-    assert reset.json()["ok"] is True
-
-    cancel = client.post(f"/api/workers/{worker_id}/cancel")
-    assert cancel.status_code == 200
-    assert cancel.json()["ok"] is True
 
 
 def test_central_endpoints(monkeypatch):
@@ -228,6 +176,10 @@ def test_central_endpoints(monkeypatch):
     trigger = client.post("/api/central/trigger/profile_x", json={"description": "manual"})
     assert trigger.status_code == 200
     assert trigger.json()["profile_id"] == "profile_x"
+
+    kill_run = client.post("/api/central/runs/run_x/kill", json={"requested_by": "ui"})
+    assert kill_run.status_code == 200
+    assert kill_run.json()["run_id"] == "run_x"
 
     stop = client.post("/api/central/stop")
     assert stop.status_code == 200

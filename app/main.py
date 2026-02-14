@@ -23,23 +23,13 @@ class ResetRequest(BaseModel):
 class InitRequest(BaseModel):
     session_id: str = "default"
 
-class SpawnWorkerRequest(BaseModel):
-    title: str
-    instructions: str
-    model_tier: str = "medium"
-    tool_access: list[str] = Field(default_factory=list)
-    skill_access: list[str] = Field(default_factory=list)
-    preload_files: list[str] = Field(default_factory=list)
-    metadata: dict = Field(default_factory=dict)
-
-
-class WorkerMessageRequest(BaseModel):
-    message: str
-    model_tier: str = "medium"
-
 
 class TriggerTaskProfileRequest(BaseModel):
     description: str | None = None
+
+
+class KillTaskRunRequest(BaseModel):
+    requested_by: str = "main_agent"
 
 
 class ScheduleUpsertRequest(BaseModel):
@@ -78,44 +68,6 @@ def reset_session(req: ResetRequest) -> dict:
 @app.post("/api/session/init")
 def init_session(req: InitRequest) -> dict:
     return get_runtime_service().init_session(session_id=req.session_id)
-
-
-@app.post("/api/workers/spawn")
-def spawn_worker(req: SpawnWorkerRequest) -> dict:
-    return get_runtime_service().spawn_worker(
-        title=req.title,
-        instructions=req.instructions,
-        model_tier=req.model_tier,
-        tool_access=req.tool_access,
-        skill_access=req.skill_access,
-        preload_files=req.preload_files,
-        metadata=req.metadata,
-    )
-
-
-@app.post("/api/workers/{worker_id}/cancel")
-def cancel_worker(worker_id: str) -> dict:
-    return get_runtime_service().cancel_worker(worker_id=worker_id)
-
-
-@app.post("/api/workers/{worker_id}/reset-context")
-def reset_worker_context(worker_id: str) -> dict:
-    return get_runtime_service().reset_worker_context(worker_id=worker_id)
-
-
-@app.post("/api/workers/{worker_id}/message")
-def message_worker(worker_id: str, req: WorkerMessageRequest) -> dict:
-    return get_runtime_service().message_worker(worker_id=worker_id, message=req.message, model_tier=req.model_tier)
-
-
-@app.get("/api/workers/{worker_id}")
-def get_worker(worker_id: str) -> dict:
-    return get_runtime_service().get_worker(worker_id=worker_id)
-
-
-@app.get("/api/workers")
-def list_workers() -> dict:
-    return get_runtime_service().list_workers()
 
 
 @app.get("/api/central/status")
@@ -173,10 +125,16 @@ def central_delete_schedule(schedule_id: str) -> dict:
     return get_runtime_service().central_delete_schedule(schedule_id=schedule_id)
 
 
-@app.post("/api/central/trigger/{profile_id}")
-def central_trigger_profile(profile_id: str, req: TriggerTaskProfileRequest | None = None) -> dict:
+@app.post("/api/central/trigger/{task_id}")
+def central_trigger_profile(task_id: str, req: TriggerTaskProfileRequest | None = None) -> dict:
     description = req.description if isinstance(req, TriggerTaskProfileRequest) else None
-    return get_runtime_service().central_trigger_profile(profile_id=profile_id, description=description)
+    return get_runtime_service().central_trigger_profile(profile_id=task_id, description=description)
+
+
+@app.post("/api/central/runs/{run_id}/kill")
+def central_kill_run(run_id: str, req: KillTaskRunRequest | None = None) -> dict:
+    requested_by = req.requested_by if isinstance(req, KillTaskRunRequest) else "main_agent"
+    return get_runtime_service().central_kill_run(run_id=run_id, requested_by=requested_by)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -761,7 +719,7 @@ def index() -> HTMLResponse:
       </div>
       <div class="card">
         <h3>Workers</h3>
-        <div id="workers" class="body workers">Loading worker status...</div>
+        <div id="workers" class="body workers">Task-agent runtime status...</div>
       </div>
       <div class="card">
         <h3>Task Agents</h3>
@@ -885,20 +843,7 @@ def index() -> HTMLResponse:
       function refreshWorkersAndCentral() {
         var workersEl = el('workers');
         if (workersEl) {
-          var xhrW = new XMLHttpRequest();
-          xhrW.open('GET', '/api/workers', true);
-          xhrW.onreadystatechange = function () {
-            if (xhrW.readyState !== 4) return;
-            var body = {};
-            try { body = JSON.parse(xhrW.responseText || '{}'); } catch (_e) {}
-            if (!body || !body.runtime) return;
-            var rt = body.runtime || {};
-            workersEl.innerHTML = '<div class=\"worker-meta\">Capacity: ' +
-              (rt.running_count != null ? rt.running_count : 0) + '/' +
-              (rt.max_concurrent_workers != null ? rt.max_concurrent_workers : 3) +
-              ' running, ' + (rt.queued_count != null ? rt.queued_count : 0) + ' queued.</div>';
-          };
-          xhrW.send();
+          workersEl.innerHTML = '<div class=\"worker-meta\">Worker subsystem removed; task-agent queue is active.</div>';
         }
         var centralEl = el('central-status');
         if (centralEl) {
@@ -1570,57 +1515,8 @@ def index() -> HTMLResponse:
       progressEl.textContent = `Completed (${route})\nTools: ${chain}`;
     }
 
-    function renderWorkers(data) {
-      const workers = data && Array.isArray(data.workers) ? data.workers : [];
-      const runtime = data && data.runtime ? data.runtime : {};
-      const running = runtime.running_count != null ? runtime.running_count : 0;
-      const queued = runtime.queued_count != null ? runtime.queued_count : 0;
-      const max = runtime.max_concurrent_workers != null ? runtime.max_concurrent_workers : 3;
-
-      if (!workers.length) {
-        workersEl.innerHTML = `<div class="worker-meta">No workers yet. Capacity: ${running}/${max} running, ${queued} queued.</div>`;
-        return;
-      }
-
-      const rows = workers.slice(0, 3).map((worker) => {
-        const workerId = worker.worker_id || 'worker?';
-        const title = worker.title || 'Untitled worker';
-        const status = worker.status || 'unknown';
-        const disableKill = status === 'done' || status === 'failed' || status === 'cancelled';
-        return `
-          <div class="worker-row">
-            <div class="worker-top">
-              <div class="worker-title" title="${title}">${title}</div>
-              <button class="btn-kill" data-worker-id="${workerId}" ${disableKill ? 'disabled' : ''}>Kill</button>
-            </div>
-            <div class="worker-meta">id=${workerId}</div>
-            <div class="worker-meta">status=${status}</div>
-          </div>
-        `;
-      }).join('');
-
-      workersEl.innerHTML = `
-        <div class="worker-meta">Capacity: ${running}/${max} running, ${queued} queued.</div>
-        ${rows}
-      `;
-
-      workersEl.querySelectorAll('.btn-kill').forEach((btn) => {
-        btn.addEventListener('click', async (evt) => {
-          const id = evt && evt.currentTarget ? evt.currentTarget.getAttribute('data-worker-id') : null;
-          if (!id) return;
-          await killWorker(id);
-        });
-      });
-    }
-
     async function refreshWorkers() {
-      try {
-        const res = await fetch('/api/workers');
-        const data = await res.json();
-        if (data && data.ok) renderWorkers(data);
-      } catch (_err) {
-        workersEl.textContent = 'Worker status unavailable.';
-      }
+      workersEl.innerHTML = '<div class="worker-meta">Worker subsystem removed; task-agent queue is active.</div>';
     }
 
     function renderCentralStatus(statusPayload, runsPayload) {
@@ -1680,26 +1576,6 @@ def index() -> HTMLResponse:
         // fall through
       }
       centralStatusEl.textContent = 'Central status unavailable.';
-    }
-
-    async function killWorker(workerId) {
-      setBusyStatus(true, `Killing ${workerId}...`);
-      try {
-        const res = await fetch(`/api/workers/${workerId}/cancel`, { method: 'POST' });
-        const data = await res.json();
-        if (data && data.ok) {
-          appendMessage('bot', `Worker ${workerId} cancelled.`);
-          progressEl.textContent = `Cancelled ${workerId}.`;
-        } else {
-          appendMessage('bot', (data && data.error) ? data.error : `Failed to cancel ${workerId}.`);
-        }
-      } catch (_err) {
-        appendMessage('bot', `Failed to cancel ${workerId}.`);
-      } finally {
-        setBusyStatus(false, '');
-        await refreshWorkers();
-        await refreshCentralStatus();
-      }
     }
 
     function startProgressTicker() {

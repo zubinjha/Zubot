@@ -5,7 +5,9 @@ def test_list_tools_contains_expected_names():
     names = {entry["name"] for entry in list_tools()}
     expected = {
         "append_file",
+        "enqueue_task",
         "fetch_url",
+        "kill_task_run",
         "get_current_time",
         "get_future_weather",
         "get_indeed_job_detail",
@@ -17,19 +19,12 @@ def test_list_tools_contains_expected_names():
         "get_weather_24hr",
         "get_week_outlook",
         "list_dir",
-        "list_worker_events",
-        "list_workers",
-        "message_worker",
+        "list_task_runs",
         "path_exists",
         "read_file",
         "read_json",
-        "reset_worker_context",
-        "spawn_worker",
-        "spawn_task_agent_worker",
         "search_text",
         "stat_path",
-        "get_worker",
-        "cancel_worker",
         "web_search",
         "write_file",
         "write_json",
@@ -166,34 +161,19 @@ def test_get_task_agent_checkin_tool_returns_summary(monkeypatch):
     assert out["runs"] == [{"run_id": "run_1"}]
 
 
-def test_spawn_task_agent_worker_tool_uses_reserve(monkeypatch):
-    class _FakeManager:
-        def __init__(self) -> None:
-            self.last = None
+def test_enqueue_task_and_kill_task_run_tools(monkeypatch):
+    class _FakeCentral:
+        def trigger_profile(self, *, profile_id: str, description: str | None = None):
+            return {"ok": True, "profile_id": profile_id, "description": description}
 
-        def spawn_worker(self, **kwargs):
-            self.last = kwargs
-            return {"ok": True, "worker": {"worker_id": "worker_x"}}
+        def kill_run(self, *, run_id: str, requested_by: str = "main_agent"):
+            return {"ok": True, "run_id": run_id, "requested_by": requested_by}
 
-    fake_manager = _FakeManager()
+    monkeypatch.setattr("src.zubot.core.tool_registry.get_central_service", lambda: _FakeCentral())
+    enq = invoke_tool("enqueue_task", task_id="task_a", description="manual")
+    assert enq["ok"] is True
+    assert enq["profile_id"] == "task_a"
 
-    monkeypatch.setattr("src.zubot.core.tool_registry.get_worker_manager", lambda: fake_manager)
-    monkeypatch.setattr(
-        "src.zubot.core.tool_registry.load_config",
-        lambda: {"central_service": {"worker_slot_reserve_for_workers": 2}},
-    )
-    monkeypatch.setattr(
-        "src.zubot.core.tool_registry.get_central_service_config",
-        lambda cfg: cfg["central_service"],
-    )
-
-    out = invoke_tool(
-        "spawn_task_agent_worker",
-        title="task worker",
-        instructions="run task",
-        requested_by="task_agent:profile_a",
-    )
-    assert out["ok"] is True
-    assert fake_manager.last is not None
-    assert fake_manager.last["requested_by"] == "task_agent:profile_a"
-    assert fake_manager.last["reserve_for_workers"] == 2
+    kill = invoke_tool("kill_task_run", run_id="run_1", requested_by="ui")
+    assert kill["ok"] is True
+    assert kill["run_id"] == "run_1"

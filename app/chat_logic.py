@@ -29,7 +29,6 @@ from src.zubot.core.session_store import append_session_events
 from src.zubot.core.tool_registry import invoke_tool, list_tools
 from src.zubot.core.config_loader import load_config
 from src.zubot.core.central_service import get_central_service
-from src.zubot.core.worker_manager import get_worker_manager
 
 MAX_RECENT_EVENTS = 60
 MAX_TOOL_LOOP_STEPS = 4
@@ -222,7 +221,6 @@ def _log_daily_turn(
     user_text: str,
     reply: str,
     tool_execution: list[dict[str, Any]] | None = None,
-    worker_events: list[dict[str, Any]] | None = None,
     task_agent_events: list[dict[str, Any]] | None = None,
     system_events: list[str] | None = None,
 ) -> None:
@@ -253,7 +251,6 @@ def _log_daily_turn(
         metadata={"tools": ",".join(tools_used) if tools_used else None},
     )
 
-    _ = worker_events
     _ = task_agent_events
     _ = system_events  # internal chatter is intentionally excluded from long-term daily memory
 
@@ -490,55 +487,6 @@ def _tool_schemas_for_llm() -> list[dict[str, Any]]:
     return schemas
 
 
-def _worker_runtime_snapshot_text() -> str:
-    try:
-        payload = get_worker_manager().list_workers()
-    except Exception:
-        return "workers unavailable"
-    if not payload.get("ok"):
-        return "workers unavailable"
-    workers = payload.get("workers")
-    runtime = payload.get("runtime")
-    if not isinstance(workers, list) or not isinstance(runtime, dict):
-        return "workers unavailable"
-
-    lines = [
-        (
-            "workers_runtime "
-            f"running={runtime.get('running_count', 0)} "
-            f"queued={runtime.get('queued_count', 0)} "
-            f"max={runtime.get('max_concurrent_workers', 3)}"
-        )
-    ]
-    for worker in workers[:3]:
-        if not isinstance(worker, dict):
-            continue
-        lines.append(
-            (
-                f"- {worker.get('worker_id', 'worker?')} "
-                f"title={worker.get('title', 'untitled')} "
-                f"status={worker.get('status', 'unknown')} "
-                f"cancel_requested={worker.get('cancel_requested', False)}"
-            )
-        )
-    return "\n".join(lines)
-
-
-def _load_forwardable_worker_events() -> list[dict[str, Any]]:
-    try:
-        payload = get_worker_manager().list_forward_events(consume=True)
-    except Exception:
-        return []
-    events = payload.get("events")
-    if not isinstance(events, list):
-        return []
-    out: list[dict[str, Any]] = []
-    for event in events:
-        if isinstance(event, dict):
-            out.append(event)
-    return out
-
-
 def _load_forwardable_task_agent_events() -> list[dict[str, Any]]:
     try:
         payload = get_central_service().list_forward_events(consume=True)
@@ -575,6 +523,43 @@ def _parse_tool_call(tool_call: dict[str, Any], idx: int) -> tuple[str | None, d
         if isinstance(parsed, dict):
             return name, parsed, call_id
     return name, {}, call_id
+
+
+def _build_time_location_context() -> tuple[str | None, dict[str, Any]]:
+    location_raw = invoke_tool("get_location")
+    location = location_raw if isinstance(location_raw, dict) else {}
+    location_compact = {
+        "lat": location.get("lat"),
+        "lon": location.get("lon"),
+        "city": location.get("city"),
+        "region": location.get("region"),
+        "country": location.get("country"),
+        "timezone": location.get("timezone"),
+        "source": location.get("source"),
+    }
+    time_raw = invoke_tool("get_current_time", location=location_compact)
+    time_payload = time_raw if isinstance(time_raw, dict) else {}
+    time_compact = {
+        "iso_utc": time_payload.get("iso_utc"),
+        "iso_local": time_payload.get("iso_local"),
+        "human_local": time_payload.get("human_local"),
+        "timezone": time_payload.get("timezone"),
+        "timezone_source": time_payload.get("timezone_source"),
+        "source": time_payload.get("source"),
+    }
+    lines = [
+        "[RuntimeTimeLocation]",
+        f"location={json.dumps(location_compact, ensure_ascii=False)}",
+        f"time={json.dumps(time_compact, ensure_ascii=False)}",
+    ]
+    debug = {
+        "location_ok": bool(location.get("ok", False)),
+        "time_ok": bool(time_payload.get("ok", False)),
+        "location_source": location.get("source"),
+        "time_source": time_payload.get("source"),
+        "timezone": time_compact.get("timezone"),
+    }
+    return "\n".join(lines), debug
 
 
 def _run_llm_with_tools(
@@ -688,6 +673,12 @@ def handle_chat_message(
 
     if allow_llm_fallback:
         context_bundle = load_context_bundle(query=text, max_supplemental_files=2)
+        time_location_context, time_location_debug = _build_time_location_context()
+        context_bundle.setdefault("supplemental", {})
+        context_bundle["supplemental"] = {
+            **context_bundle.get("supplemental", {}),
+            "runtime/AUTO_TIME_LOCATION.md": time_location_context,
+        }
         if runtime.preloaded_daily_context:
             context_bundle.setdefault("supplemental", {})
             context_bundle["supplemental"] = {
@@ -697,16 +688,9 @@ def handle_chat_message(
         if runtime.facts:
             context_bundle["facts"] = dict(runtime.facts)
 
-        forwarded_worker_events = _load_forwardable_worker_events()
         forwarded_task_agent_events = _load_forwardable_task_agent_events()
-        worker_runtime_text = _worker_runtime_snapshot_text()
         turn_events = [
             *runtime.recent_events,
-            {"event_type": "system", "payload": {"worker_runtime": worker_runtime_text}},
-            *[
-                {"event_type": "system", "payload": {"worker_event": event}}
-                for event in forwarded_worker_events
-            ],
             *[
                 {"event_type": "system", "payload": {"task_agent_event": event}}
                 for event in forwarded_task_agent_events
@@ -733,13 +717,10 @@ def handle_chat_message(
                 user_text=text,
                 reply=reply,
                 tool_execution=executed_tools,
-                worker_events=forwarded_worker_events,
                 task_agent_events=forwarded_task_agent_events,
                 system_events=[
-                    f"worker_runtime: {worker_runtime_text}",
                     (
                         "forwarded_events "
-                        f"worker={len(forwarded_worker_events)} "
                         f"task_agent={len(forwarded_task_agent_events)}"
                     ),
                 ],
@@ -760,13 +741,8 @@ def handle_chat_message(
                         "session_id": session_id,
                         "kept_recent_message_count": assembled.get("kept_recent_message_count"),
                         "dropped_recent_event_count": assembled.get("dropped_recent_event_count"),
-                        "forwarded_worker_events_injected": sum(
-                            1
-                            for evt in turn_events
-                            if evt.get("event_type") == "system"
-                            and isinstance(evt.get("payload"), dict)
-                            and "worker_event" in evt["payload"]
-                        ),
+                        "time_location_context_injected": bool(time_location_context),
+                        "time_location_debug": time_location_debug,
                         "forwarded_task_agent_events_injected": sum(
                             1
                             for evt in turn_events

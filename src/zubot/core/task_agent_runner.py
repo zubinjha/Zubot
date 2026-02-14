@@ -6,6 +6,8 @@ import json
 import os
 import subprocess
 import sys
+from threading import Event
+from time import monotonic, sleep
 from pathlib import Path
 from typing import Any
 
@@ -54,7 +56,13 @@ class TaskAgentRunner:
         return resolved
 
     @staticmethod
-    def _run_predefined_task(*, task_id: str, task_def: dict[str, Any], payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _run_predefined_task(
+        *,
+        task_id: str,
+        task_def: dict[str, Any],
+        payload: dict[str, Any] | None = None,
+        cancel_event: Event | None = None,
+    ) -> dict[str, Any]:
         name = str(task_def.get("name") or task_id)
         entrypoint_raw = str(task_def.get("entrypoint_path") or "").strip()
         if not entrypoint_raw:
@@ -99,29 +107,14 @@ class TaskAgentRunner:
         env["ZUBOT_TASK_PAYLOAD_JSON"] = json.dumps(payload if isinstance(payload, dict) else {})
 
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 [sys.executable, str(entrypoint), *arg_list],
                 cwd=str(_repo_root()),
-                check=False,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout_sec,
                 env=env,
             )
-        except subprocess.TimeoutExpired:
-            return {
-                "ok": False,
-                "status": "failed",
-                "summary": None,
-                "error": f"Predefined task `{task_id}` timed out after {timeout_sec}s.",
-                "current_description": f"{name}: timed out after {timeout_sec}s.",
-                "model_alias": "predefined",
-                "used_tool_access": [],
-                "used_skill_access": [],
-                "retryable_error": False,
-                "attempts_used": None,
-                "attempts_configured": None,
-            }
         except Exception as exc:
             return {
                 "ok": False,
@@ -129,6 +122,69 @@ class TaskAgentRunner:
                 "summary": None,
                 "error": f"Predefined task `{task_id}` failed to start: {exc}",
                 "current_description": f"{name}: failed to start.",
+                "model_alias": "predefined",
+                "used_tool_access": [],
+                "used_skill_access": [],
+                "retryable_error": False,
+                "attempts_used": None,
+                "attempts_configured": None,
+            }
+
+        started = monotonic()
+        timed_out = False
+        cancelled = False
+        while True:
+            ret = process.poll()
+            if ret is not None:
+                break
+            if cancel_event is not None and cancel_event.is_set():
+                cancelled = True
+                process.terminate()
+                try:
+                    process.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                break
+            if monotonic() - started > timeout_sec:
+                timed_out = True
+                process.terminate()
+                try:
+                    process.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                break
+            sleep(0.15)
+
+        stdout, stderr = process.communicate()
+        completed = subprocess.CompletedProcess(
+            args=[sys.executable, str(entrypoint), *arg_list],
+            returncode=int(process.returncode or 0),
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+        if cancelled:
+            return {
+                "ok": False,
+                "status": "blocked",
+                "summary": None,
+                "error": f"Predefined task `{task_id}` was killed by user request.",
+                "current_description": f"{name}: killed by user.",
+                "model_alias": "predefined",
+                "used_tool_access": [],
+                "used_skill_access": [],
+                "retryable_error": False,
+                "attempts_used": 1,
+                "attempts_configured": 1,
+            }
+
+        if timed_out:
+            return {
+                "ok": False,
+                "status": "failed",
+                "summary": None,
+                "error": f"Predefined task `{task_id}` timed out after {timeout_sec}s.",
+                "current_description": f"{name}: timed out after {timeout_sec}s.",
                 "model_alias": "predefined",
                 "used_tool_access": [],
                 "used_skill_access": [],
@@ -182,7 +238,13 @@ class TaskAgentRunner:
             return f"{task_name}: executing `{entrypoint}`."
         return f"{task_name}: predefined task execution."
 
-    def run_profile(self, *, profile_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    def run_profile(
+        self,
+        *,
+        profile_id: str,
+        payload: dict[str, Any] | None = None,
+        cancel_event: Event | None = None,
+    ) -> dict[str, Any]:
         predefined = self._load_predefined_tasks().get(profile_id)
         if not isinstance(predefined, dict):
             return {
@@ -199,4 +261,9 @@ class TaskAgentRunner:
                 "attempts_configured": None,
             }
 
-        return self._run_predefined_task(task_id=profile_id, task_def=predefined, payload=payload)
+        return self._run_predefined_task(
+            task_id=profile_id,
+            task_def=predefined,
+            payload=payload,
+            cancel_event=cancel_event,
+        )

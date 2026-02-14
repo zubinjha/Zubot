@@ -170,14 +170,13 @@ def get_central_service_config(config: dict[str, Any] | None = None) -> dict[str
     cfg = central if isinstance(central, dict) else {}
     return {
         "enabled": bool(cfg.get("enabled", False)),
-        "poll_interval_sec": int(cfg.get("poll_interval_sec", 60)) if isinstance(cfg.get("poll_interval_sec", 60), int) else 60,
+        "poll_interval_sec": int(cfg.get("poll_interval_sec", 3600))
+        if isinstance(cfg.get("poll_interval_sec", 3600), int)
+        else 3600,
         "task_runner_concurrency": int(cfg.get("task_runner_concurrency", 2))
         if isinstance(cfg.get("task_runner_concurrency", 2), int)
         else 2,
         "scheduler_db_path": str(cfg.get("scheduler_db_path", "memory/central/zubot_core.db")),
-        "worker_slot_reserve_for_workers": int(cfg.get("worker_slot_reserve_for_workers", 2))
-        if isinstance(cfg.get("worker_slot_reserve_for_workers", 2), int)
-        else 2,
         "run_history_retention_days": int(cfg.get("run_history_retention_days", 30))
         if isinstance(cfg.get("run_history_retention_days", 30), int)
         else 30,

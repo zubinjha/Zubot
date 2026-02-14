@@ -8,7 +8,6 @@ from typing import Any
 
 from src.zubot.core.central_service import get_central_service
 from src.zubot.core.memory_summary_worker import get_memory_summary_worker
-from src.zubot.core.worker_manager import get_worker_manager
 
 
 class RuntimeService:
@@ -75,7 +74,6 @@ class RuntimeService:
 
     def health(self) -> dict[str, Any]:
         status = self.central_status()
-        workers = self.list_workers()
         return {
             "ok": True,
             "source": "runtime_service",
@@ -85,7 +83,7 @@ class RuntimeService:
                 "last_stop_source": self._last_stop_source,
             },
             "central": status.get("service") if isinstance(status, dict) else {},
-            "workers": workers.get("runtime") if isinstance(workers, dict) else {},
+            "task_runtime": status.get("runtime") if isinstance(status, dict) else {},
         }
 
     def chat(self, *, message: str, session_id: str = "default", allow_llm_fallback: bool = True) -> dict[str, Any]:
@@ -99,42 +97,6 @@ class RuntimeService:
     def reset_session(self, *, session_id: str = "default") -> dict[str, Any]:
         mod = self._chat_logic_module()
         return mod.reset_session_context(session_id)
-
-    def spawn_worker(
-        self,
-        *,
-        title: str,
-        instructions: str,
-        model_tier: str = "medium",
-        tool_access: list[str] | None = None,
-        skill_access: list[str] | None = None,
-        preload_files: list[str] | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        return get_worker_manager().spawn_worker(
-            title=title,
-            instructions=instructions,
-            model_tier=model_tier,
-            tool_access=tool_access or [],
-            skill_access=skill_access or [],
-            preload_files=preload_files or [],
-            metadata=metadata or {},
-        )
-
-    def cancel_worker(self, *, worker_id: str) -> dict[str, Any]:
-        return get_worker_manager().cancel_worker(worker_id)
-
-    def reset_worker_context(self, *, worker_id: str) -> dict[str, Any]:
-        return get_worker_manager().reset_worker_context(worker_id)
-
-    def message_worker(self, *, worker_id: str, message: str, model_tier: str = "medium") -> dict[str, Any]:
-        return get_worker_manager().message_worker(worker_id=worker_id, message=message, model_tier=model_tier)
-
-    def get_worker(self, *, worker_id: str) -> dict[str, Any]:
-        return get_worker_manager().get_worker(worker_id)
-
-    def list_workers(self) -> dict[str, Any]:
-        return get_worker_manager().list_workers()
 
     def central_status(self) -> dict[str, Any]:
         return get_central_service().status()
@@ -156,6 +118,9 @@ class RuntimeService:
 
     def central_trigger_profile(self, *, profile_id: str, description: str | None = None) -> dict[str, Any]:
         return get_central_service().trigger_profile(profile_id=profile_id, description=description)
+
+    def central_kill_run(self, *, run_id: str, requested_by: str = "main_agent") -> dict[str, Any]:
+        return get_central_service().kill_run(run_id=run_id, requested_by=requested_by)
 
     def central_list_defined_tasks(self) -> dict[str, Any]:
         return get_central_service().list_defined_tasks()
