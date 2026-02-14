@@ -561,50 +561,11 @@ def index() -> HTMLResponse:
       font-size: 0.75rem;
     }
 
-    .workers {
-      display: grid;
-      gap: 8px;
-    }
-
-    .worker-row {
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      background: #fffdfa;
-      padding: 8px;
-      display: grid;
-      gap: 6px;
-    }
-
-    .worker-top {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-    }
-
-    .worker-title {
-      font-family: "IBM Plex Mono", monospace;
-      font-size: 0.78rem;
-      color: var(--ink);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      max-width: 220px;
-    }
-
     .worker-meta {
       font-family: "IBM Plex Mono", monospace;
       font-size: 0.73rem;
       color: var(--muted);
       word-break: break-word;
-    }
-
-    .btn-kill {
-      border-color: #f3b6b6;
-      background: #ffecec;
-      color: #862c2c;
-      padding: 5px 8px;
-      font-size: 0.74rem;
     }
 
     @media (max-width: 900px) {
@@ -716,10 +677,6 @@ def index() -> HTMLResponse:
       <div class="card">
         <h3>Progress</h3>
         <div id="progress" class="body">Idle</div>
-      </div>
-      <div class="card">
-        <h3>Workers</h3>
-        <div id="workers" class="body workers">Task-agent runtime status...</div>
       </div>
       <div class="card">
         <h3>Task Agents</h3>
@@ -840,11 +797,7 @@ def index() -> HTMLResponse:
           progressEl.textContent = phases[i];
         }, 460);
       }
-      function refreshWorkersAndCentral() {
-        var workersEl = el('workers');
-        if (workersEl) {
-          workersEl.innerHTML = '<div class=\"worker-meta\">Worker subsystem removed; task-agent queue is active.</div>';
-        }
+      function refreshCentralStatusOnly() {
         var centralEl = el('central-status');
         if (centralEl) {
           var xhrC = new XMLHttpRequest();
@@ -900,7 +853,7 @@ def index() -> HTMLResponse:
             setLastResponsePanel(body || {});
             setRuntimeFromResponse(body || {}, sessionId);
             setProgressFromResponse(body || {});
-            refreshWorkersAndCentral();
+            refreshCentralStatusOnly();
             if (ticker) clearInterval(ticker);
             setBusyStatus(false, '');
           });
@@ -920,7 +873,7 @@ def index() -> HTMLResponse:
             var progressEl = el('progress');
             if (progressEl) progressEl.textContent = 'Session context reset.';
             setBusyStatus(false, '');
-            refreshWorkersAndCentral();
+            refreshCentralStatusOnly();
           });
         };
         var msgInput = el('msg');
@@ -930,7 +883,7 @@ def index() -> HTMLResponse:
             if (e && e.key === 'Enter') window.sendMsg();
           });
         }
-        refreshWorkersAndCentral();
+        refreshCentralStatusOnly();
       }
       function maybeInstallFallback() {
         if (window.__zubotRichUiInitDone) return;
@@ -954,7 +907,6 @@ def index() -> HTMLResponse:
     const routePill = document.getElementById('route-pill');
     const sessionPill = document.getElementById('session-pill');
     const msgCountPill = document.getElementById('msgcount-pill');
-    const workersEl = document.getElementById('workers');
     const centralStatusEl = document.getElementById('central-status');
     const appRoot = document.getElementById('app-root');
     const panelChat = document.getElementById('panel-chat');
@@ -972,7 +924,6 @@ def index() -> HTMLResponse:
     const scheduleFrequencyMinutes = document.getElementById('sched-frequency-minutes');
     const scheduleCalendarRows = document.getElementById('sched-calendar-time-rows');
     const scheduleFormStatus = document.getElementById('sched-form-status');
-    let workerPollTimer = null;
     let currentUiTab = 'chat';
     let cachedSchedules = [];
     let scheduleEditingId = null;
@@ -1515,10 +1466,6 @@ def index() -> HTMLResponse:
       progressEl.textContent = `Completed (${route})\nTools: ${chain}`;
     }
 
-    async function refreshWorkers() {
-      workersEl.innerHTML = '<div class="worker-meta">Worker subsystem removed; task-agent queue is active.</div>';
-    }
-
     function renderCentralStatus(statusPayload, runsPayload) {
       const service = statusPayload && statusPayload.service ? statusPayload.service : {};
       const runtime = statusPayload && statusPayload.runtime ? statusPayload.runtime : {};
@@ -1615,7 +1562,6 @@ def index() -> HTMLResponse:
         setLastResponsePanel(data);
         setRuntimeFromResponse(data, session_id);
         setProgressFromResponse(data);
-        await refreshWorkers();
         await refreshCentralStatus();
       } catch (err) {
         appendMessage('bot', 'Request failed.');
@@ -1649,7 +1595,6 @@ def index() -> HTMLResponse:
         });
         setRuntimeFromResponse({ route: 'session.reset', data: {} }, session_id);
         progressEl.textContent = 'Session context reset.';
-        await refreshWorkers();
         await refreshCentralStatus();
       } finally {
         setBusyStatus(false, '');
@@ -1676,7 +1621,6 @@ def index() -> HTMLResponse:
         });
         setRuntimeFromResponse({ route: 'session.init', data: { context_debug: {} } }, session_id);
         progressEl.textContent = `Session initialized (${session_id}).`;
-        await refreshWorkers();
         await refreshCentralStatus();
       } finally {
         setBusyStatus(false, '');
@@ -1698,8 +1642,7 @@ def index() -> HTMLResponse:
     window.saveSchedule = saveSchedule;
     window.addCalendarRunTimeRow = addCalendarRunTimeRow;
 
-    workerPollTimer = setInterval(() => {
-      refreshWorkers();
+    setInterval(() => {
       refreshCentralStatus();
     }, 1200);
     initSchedulePickers();
