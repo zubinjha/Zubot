@@ -91,6 +91,27 @@ def test_manual_enqueue_and_list_runs(tmp_path):
     assert runs[0]["payload"]["trigger"] == "manual"
 
 
+def test_enqueue_agentic_run_payload_shape(tmp_path):
+    store = TaskSchedulerStore(db_path=tmp_path / "scheduler.sqlite3")
+    out = store.enqueue_agentic_run(
+        task_name="Background Research",
+        instructions="Research topic X",
+        requested_by="ui",
+        model_tier="medium",
+        tool_access=["web_search"],
+        skill_access=[],
+        timeout_sec=120,
+        metadata={"source": "test"},
+    )
+    assert out["ok"] is True
+    runs = store.list_runs(limit=5)
+    assert runs
+    row = runs[0]
+    assert row["profile_id"] == "agentic_task"
+    assert row["payload"]["run_kind"] == "agentic"
+    assert row["payload"]["instructions"] == "Research topic X"
+
+
 def test_runtime_counts(tmp_path):
     store = TaskSchedulerStore(db_path=tmp_path / "scheduler.sqlite3")
     store.enqueue_manual_run(profile_id="profile_manual")

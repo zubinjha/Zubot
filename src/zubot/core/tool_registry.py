@@ -149,6 +149,35 @@ def _enqueue_task(**kwargs: Any) -> dict[str, Any]:
     return get_central_service().trigger_profile(profile_id=task_id, description=description)
 
 
+def _enqueue_agentic_task(**kwargs: Any) -> dict[str, Any]:
+    instructions = str(kwargs.get("instructions") or "").strip()
+    if not instructions:
+        return {"ok": False, "error": "instructions is required.", "source": "tool_registry"}
+    task_name_raw = kwargs.get("task_name")
+    task_name = str(task_name_raw).strip() if isinstance(task_name_raw, str) and task_name_raw.strip() else "Background Research Task"
+    requested_by_raw = kwargs.get("requested_by")
+    requested_by = str(requested_by_raw).strip() if isinstance(requested_by_raw, str) and requested_by_raw.strip() else "main_agent"
+    model_tier_raw = kwargs.get("model_tier")
+    model_tier = str(model_tier_raw).strip().lower() if isinstance(model_tier_raw, str) and model_tier_raw.strip() else "medium"
+    if model_tier not in {"low", "medium", "high"}:
+        model_tier = "medium"
+    timeout_raw = kwargs.get("timeout_sec")
+    timeout_sec = int(timeout_raw) if isinstance(timeout_raw, int) and timeout_raw > 0 else 180
+    tool_access = [str(item).strip() for item in kwargs.get("tool_access", []) if isinstance(item, str) and str(item).strip()]
+    skill_access = [str(item).strip() for item in kwargs.get("skill_access", []) if isinstance(item, str) and str(item).strip()]
+    metadata = kwargs.get("metadata") if isinstance(kwargs.get("metadata"), dict) else {}
+    return get_central_service().enqueue_agentic_task(
+        task_name=task_name,
+        instructions=instructions,
+        requested_by=requested_by,
+        model_tier=model_tier,
+        tool_access=tool_access,
+        skill_access=skill_access,
+        timeout_sec=timeout_sec,
+        metadata=metadata,
+    )
+
+
 def _kill_task_run(**kwargs: Any) -> dict[str, Any]:
     run_id = str(kwargs.get("run_id") or "").strip()
     if not run_id:
@@ -164,6 +193,26 @@ def _list_task_runs(**kwargs: Any) -> dict[str, Any]:
     return get_central_service().list_runs(limit=safe_limit)
 
 
+def _query_central_db(**kwargs: Any) -> dict[str, Any]:
+    sql = str(kwargs.get("sql") or "").strip()
+    if not sql:
+        return {"ok": False, "error": "sql is required.", "source": "tool_registry"}
+    read_only = bool(kwargs.get("read_only", True))
+    timeout_raw = kwargs.get("timeout_sec")
+    timeout_sec = float(timeout_raw) if isinstance(timeout_raw, (int, float)) and float(timeout_raw) > 0 else 5.0
+    max_rows_raw = kwargs.get("max_rows")
+    max_rows = int(max_rows_raw) if isinstance(max_rows_raw, int) and max_rows_raw > 0 else None
+    params_raw = kwargs.get("params")
+    params = params_raw if isinstance(params_raw, (list, dict)) else None
+    return get_central_service().execute_sql(
+        sql=sql,
+        params=params,
+        read_only=read_only,
+        timeout_sec=timeout_sec,
+        max_rows=max_rows,
+    )
+
+
 def _create_default_registry() -> ToolRegistry:
     registry = ToolRegistry()
 
@@ -176,6 +225,24 @@ def _create_default_registry() -> ToolRegistry:
             parameters={
                 "task_id": {"type": "string", "required": True},
                 "description": {"type": "string", "required": False},
+            },
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="enqueue_agentic_task",
+            handler=_enqueue_agentic_task,
+            category="orchestration",
+            description="Queue a non-blocking agentic background task with instructions and optional tool scope.",
+            parameters={
+                "task_name": {"type": "string", "required": False},
+                "instructions": {"type": "string", "required": True},
+                "requested_by": {"type": "string", "required": False},
+                "model_tier": {"type": "string", "required": False},
+                "tool_access": {"type": "array", "items_type": "string", "required": False},
+                "skill_access": {"type": "array", "items_type": "string", "required": False},
+                "timeout_sec": {"type": "integer", "required": False},
+                "metadata": {"type": "object", "required": False},
             },
         )
     )
@@ -198,6 +265,21 @@ def _create_default_registry() -> ToolRegistry:
             category="orchestration",
             description="List recent task runs from the central queue store.",
             parameters={"limit": {"type": "integer", "required": False}},
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="query_central_db",
+            handler=_query_central_db,
+            category="orchestration",
+            description="Execute SQL against central DB through serialized queue (read-only by default).",
+            parameters={
+                "sql": {"type": "string", "required": True},
+                "params": {"type": "object", "required": False},
+                "read_only": {"type": "boolean", "required": False},
+                "timeout_sec": {"type": "number", "required": False},
+                "max_rows": {"type": "integer", "required": False},
+            },
         )
     )
     registry.register(

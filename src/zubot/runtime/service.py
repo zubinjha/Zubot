@@ -6,7 +6,7 @@ from importlib import import_module
 from threading import RLock
 from typing import Any
 
-from src.zubot.core.central_service import get_central_service
+from src.zubot.core.control_panel import get_control_panel
 from src.zubot.core.memory_summary_worker import get_memory_summary_worker
 
 
@@ -103,31 +103,71 @@ class RuntimeService:
         return mod.get_session_context_snapshot(session_id)
 
     def central_status(self) -> dict[str, Any]:
-        return get_central_service().status()
+        return get_control_panel().status()
 
     def central_start(self) -> dict[str, Any]:
-        return get_central_service().start()
+        return get_control_panel().start()
 
     def central_stop(self) -> dict[str, Any]:
-        return get_central_service().stop()
+        return get_control_panel().stop()
 
     def central_schedules(self) -> dict[str, Any]:
-        return get_central_service().list_schedules()
+        return get_control_panel().list_schedules()
 
     def central_runs(self, *, limit: int = 50) -> dict[str, Any]:
-        return get_central_service().list_runs(limit=limit)
+        return get_control_panel().list_runs(limit=limit)
 
     def central_metrics(self) -> dict[str, Any]:
-        return get_central_service().metrics()
+        return get_control_panel().metrics()
 
     def central_trigger_profile(self, *, profile_id: str, description: str | None = None) -> dict[str, Any]:
-        return get_central_service().trigger_profile(profile_id=profile_id, description=description)
+        return get_control_panel().enqueue_task(task_id=profile_id, description=description)
+
+    def central_enqueue_agentic_task(
+        self,
+        *,
+        task_name: str,
+        instructions: str,
+        requested_by: str = "main_agent",
+        model_tier: str = "medium",
+        tool_access: list[str] | None = None,
+        skill_access: list[str] | None = None,
+        timeout_sec: int = 180,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return get_control_panel().enqueue_agentic_task(
+            task_name=task_name,
+            instructions=instructions,
+            requested_by=requested_by,
+            model_tier=model_tier,
+            tool_access=tool_access,
+            skill_access=skill_access,
+            timeout_sec=timeout_sec,
+            metadata=metadata,
+        )
 
     def central_kill_run(self, *, run_id: str, requested_by: str = "main_agent") -> dict[str, Any]:
-        return get_central_service().kill_run(run_id=run_id, requested_by=requested_by)
+        return get_control_panel().kill_run(run_id=run_id, requested_by=requested_by)
+
+    def central_execute_sql(
+        self,
+        *,
+        sql: str,
+        params: Any = None,
+        read_only: bool = True,
+        timeout_sec: float = 5.0,
+        max_rows: int | None = None,
+    ) -> dict[str, Any]:
+        return get_control_panel().execute_sql(
+            sql=sql,
+            params=params,
+            read_only=read_only,
+            timeout_sec=timeout_sec,
+            max_rows=max_rows,
+        )
 
     def central_list_defined_tasks(self) -> dict[str, Any]:
-        return get_central_service().list_defined_tasks()
+        return get_control_panel().list_defined_tasks()
 
     def central_upsert_schedule(
         self,
@@ -142,7 +182,7 @@ class RuntimeService:
         run_times: list[str] | None = None,
         days_of_week: list[str] | None = None,
     ) -> dict[str, Any]:
-        return get_central_service().upsert_schedule(
+        return get_control_panel().upsert_schedule(
             schedule_id=schedule_id,
             task_id=task_id,
             enabled=enabled,
@@ -155,7 +195,7 @@ class RuntimeService:
         )
 
     def central_delete_schedule(self, *, schedule_id: str) -> dict[str, Any]:
-        return get_central_service().delete_schedule(schedule_id=schedule_id)
+        return get_control_panel().delete_schedule(schedule_id=schedule_id)
 
 
 _RUNTIME_SERVICE: RuntimeService | None = None

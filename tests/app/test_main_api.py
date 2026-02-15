@@ -100,8 +100,53 @@ class _FakeRuntimeService:
     def central_trigger_profile(self, *, profile_id: str, description: str | None = None):
         return {"ok": True, "profile_id": profile_id, "description": description}
 
+    def central_enqueue_agentic_task(
+        self,
+        *,
+        task_name: str,
+        instructions: str,
+        requested_by: str = "main_agent",
+        model_tier: str = "medium",
+        tool_access: list[str] | None = None,
+        skill_access: list[str] | None = None,
+        timeout_sec: int = 180,
+        metadata: dict | None = None,
+    ):
+        return {
+            "ok": True,
+            "run_id": "trun_agentic_1",
+            "task_name": task_name,
+            "instructions": instructions,
+            "requested_by": requested_by,
+            "model_tier": model_tier,
+            "tool_access": tool_access or [],
+            "skill_access": skill_access or [],
+            "timeout_sec": timeout_sec,
+            "metadata": metadata or {},
+        }
+
     def central_kill_run(self, *, run_id: str, requested_by: str = "main_agent"):
         return {"ok": True, "run_id": run_id, "requested_by": requested_by}
+
+    def central_execute_sql(
+        self,
+        *,
+        sql: str,
+        params=None,
+        read_only: bool = True,
+        timeout_sec: float = 5.0,
+        max_rows: int | None = None,
+    ):
+        return {
+            "ok": True,
+            "sql": sql,
+            "params": params,
+            "read_only": read_only,
+            "timeout_sec": timeout_sec,
+            "max_rows": max_rows,
+            "rows": [{"ok": 1}],
+            "row_count": 1,
+        }
 
 
 def test_health_endpoint_uses_runtime_service(monkeypatch):
@@ -198,9 +243,31 @@ def test_central_endpoints(monkeypatch):
     assert trigger.status_code == 200
     assert trigger.json()["profile_id"] == "profile_x"
 
+    agentic = client.post(
+        "/api/central/agentic/enqueue",
+        json={
+            "task_name": "Research",
+            "instructions": "Research topic X and summarize.",
+            "requested_by": "ui",
+            "model_tier": "medium",
+            "tool_access": [],
+            "skill_access": [],
+            "timeout_sec": 120,
+            "metadata": {"source": "test"},
+        },
+    )
+    assert agentic.status_code == 200
+    assert agentic.json()["ok"] is True
+    assert agentic.json()["run_id"] == "trun_agentic_1"
+
     kill_run = client.post("/api/central/runs/run_x/kill", json={"requested_by": "ui"})
     assert kill_run.status_code == 200
     assert kill_run.json()["run_id"] == "run_x"
+
+    sql = client.post("/api/central/sql", json={"sql": "SELECT 1 AS ok;", "read_only": True, "max_rows": 10})
+    assert sql.status_code == 200
+    assert sql.json()["ok"] is True
+    assert sql.json()["row_count"] == 1
 
     stop = client.post("/api/central/stop")
     assert stop.status_code == 200

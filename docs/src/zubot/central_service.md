@@ -4,14 +4,22 @@ This document describes the v1 central runtime scaffold for scheduled task-agent
 
 ## Modules
 - `src/zubot/core/central_service.py`
+- `src/zubot/core/control_panel.py`
 - `src/zubot/core/task_scheduler_store.py`
+- `src/zubot/core/task_heartbeat.py`
 - `src/zubot/core/task_agent_runner.py`
+- `src/zubot/core/central_db_queue.py`
 - `src/zubot/core/memory_manager.py`
 - `src/zubot/core/memory_summary_worker.py`
 
 ## Runtime Model (v1)
-- single-process scheduler + queue consumer
-- task execution is `pre_defined_tasks` script-driven
+- single-process Control Panel + queue consumer
+- heartbeat is isolated from execution:
+  - heartbeat queues due scheduled runs
+  - dispatcher claims and executes queued runs in task slots
+- task execution supports:
+  - `predefined` runs (`pre_defined_tasks` scripts)
+  - `agentic` runs (background sub-agent tasks)
 - implemented but disabled by default (`central_service.enabled = false`)
 - daemon-first startup supported via `python -m src.zubot.daemon.main`
 - central loop auto-runs at daemon startup only when config-enabled
@@ -21,6 +29,7 @@ This document describes the v1 central runtime scaffold for scheduled task-agent
 
 `central_service`:
 - `enabled`
+- `heartbeat_poll_interval_sec` (preferred)
 - `poll_interval_sec`
 - `task_runner_concurrency`
 - `scheduler_db_path`
@@ -30,6 +39,8 @@ This document describes the v1 central runtime scaffold for scheduled task-agent
 - `memory_manager_completion_debounce_sec`
 - `queue_warning_threshold`
 - `running_age_warning_sec`
+- `db_queue_busy_timeout_ms`
+- `db_queue_default_max_rows`
 
 `pre_defined_tasks`:
 - `tasks` map (`task_id` -> script entrypoint + args + timeout)
@@ -62,11 +73,14 @@ Indexes:
 5. Support explicit run kill:
   - queued run -> immediate `blocked`
   - running run -> cancellation requested, executor terminates subprocess and finalizes `blocked`
-6. Run housekeeping:
+6. Agentic queueing:
+  - enqueue non-blocking background tasks with `instructions` + model/tool scope
+  - task runner executes through sub-agent path and writes terminal state to queue DB
+7. Run housekeeping:
   - prune old completed run history rows
   - run debounced/periodic memory finalization sweeps for prior non-finalized days (full raw-day replay summary)
   - emit structured memory-manager sweep events for observability (not persisted to daily-memory raw events)
-7. Memory ingestion behavior for task-agent events:
+8. Memory ingestion behavior for task-agent events:
   - append raw memory events (`task_agent_event`) for queue + terminal lifecycle milestones:
     - `run_queued`
     - `run_finished`
@@ -77,7 +91,7 @@ Indexes:
   - kick background summary worker for non-blocking summary updates
   - do not persist routine central internal/system events to daily memory
 
-## Check-In Contract
+## Check-In Contract (Profile View)
 
 Per profile status includes:
 - state: `free` | `queued` | `running`
@@ -90,6 +104,19 @@ Per profile status includes:
   - summary
   - error
   - finished_at
+
+## Task Slot Contract
+
+`status().task_slots` exposes slot-level runtime metadata:
+- `slot_id`
+- `enabled`
+- `state` (`free` | `busy`)
+- `run_id`
+- `task_id`
+- `task_name`
+- `started_at`
+- `updated_at`
+- `last_result`
 
 ## Task Progress Event Contract
 
@@ -105,12 +132,23 @@ Forwarded task events (`type = task_agent_event`) include normalized payload fie
   - `failed`
   - `killed`
 - optional:
+  - `slot_id`
   - `message`
   - `percent` (0-100)
+  - `origin` (`scheduled`, `manual`, `agentic`, etc.)
 - timestamps:
   - `started_at`
   - `updated_at`
   - `finished_at`
+
+## Central SQL Queue Contract
+
+- Serialized SQL path: `CentralService.execute_sql(...)`
+- Backed by `CentralDbQueue` worker thread:
+  - correlation ids (`request_id`)
+  - read-only guard by default
+  - WAL + busy-timeout aware connection settings
+- Intended for concurrent callers where direct SQLite access could contend.
 
 ## API Surface
 - `GET /api/central/status`
@@ -123,7 +161,9 @@ Forwarded task events (`type = task_agent_event`) include normalized payload fie
 - `GET /api/central/runs`
 - `GET /api/central/metrics`
 - `POST /api/central/trigger/{task_id}`
+- `POST /api/central/agentic/enqueue`
 - `POST /api/central/runs/{run_id}/kill`
+- `POST /api/central/sql`
 
 ## Future Direction
 - merge scheduler store + memory index into a unified sqlite authority

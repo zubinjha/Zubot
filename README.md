@@ -34,8 +34,10 @@ Operations guidance for long-running mode lives in [docs/src/zubot/operations.md
 - Core agent runtime scaffolding in `src/zubot/core/`:
   - agent loop + event schemas
   - sub-agent runner scaffold + delegation path
-  - central service scaffold for scheduled/queued task-agent runs (SQLite-backed queue/store)
-    - task-agent executions are queued/claimed runs by fixed concurrency slots
+  - control-panel orchestration facade + central service runtime for scheduled/queued task runs
+    - heartbeat-driven due-run queueing
+    - task executions are queued/claimed runs by fixed concurrency slots
+    - serialized SQL queue for central DB access
   - config-driven LLM client (OpenRouter adapter)
   - centralized tool registry and dispatch helpers
   - context loading/assembly pipeline
@@ -149,7 +151,9 @@ Choose one of these startup modes based on what you want to run.
   - `GET /api/central/runs`
   - `GET /api/central/metrics`
   - `POST /api/central/trigger/{task_id}`
+  - `POST /api/central/agentic/enqueue`
   - `POST /api/central/runs/{run_id}/kill`
+  - `POST /api/central/sql`
 - Session reset clears chat working context but preserves persisted daily memory in SQLite.
 - Daily memory is DB-backed in `memory/central/zubot_core.db`:
   - raw events (`daily_memory_events`)
@@ -160,7 +164,7 @@ Choose one of these startup modes based on what you want to run.
 - Session JSONL logging is optional (`memory.session_event_logging_enabled`) and disabled by default.
 - LLM-routed queries run through a registry-backed tool-call loop (tool schema -> tool execution -> final response).
 - Tool registry includes task queue orchestration tools:
-  - `enqueue_task`, `kill_task_run`, `list_task_runs`, `get_task_agent_checkin`
+  - `enqueue_task`, `enqueue_agentic_task`, `kill_task_run`, `list_task_runs`, `get_task_agent_checkin`, `query_central_db`
 - UI now includes:
   - chat-style message timeline
   - Chat/Scheduled Tasks tab split in the left panel
@@ -168,6 +172,7 @@ Choose one of these startup modes based on what you want to run.
   - live in-flight progress states (thinking/context/tool-check phases)
   - post-response tool-chain summary in Progress (exact tool names + status)
   - task-runtime status panel with queue/run visibility
+  - task-slot status visibility (busy/free/disabled counts)
   - task-agent panel with central runtime status + recent outcomes
   - runtime panel with route, tool-call record, and last reply snapshot
   - on-demand "Context JSON" dialog with collapsible full-context snapshot + JSON download

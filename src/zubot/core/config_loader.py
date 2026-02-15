@@ -170,6 +170,11 @@ def get_central_service_config(config: dict[str, Any] | None = None) -> dict[str
     cfg = central if isinstance(central, dict) else {}
     return {
         "enabled": bool(cfg.get("enabled", False)),
+        "heartbeat_poll_interval_sec": int(
+            cfg.get("heartbeat_poll_interval_sec", cfg.get("poll_interval_sec", 3600))
+        )
+        if isinstance(cfg.get("heartbeat_poll_interval_sec", cfg.get("poll_interval_sec", 3600)), int)
+        else 3600,
         "poll_interval_sec": int(cfg.get("poll_interval_sec", 3600))
         if isinstance(cfg.get("poll_interval_sec", 3600), int)
         else 3600,
@@ -195,6 +200,12 @@ def get_central_service_config(config: dict[str, Any] | None = None) -> dict[str
         "running_age_warning_sec": int(cfg.get("running_age_warning_sec", 1800))
         if isinstance(cfg.get("running_age_warning_sec", 1800), int)
         else 1800,
+        "db_queue_busy_timeout_ms": int(cfg.get("db_queue_busy_timeout_ms", 5000))
+        if isinstance(cfg.get("db_queue_busy_timeout_ms", 5000), int)
+        else 5000,
+        "db_queue_default_max_rows": int(cfg.get("db_queue_default_max_rows", 500))
+        if isinstance(cfg.get("db_queue_default_max_rows", 500), int)
+        else 500,
     }
 
 

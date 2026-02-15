@@ -45,6 +45,7 @@
     },
     "central_service": {
         "enabled": false,
+        "heartbeat_poll_interval_sec": 3600,
         "poll_interval_sec": 3600,
         "task_runner_concurrency": 3,
         "scheduler_db_path": "memory/central/zubot_core.db",
@@ -53,7 +54,9 @@
         "memory_manager_sweep_interval_sec": 43200,
         "memory_manager_completion_debounce_sec": 300,
         "queue_warning_threshold": 25,
-        "running_age_warning_sec": 1800
+        "running_age_warning_sec": 1800,
+        "db_queue_busy_timeout_ms": 5000,
+        "db_queue_default_max_rows": 500
     },
     "filesystem": {
         "default_access": "deny",

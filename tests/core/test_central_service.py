@@ -62,6 +62,8 @@ def test_central_service_status_has_checkin_payload(configured_central):
     assert out["service"]["enabled_in_config"] is False
     assert isinstance(out["task_agents"], list)
     assert out["task_agents"][0]["profile_id"] == "profile_a"
+    assert isinstance(out["task_slots"], list)
+    assert len(out["task_slots"]) == 2
 
 
 def test_trigger_profile_runs_and_updates_last_result(configured_central, monkeypatch: pytest.MonkeyPatch):
@@ -417,3 +419,55 @@ def test_status_includes_active_and_queue_run_views(configured_central):
     assert observed is not None
     assert isinstance(observed.get("active_runs"), list)
     assert isinstance(observed.get("queued_runs_preview"), list)
+
+
+def test_enqueue_agentic_task_queues_and_runs(configured_central):
+    service = CentralService()
+    service._runner = type(  # noqa: SLF001
+        "_FakeRunner",
+        (),
+        {
+            "describe_run": staticmethod(lambda *, profile_id, payload=None: f"{profile_id}: {payload.get('task_name', 'agentic')}"),
+            "run_profile": staticmethod(
+                lambda *, profile_id, payload=None, cancel_event=None: {
+                    "ok": True,
+                    "status": "done",
+                    "summary": f"agentic:{payload.get('instructions', '')[:20]}",
+                    "error": None,
+                    "current_description": "done",
+                }
+            ),
+        },
+    )()
+    out = service.enqueue_agentic_task(
+        task_name="Research",
+        instructions="Research XYZ and summarize",
+        requested_by="ui",
+        model_tier="medium",
+        tool_access=[],
+        skill_access=[],
+        timeout_sec=60,
+        metadata={"source": "test"},
+    )
+    assert out["ok"] is True
+
+    deadline = time.time() + 2.0
+    done = None
+    while time.time() < deadline:
+        runs = service.list_runs(limit=10)["runs"]
+        if runs and runs[0]["status"] in {"done", "failed", "blocked"}:
+            done = runs[0]
+            break
+        time.sleep(0.05)
+
+    assert done is not None
+    assert done["payload"]["run_kind"] == "agentic"
+    assert done["status"] == "done"
+
+
+def test_execute_sql_uses_db_queue(configured_central):
+    service = CentralService()
+    out = service.execute_sql(sql="SELECT 1 AS ok;", read_only=True, max_rows=5)
+    assert out["ok"] is True
+    assert out["source"] == "central_db_queue"
+    assert out["rows"][0]["ok"] == 1

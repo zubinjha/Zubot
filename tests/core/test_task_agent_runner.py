@@ -132,3 +132,32 @@ def test_run_profile_predefined_task_cancelled(monkeypatch: pytest.MonkeyPatch, 
     out = runner_with_tasks.run_profile(profile_id="script_task", cancel_event=cancel)
     assert out["ok"] is False
     assert out["status"] == "blocked"
+
+
+def test_run_profile_agentic_task_uses_sub_agent_runner():
+    class _FakeSubRunner:
+        def run_task(self, task, **kwargs):  # noqa: ANN001
+            _ = kwargs
+            assert task["instructions"] == "Research XYZ"
+            return {
+                "ok": True,
+                "result": {"status": "success", "summary": "Research complete.", "error": None},
+            }
+
+    runner = TaskAgentRunner(runner=_FakeSubRunner())
+    out = runner.run_profile(
+        profile_id="agentic_task",
+        payload={
+            "run_kind": "agentic",
+            "task_name": "Research Task",
+            "instructions": "Research XYZ",
+            "requested_by": "ui",
+            "model_tier": "medium",
+            "tool_access": ["web_search"],
+            "skill_access": [],
+            "timeout_sec": 60,
+        },
+    )
+    assert out["ok"] is True
+    assert out["status"] == "done"
+    assert out["summary"] == "Research complete."

@@ -8,11 +8,13 @@ from threading import Event, RLock, Thread
 from typing import Any
 from uuid import uuid4
 
+from .central_db_queue import CentralDbQueue
 from .config_loader import load_config
 from .daily_memory import append_daily_memory_entry, local_day_str
 from .memory_index import enqueue_day_summary_job, increment_day_message_count
 from .memory_manager import MemoryManager, MemoryManagerSettings
 from .memory_summary_worker import get_memory_summary_worker
+from .task_heartbeat import TaskHeartbeat
 from .task_agent_runner import TaskAgentRunner
 from .task_scheduler_store import TaskSchedulerStore, resolve_scheduler_db_path
 
@@ -21,6 +23,7 @@ from .task_scheduler_store import TaskSchedulerStore, resolve_scheduler_db_path
 class CentralServiceSettings:
     enabled: bool = False
     poll_interval_sec: int = 3600
+    heartbeat_poll_interval_sec: int = 3600
     task_runner_concurrency: int = 2
     scheduler_db_path: str = "memory/central/zubot_core.db"
     run_history_retention_days: int = 30
@@ -29,6 +32,8 @@ class CentralServiceSettings:
     memory_manager_completion_debounce_sec: int = 5 * 60
     queue_warning_threshold: int = 25
     running_age_warning_sec: int = 1800
+    db_queue_busy_timeout_ms: int = 5000
+    db_queue_default_max_rows: int = 500
 
 
 def _load_central_settings() -> CentralServiceSettings:
@@ -42,7 +47,8 @@ def _load_central_settings() -> CentralServiceSettings:
         return CentralServiceSettings()
 
     enabled = bool(central.get("enabled", False))
-    poll = central.get("poll_interval_sec", 3600)
+    heartbeat_poll = central.get("heartbeat_poll_interval_sec")
+    poll = heartbeat_poll if isinstance(heartbeat_poll, int) else central.get("poll_interval_sec", 3600)
     conc = central.get("task_runner_concurrency", 2)
     db_path = central.get("scheduler_db_path", "memory/central/zubot_core.db")
     retention_days = central.get("run_history_retention_days", 30)
@@ -51,10 +57,13 @@ def _load_central_settings() -> CentralServiceSettings:
     memory_debounce_sec = central.get("memory_manager_completion_debounce_sec", 5 * 60)
     queue_warning = central.get("queue_warning_threshold", 25)
     running_age_warning = central.get("running_age_warning_sec", 1800)
+    db_queue_busy_timeout = central.get("db_queue_busy_timeout_ms", 5000)
+    db_queue_max_rows = central.get("db_queue_default_max_rows", 500)
 
     return CentralServiceSettings(
         enabled=enabled,
         poll_interval_sec=int(poll) if isinstance(poll, int) and poll > 0 else 3600,
+        heartbeat_poll_interval_sec=int(poll) if isinstance(poll, int) and poll > 0 else 3600,
         task_runner_concurrency=int(conc) if isinstance(conc, int) and conc > 0 else 2,
         scheduler_db_path=str(db_path) if isinstance(db_path, str) and db_path.strip() else "memory/central/zubot_core.db",
         run_history_retention_days=int(retention_days) if isinstance(retention_days, int) and retention_days >= 0 else 30,
@@ -63,6 +72,10 @@ def _load_central_settings() -> CentralServiceSettings:
         memory_manager_completion_debounce_sec=int(memory_debounce_sec) if isinstance(memory_debounce_sec, int) and memory_debounce_sec > 0 else 5 * 60,
         queue_warning_threshold=int(queue_warning) if isinstance(queue_warning, int) and queue_warning >= 0 else 25,
         running_age_warning_sec=int(running_age_warning) if isinstance(running_age_warning, int) and running_age_warning >= 0 else 1800,
+        db_queue_busy_timeout_ms=int(db_queue_busy_timeout)
+        if isinstance(db_queue_busy_timeout, int) and db_queue_busy_timeout > 0
+        else 5000,
+        db_queue_default_max_rows=int(db_queue_max_rows) if isinstance(db_queue_max_rows, int) and db_queue_max_rows > 0 else 500,
     )
 
 
@@ -128,6 +141,11 @@ class CentralService:
         settings = _load_central_settings()
         self._settings = settings
         self._store = TaskSchedulerStore(db_path=settings.scheduler_db_path)
+        self._heartbeat = TaskHeartbeat(store=self._store)
+        self._db_queue = CentralDbQueue(
+            db_path=self._store.db_path,
+            busy_timeout_ms=settings.db_queue_busy_timeout_ms,
+        )
         self._runner = TaskAgentRunner()
         self._memory_manager = MemoryManager()
         self._lock = RLock()
@@ -136,7 +154,10 @@ class CentralService:
         self._active_threads: dict[str, Thread] = {}
         self._active_descriptions: dict[str, str] = {}
         self._cancel_events: dict[str, Event] = {}
+        self._run_to_slot: dict[str, str] = {}
+        self._task_slots: dict[str, dict[str, Any]] = {}
         self._events: list[dict[str, Any]] = []
+        self._sync_task_slots(settings.task_runner_concurrency)
 
     @staticmethod
     def _utc_now_iso() -> str:
@@ -179,6 +200,124 @@ class CentralService:
                 }
                 for event in recent
             ]
+
+    def _sync_task_slots(self, target_concurrency: int) -> None:
+        safe_target = max(1, int(target_concurrency))
+        slot_ids = [f"slot_{idx}" for idx in range(1, safe_target + 1)]
+        with self._lock:
+            for slot_id in slot_ids:
+                slot = self._task_slots.get(slot_id)
+                if not isinstance(slot, dict):
+                    self._task_slots[slot_id] = {
+                        "slot_id": slot_id,
+                        "enabled": True,
+                        "state": "free",
+                        "run_id": None,
+                        "task_id": None,
+                        "task_name": None,
+                        "started_at": None,
+                        "updated_at": self._utc_now_iso(),
+                        "last_result": None,
+                    }
+                else:
+                    slot["enabled"] = True
+
+            for slot_id, slot in list(self._task_slots.items()):
+                if slot_id in slot_ids:
+                    continue
+                if str(slot.get("state") or "free") == "busy":
+                    slot["enabled"] = False
+                else:
+                    self._task_slots.pop(slot_id, None)
+
+    def _acquire_free_slot_locked(self) -> str | None:
+        for slot_id in sorted(self._task_slots):
+            slot = self._task_slots.get(slot_id)
+            if not isinstance(slot, dict):
+                continue
+            if not bool(slot.get("enabled", True)):
+                continue
+            if str(slot.get("state") or "free") != "free":
+                continue
+            slot["state"] = "allocating"
+            slot["updated_at"] = self._utc_now_iso()
+            return slot_id
+        return None
+
+    def _assign_slot_locked(self, *, slot_id: str, run_id: str, task_id: str, task_name: str) -> None:
+        slot = self._task_slots.get(slot_id)
+        if not isinstance(slot, dict):
+            return
+        now = self._utc_now_iso()
+        slot["state"] = "busy"
+        slot["run_id"] = run_id
+        slot["task_id"] = task_id
+        slot["task_name"] = task_name
+        slot["started_at"] = now
+        slot["updated_at"] = now
+        self._run_to_slot[run_id] = slot_id
+
+    def _unreserve_slot_locked(self, *, slot_id: str) -> None:
+        slot = self._task_slots.get(slot_id)
+        if not isinstance(slot, dict):
+            return
+        if str(slot.get("state") or "") != "allocating":
+            return
+        slot["state"] = "free"
+        slot["updated_at"] = self._utc_now_iso()
+
+    def _release_slot_locked(
+        self,
+        *,
+        run_id: str,
+        final_status: str | None = None,
+        final_summary: str | None = None,
+        final_error: str | None = None,
+    ) -> None:
+        slot_id = self._run_to_slot.pop(run_id, None)
+        if not slot_id:
+            return
+        slot = self._task_slots.get(slot_id)
+        if not isinstance(slot, dict):
+            return
+        now = self._utc_now_iso()
+        slot["state"] = "free"
+        slot["run_id"] = None
+        slot["task_id"] = None
+        slot["task_name"] = None
+        slot["started_at"] = None
+        slot["updated_at"] = now
+        if final_status:
+            slot["last_result"] = {
+                "status": final_status,
+                "summary": final_summary,
+                "error": final_error,
+                "finished_at": now,
+            }
+        if not bool(slot.get("enabled", True)) and str(slot.get("state") or "") == "free":
+            self._task_slots.pop(slot_id, None)
+
+    def _task_slot_payload(self) -> list[dict[str, Any]]:
+        with self._lock:
+            out: list[dict[str, Any]] = []
+            for slot_id in sorted(self._task_slots):
+                slot = self._task_slots[slot_id]
+                state_raw = str(slot.get("state") or "free")
+                state = "busy" if state_raw == "allocating" else state_raw
+                out.append(
+                    {
+                        "slot_id": slot_id,
+                        "enabled": bool(slot.get("enabled", True)),
+                        "state": state,
+                        "run_id": slot.get("run_id"),
+                        "task_id": slot.get("task_id"),
+                        "task_name": slot.get("task_name"),
+                        "started_at": slot.get("started_at"),
+                        "updated_at": slot.get("updated_at"),
+                        "last_result": slot.get("last_result"),
+                    }
+                )
+        return out
 
     @staticmethod
     def _is_high_signal_task_memory_event(event_type: str) -> bool:
@@ -233,6 +372,8 @@ class CentralService:
         run_status: str | None = None,
         progress_message: str | None = None,
         percent: int | None = None,
+        slot_id: str | None = None,
+        origin: str | None = None,
     ) -> None:
         text = f"{event_type} profile={profile_id} run_id={run_id} {detail}".strip()
         day = local_day_str()
@@ -251,13 +392,20 @@ class CentralService:
             worker.kick()
 
         task_profiles = _load_task_profiles()
-        task_name = str(task_profiles.get(profile_id, {}).get("name") or profile_id)
         run_row = self._store.get_run(run_id=run_id)
+        task_name = str(task_profiles.get(profile_id, {}).get("name") or profile_id)
+        if isinstance(run_row, dict):
+            payload = run_row.get("payload")
+            if isinstance(payload, dict):
+                payload_name = payload.get("task_name")
+                if isinstance(payload_name, str) and payload_name.strip():
+                    task_name = payload_name.strip()
         progress_payload = {
             "event_type": event_type,
             "task_id": profile_id,
             "task_name": task_name,
             "run_id": run_id,
+            "slot_id": slot_id,
             "status": self._progress_status_for_event(
                 event_type=event_type,
                 detail=detail,
@@ -272,6 +420,7 @@ class CentralService:
             "started_at": run_row.get("started_at") if isinstance(run_row, dict) else None,
             "updated_at": self._utc_now_iso(),
             "finished_at": run_row.get("finished_at") if isinstance(run_row, dict) else None,
+            "origin": origin,
             "detail": detail,
         }
         self._record_event(
@@ -316,9 +465,23 @@ class CentralService:
             if str(self._store.db_path) != str(resolved):
                 # Reload store if db path changed.
                 self._store = TaskSchedulerStore(db_path=settings.scheduler_db_path)
+                self._heartbeat = TaskHeartbeat(store=self._store)
+                self._db_queue.stop()
+                self._db_queue = CentralDbQueue(
+                    db_path=self._store.db_path,
+                    busy_timeout_ms=settings.db_queue_busy_timeout_ms,
+                )
+            elif self._db_queue.health().get("busy_timeout_ms") != settings.db_queue_busy_timeout_ms:
+                self._db_queue.stop()
+                self._db_queue = CentralDbQueue(
+                    db_path=self._store.db_path,
+                    busy_timeout_ms=settings.db_queue_busy_timeout_ms,
+                )
+            self._sync_task_slots(settings.task_runner_concurrency)
         return settings
 
     def start(self) -> dict[str, Any]:
+        self._db_queue.start()
         with self._lock:
             if self._loop_thread is not None and self._loop_thread.is_alive():
                 return {"ok": True, "running": True, "already_running": True}
@@ -333,6 +496,7 @@ class CentralService:
             self._stop_event.set()
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
+        self._db_queue.stop()
         with self._lock:
             self._loop_thread = None
         return {"ok": True, "running": False}
@@ -340,16 +504,26 @@ class CentralService:
     def _run_loop(self) -> None:
         while not self._stop_event.is_set():
             self.tick()
-            wait_for = max(1, self._settings.poll_interval_sec)
+            wait_for = max(1, self._settings.heartbeat_poll_interval_sec)
             self._stop_event.wait(timeout=wait_for)
 
     def _execute_claimed_run(self, claimed: dict[str, Any]) -> None:
         run_id = str(claimed.get("run_id") or "")
         profile_id = str(claimed.get("profile_id") or "")
         payload = claimed.get("payload") if isinstance(claimed.get("payload"), dict) else {}
+        origin = str(payload.get("origin") or payload.get("trigger") or "manual")
+        with self._lock:
+            slot_id = self._run_to_slot.get(run_id)
         with self._lock:
             cancel_event = self._cancel_events.get(run_id)
-        self._log_task_agent_event(event_type="run_started", profile_id=profile_id, run_id=run_id, detail="started")
+        self._log_task_agent_event(
+            event_type="run_started",
+            profile_id=profile_id,
+            run_id=run_id,
+            detail="started",
+            slot_id=slot_id,
+            origin=origin,
+        )
         self._log_task_agent_event(
             event_type="run_progress",
             profile_id=profile_id,
@@ -357,6 +531,8 @@ class CentralService:
             detail="progress=10 message=task execution started",
             percent=10,
             progress_message="task execution started",
+            slot_id=slot_id,
+            origin=origin,
         )
 
         try:
@@ -391,7 +567,12 @@ class CentralService:
                 run_id=run_id,
                 detail=detail,
                 run_status=status,
+                slot_id=slot_id,
+                origin=origin,
             )
+            final_status = status
+            final_summary = summary
+            final_error = error
         except Exception as exc:
             self._store.complete_run(run_id=run_id, status="failed", summary=None, error=str(exc))
             self._log_task_agent_event(
@@ -399,35 +580,59 @@ class CentralService:
                 profile_id=profile_id,
                 run_id=run_id,
                 detail=f"error={str(exc)[:180]}",
+                slot_id=slot_id,
+                origin=origin,
             )
+            final_status = "failed"
+            final_summary = None
+            final_error = str(exc)
         finally:
             with self._lock:
                 self._active_descriptions.pop(run_id, None)
                 self._active_threads.pop(run_id, None)
                 self._cancel_events.pop(run_id, None)
+                self._release_slot_locked(
+                    run_id=run_id,
+                    final_status=final_status,
+                    final_summary=final_summary,
+                    final_error=final_error,
+                )
             self._run_housekeeping(on_completion=True)
 
     def _dispatch_available(self) -> dict[str, Any]:
         started = 0
+        task_profiles = _load_task_profiles()
         while True:
             with self._lock:
                 if len(self._active_threads) >= self._settings.task_runner_concurrency:
                     break
+                slot_id = self._acquire_free_slot_locked()
+                if slot_id is None:
+                    break
 
             claimed = self._store.claim_next_run()
             if claimed is None:
+                with self._lock:
+                    self._unreserve_slot_locked(slot_id=slot_id)
                 break
 
             run_id = str(claimed.get("run_id") or "")
             profile_id = str(claimed.get("profile_id") or "")
             payload = claimed.get("payload") if isinstance(claimed.get("payload"), dict) else {}
             desc = self._runner.describe_run(profile_id=profile_id, payload=payload)
+            payload_name = payload.get("task_name") if isinstance(payload.get("task_name"), str) else None
+            task_name = (
+                payload_name.strip()
+                if isinstance(payload_name, str) and payload_name.strip()
+                else str(task_profiles.get(profile_id, {}).get("name") or profile_id)
+            )
 
             thread = Thread(target=self._execute_claimed_run, args=(claimed,), daemon=True)
             with self._lock:
                 self._active_descriptions[run_id] = desc
                 self._cancel_events[run_id] = Event()
                 self._active_threads[run_id] = thread
+                self._assign_slot_locked(slot_id=slot_id, run_id=run_id, task_id=profile_id, task_name=task_name)
             thread.start()
             started += 1
 
@@ -435,7 +640,7 @@ class CentralService:
 
     def tick(self) -> dict[str, Any]:
         settings = self._refresh_settings()
-        enqueue = self._store.enqueue_due_runs()
+        enqueue = self._heartbeat.enqueue_due_runs()
         queued_runs = enqueue.get("runs") if isinstance(enqueue, dict) else None
         if isinstance(queued_runs, list):
             for row in queued_runs:
@@ -450,6 +655,7 @@ class CentralService:
                     profile_id=profile_id,
                     run_id=run_id,
                     detail="trigger=scheduled",
+                    origin="scheduled",
                 )
         dispatch = self._dispatch_available()
         housekeeping = self._run_housekeeping(on_completion=False)
@@ -458,6 +664,7 @@ class CentralService:
             "settings": {
                 "enabled": settings.enabled,
                 "poll_interval_sec": settings.poll_interval_sec,
+                "heartbeat_poll_interval_sec": settings.heartbeat_poll_interval_sec,
                 "task_runner_concurrency": settings.task_runner_concurrency,
                 "scheduler_db_path": settings.scheduler_db_path,
                 "run_history_retention_days": settings.run_history_retention_days,
@@ -466,6 +673,8 @@ class CentralService:
                 "memory_manager_completion_debounce_sec": settings.memory_manager_completion_debounce_sec,
                 "queue_warning_threshold": settings.queue_warning_threshold,
                 "running_age_warning_sec": settings.running_age_warning_sec,
+                "db_queue_busy_timeout_ms": settings.db_queue_busy_timeout_ms,
+                "db_queue_default_max_rows": settings.db_queue_default_max_rows,
             },
             "enqueue": enqueue,
             "dispatch": dispatch,
@@ -486,6 +695,42 @@ class CentralService:
                     profile_id=clean_profile_id,
                     run_id=run_id,
                     detail=detail,
+                    origin="manual",
+                )
+        self._dispatch_available()
+        return out
+
+    def enqueue_agentic_task(
+        self,
+        *,
+        task_name: str,
+        instructions: str,
+        requested_by: str = "main_agent",
+        model_tier: str = "medium",
+        tool_access: list[str] | None = None,
+        skill_access: list[str] | None = None,
+        timeout_sec: int = 180,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        out = self._store.enqueue_agentic_run(
+            task_name=task_name,
+            instructions=instructions,
+            requested_by=requested_by,
+            model_tier=model_tier,
+            tool_access=tool_access,
+            skill_access=skill_access,
+            timeout_sec=timeout_sec,
+            metadata=metadata,
+        )
+        if out.get("ok"):
+            run_id = str(out.get("run_id") or "").strip()
+            if run_id:
+                self._log_task_agent_event(
+                    event_type="run_queued",
+                    profile_id="agentic_task",
+                    run_id=run_id,
+                    detail=f"trigger=agentic requested_by={requested_by} task_name={str(task_name or '').strip()[:80]}",
+                    origin="agentic",
                 )
         self._dispatch_available()
         return out
@@ -512,6 +757,13 @@ class CentralService:
                     profile_id=profile_id,
                     run_id=clean_run_id,
                     detail=f"killed_by={requested_by} state=queued",
+                    origin=str(
+                        row.get("payload", {}).get("origin")
+                        or row.get("payload", {}).get("trigger")
+                        or "manual"
+                    )
+                    if isinstance(row.get("payload"), dict)
+                    else "manual",
                 )
             self._run_housekeeping(on_completion=True)
             return out
@@ -519,6 +771,7 @@ class CentralService:
         if status == "running":
             with self._lock:
                 cancel_event = self._cancel_events.get(clean_run_id)
+                slot_id = self._run_to_slot.get(clean_run_id)
             if cancel_event is None:
                 return {"ok": False, "error": "run is not currently managed by active executor"}
             cancel_event.set()
@@ -527,6 +780,14 @@ class CentralService:
                 profile_id=profile_id,
                 run_id=clean_run_id,
                 detail=f"killed_by={requested_by} state=running cancel_requested=true",
+                slot_id=slot_id,
+                origin=str(
+                    row.get("payload", {}).get("origin")
+                    or row.get("payload", {}).get("trigger")
+                    or "manual"
+                )
+                if isinstance(row.get("payload"), dict)
+                else "manual",
             )
             return {
                 "ok": True,
@@ -678,6 +939,11 @@ class CentralService:
             running = self._loop_thread is not None and self._loop_thread.is_alive()
             active = len(self._active_threads)
             event_buffer_count = len(self._events)
+        db_queue_health = self._db_queue.health()
+        slots = self._task_slot_payload()
+        busy_slots = sum(1 for slot in slots if slot.get("state") == "busy")
+        free_slots = sum(1 for slot in slots if slot.get("state") == "free" and bool(slot.get("enabled", True)))
+        disabled_slots = sum(1 for slot in slots if not bool(slot.get("enabled", True)))
 
         warnings: list[str] = []
         if counts["queued_count"] >= settings.queue_warning_threshold > 0:
@@ -696,6 +962,7 @@ class CentralService:
                 "running": running,
                 "enabled_in_config": settings.enabled,
                 "poll_interval_sec": settings.poll_interval_sec,
+                "heartbeat_poll_interval_sec": settings.heartbeat_poll_interval_sec,
                 "task_runner_concurrency": settings.task_runner_concurrency,
                 "scheduler_db_path": str(self._store.db_path),
                 "run_history_retention_days": settings.run_history_retention_days,
@@ -704,11 +971,16 @@ class CentralService:
                 "memory_manager_completion_debounce_sec": settings.memory_manager_completion_debounce_sec,
                 "queue_warning_threshold": settings.queue_warning_threshold,
                 "running_age_warning_sec": settings.running_age_warning_sec,
+                "db_queue_busy_timeout_ms": settings.db_queue_busy_timeout_ms,
+                "db_queue_default_max_rows": settings.db_queue_default_max_rows,
             },
             "runtime": {
                 "queued_count": counts["queued_count"],
                 "running_count": counts["running_count"],
                 "active_task_threads": active,
+                "task_slot_busy_count": busy_slots,
+                "task_slot_free_count": free_slots,
+                "task_slot_disabled_count": disabled_slots,
                 "task_event_buffer_count": event_buffer_count,
                 **metrics,
                 "warnings": warnings,
@@ -716,6 +988,8 @@ class CentralService:
                 "queued_runs_preview": queued_preview,
             },
             "task_agents": self._check_in_payload(),
+            "task_slots": slots,
+            "db_queue": db_queue_health,
         }
 
     def list_schedules(self) -> dict[str, Any]:
@@ -735,6 +1009,31 @@ class CentralService:
             "runtime": status.get("runtime"),
             "recent_events": self._recent_events(limit=20),
         }
+
+    def execute_sql(
+        self,
+        *,
+        sql: str,
+        params: Any = None,
+        read_only: bool = True,
+        timeout_sec: float = 5.0,
+        max_rows: int | None = None,
+    ) -> dict[str, Any]:
+        settings = self._refresh_settings()
+        safe_max_rows = (
+            int(max_rows)
+            if isinstance(max_rows, int) and max_rows > 0
+            else int(settings.db_queue_default_max_rows)
+        )
+        out = self._db_queue.execute(
+            sql=sql,
+            params=params,
+            read_only=read_only,
+            timeout_sec=timeout_sec,
+            max_rows=safe_max_rows,
+        )
+        out["source"] = "central_db_queue"
+        return out
 
     def list_forward_events(self, *, consume: bool = True) -> dict[str, Any]:
         with self._lock:

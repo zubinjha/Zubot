@@ -250,6 +250,8 @@ class TaskSchedulerStore:
         conn = sqlite3.connect(self._db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA busy_timeout = 5000;")
         return conn
 
     def _maybe_migrate_from_legacy_sqlite3(self) -> None:
@@ -693,20 +695,34 @@ class TaskSchedulerStore:
         due.sort(key=lambda item: (int(item.get("execution_order", 100)), str(item.get("schedule_id") or "")))
         return {"ok": True, "enqueued": len(due), "runs": due}
 
-    def enqueue_manual_run(self, *, profile_id: str, description: str | None = None) -> dict[str, Any]:
+    def enqueue_manual_run(
+        self,
+        *,
+        profile_id: str,
+        description: str | None = None,
+        run_kind: str = "predefined",
+        payload_overrides: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         clean_profile = profile_id.strip()
         if not clean_profile:
             return {"ok": False, "error": "profile_id is required."}
 
         run_id = f"trun_{uuid4().hex}"
         queued_at = _iso(_utc_now())
+        kind = str(run_kind or "predefined").strip().lower()
+        if kind not in {"predefined", "agentic"}:
+            kind = "predefined"
         payload = {
             "schedule_id": None,
             "profile_id": clean_profile,
             "trigger": "manual",
+            "origin": "manual",
+            "run_kind": kind,
             "description": description,
             "enqueued_at": queued_at,
         }
+        if isinstance(payload_overrides, dict):
+            payload.update(payload_overrides)
         with self._connect() as conn:
             conn.execute(
                 """
@@ -715,7 +731,47 @@ class TaskSchedulerStore:
                 """,
                 (run_id, clean_profile, queued_at, json.dumps(payload)),
             )
-        return {"ok": True, "run_id": run_id}
+        return {"ok": True, "run_id": run_id, "run_kind": kind}
+
+    def enqueue_agentic_run(
+        self,
+        *,
+        task_name: str,
+        instructions: str,
+        requested_by: str = "main_agent",
+        model_tier: str = "medium",
+        tool_access: list[str] | None = None,
+        skill_access: list[str] | None = None,
+        timeout_sec: int = 180,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        clean_instructions = str(instructions or "").strip()
+        if not clean_instructions:
+            return {"ok": False, "error": "instructions are required."}
+
+        clean_name = str(task_name or "Agentic Task").strip() or "Agentic Task"
+        clean_requested_by = str(requested_by or "main_agent").strip() or "main_agent"
+        clean_model_tier = str(model_tier or "medium").strip().lower() or "medium"
+        clean_timeout = int(timeout_sec) if isinstance(timeout_sec, int) and timeout_sec > 0 else 180
+        payload = {
+            "run_kind": "agentic",
+            "origin": "agentic",
+            "task_name": clean_name,
+            "task_id": f"agentic_{uuid4().hex[:8]}",
+            "instructions": clean_instructions,
+            "requested_by": clean_requested_by,
+            "model_tier": clean_model_tier,
+            "tool_access": [str(item).strip() for item in (tool_access or []) if isinstance(item, str) and str(item).strip()],
+            "skill_access": [str(item).strip() for item in (skill_access or []) if isinstance(item, str) and str(item).strip()],
+            "timeout_sec": clean_timeout,
+            "metadata": metadata if isinstance(metadata, dict) else {},
+        }
+        return self.enqueue_manual_run(
+            profile_id="agentic_task",
+            description=clean_name,
+            run_kind="agentic",
+            payload_overrides=payload,
+        )
 
     def claim_next_run(self) -> dict[str, Any] | None:
         now_iso = _iso(_utc_now())

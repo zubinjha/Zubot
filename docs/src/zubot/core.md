@@ -9,12 +9,15 @@ This document reflects the active task-agent-centric runtime.
 
 Primary runtime modules:
 - `src/zubot/runtime/service.py`
+- `src/zubot/core/control_panel.py`
 - `src/zubot/core/central_service.py`
 - `app/chat_logic.py`
 
 Current execution model:
 - one user-facing main agent (chat path)
-- central queue manager for predefined task runs
+- control-panel orchestration boundary for central runtime
+- central queue manager for predefined + agentic task runs
+- heartbeat scheduler tick for due-run queueing
 - fixed task-agent concurrency via `central_service.task_runner_concurrency`
 - no worker-agent API/runtime path in active orchestration flow
 
@@ -107,22 +110,26 @@ Main-agent turn behavior (chat path):
 
 Primary modules:
 - `src/zubot/core/central_service.py`
+- `src/zubot/core/task_heartbeat.py`
 - `src/zubot/core/task_scheduler_store.py`
 - `src/zubot/core/task_agent_runner.py`
+- `src/zubot/core/central_db_queue.py`
 
 Responsibilities:
-- enqueue due schedule runs from SQLite
+- heartbeat enqueues due schedule runs from SQLite
 - claim queued runs under fixed concurrency cap
-- execute predefined script entrypoints
+- execute predefined script entrypoints and agentic background runs
 - persist run lifecycle transitions and history
 - support run kill/cancel via central service API/tool surface
+- provide serialized SQL queue access for concurrent DB callers
 
 Structured task progress payloads include:
 - `task_id`
 - `task_name`
 - `run_id`
+- `slot_id`
 - `status` (`queued`, `running`, `progress`, `completed`, `failed`, `killed`)
-- optional `message` / `percent`
+- optional `message` / `percent` / `origin`
 - `started_at`, `updated_at`, `finished_at`
 
 ## Memory Pipeline

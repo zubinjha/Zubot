@@ -46,8 +46,55 @@ class _FakeCentral:
     def trigger_profile(self, *, profile_id: str, description: str | None = None) -> dict[str, Any]:
         return {"ok": True, "profile_id": profile_id, "description": description}
 
+    def enqueue_task(self, *, task_id: str, description: str | None = None) -> dict[str, Any]:
+        return {"ok": True, "profile_id": task_id, "description": description}
+
+    def enqueue_agentic_task(
+        self,
+        *,
+        task_name: str,
+        instructions: str,
+        requested_by: str = "main_agent",
+        model_tier: str = "medium",
+        tool_access: list[str] | None = None,
+        skill_access: list[str] | None = None,
+        timeout_sec: int = 180,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "run_id": "trun_agentic_1",
+            "task_name": task_name,
+            "instructions": instructions,
+            "requested_by": requested_by,
+            "model_tier": model_tier,
+            "tool_access": tool_access or [],
+            "skill_access": skill_access or [],
+            "timeout_sec": timeout_sec,
+            "metadata": metadata or {},
+        }
+
     def kill_run(self, *, run_id: str, requested_by: str = "main_agent") -> dict[str, Any]:
         return {"ok": True, "run_id": run_id, "requested_by": requested_by}
+
+    def execute_sql(
+        self,
+        *,
+        sql: str,
+        params: Any = None,
+        read_only: bool = True,
+        timeout_sec: float = 5.0,
+        max_rows: int | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "sql": sql,
+            "params": params,
+            "read_only": read_only,
+            "timeout_sec": timeout_sec,
+            "max_rows": max_rows,
+            "rows": [{"ok": 1}],
+        }
 
 
 class _FakeMemoryWorker:
@@ -63,7 +110,7 @@ class _FakeMemoryWorker:
 
 def test_runtime_service_start_respects_central_enable_flag(monkeypatch):
     central = _FakeCentral(enabled=True, running=False)
-    monkeypatch.setattr("src.zubot.runtime.service.get_central_service", lambda: central)
+    monkeypatch.setattr("src.zubot.runtime.service.get_control_panel", lambda: central)
     monkeypatch.setattr("src.zubot.runtime.service.get_memory_summary_worker", lambda: _FakeMemoryWorker())
 
     svc = RuntimeService()
@@ -75,7 +122,7 @@ def test_runtime_service_start_respects_central_enable_flag(monkeypatch):
 
 def test_runtime_service_start_in_client_mode_does_not_start_central(monkeypatch):
     central = _FakeCentral(enabled=True, running=False)
-    monkeypatch.setattr("src.zubot.runtime.service.get_central_service", lambda: central)
+    monkeypatch.setattr("src.zubot.runtime.service.get_control_panel", lambda: central)
     monkeypatch.setattr("src.zubot.runtime.service.get_memory_summary_worker", lambda: _FakeMemoryWorker())
 
     svc = RuntimeService()
@@ -87,7 +134,7 @@ def test_runtime_service_start_in_client_mode_does_not_start_central(monkeypatch
 
 def test_runtime_service_stop_stops_running_central(monkeypatch):
     central = _FakeCentral(enabled=True, running=True)
-    monkeypatch.setattr("src.zubot.runtime.service.get_central_service", lambda: central)
+    monkeypatch.setattr("src.zubot.runtime.service.get_control_panel", lambda: central)
     monkeypatch.setattr("src.zubot.runtime.service.get_memory_summary_worker", lambda: _FakeMemoryWorker())
 
     svc = RuntimeService()
@@ -116,7 +163,7 @@ def test_runtime_service_delegates_chat_module(monkeypatch):
         def reset_session_context(session_id: str) -> dict[str, Any]:
             return {"ok": True, "reset": True, "session_id": session_id}
 
-    monkeypatch.setattr("src.zubot.runtime.service.get_central_service", lambda: _FakeCentral())
+    monkeypatch.setattr("src.zubot.runtime.service.get_control_panel", lambda: _FakeCentral())
     monkeypatch.setattr("src.zubot.runtime.service.get_memory_summary_worker", lambda: _FakeMemoryWorker())
     monkeypatch.setattr(RuntimeService, "_chat_logic_module", staticmethod(lambda: _FakeChat))
 
@@ -132,7 +179,7 @@ def test_runtime_service_delegates_chat_module(monkeypatch):
 
 def test_runtime_service_central_schedule_crud(monkeypatch):
     central = _FakeCentral()
-    monkeypatch.setattr("src.zubot.runtime.service.get_central_service", lambda: central)
+    monkeypatch.setattr("src.zubot.runtime.service.get_control_panel", lambda: central)
     monkeypatch.setattr("src.zubot.runtime.service.get_memory_summary_worker", lambda: _FakeMemoryWorker())
 
     svc = RuntimeService()
@@ -157,7 +204,7 @@ def test_runtime_service_central_schedule_crud(monkeypatch):
 
 def test_runtime_service_health_reports_task_runtime(monkeypatch):
     central = _FakeCentral()
-    monkeypatch.setattr("src.zubot.runtime.service.get_central_service", lambda: central)
+    monkeypatch.setattr("src.zubot.runtime.service.get_control_panel", lambda: central)
     monkeypatch.setattr("src.zubot.runtime.service.get_memory_summary_worker", lambda: _FakeMemoryWorker())
 
     svc = RuntimeService()
@@ -168,9 +215,32 @@ def test_runtime_service_health_reports_task_runtime(monkeypatch):
 
 def test_runtime_service_delegates_run_kill(monkeypatch):
     central = _FakeCentral()
-    monkeypatch.setattr("src.zubot.runtime.service.get_central_service", lambda: central)
+    monkeypatch.setattr("src.zubot.runtime.service.get_control_panel", lambda: central)
     monkeypatch.setattr("src.zubot.runtime.service.get_memory_summary_worker", lambda: _FakeMemoryWorker())
     svc = RuntimeService()
     out = svc.central_kill_run(run_id="run_1", requested_by="ui")
     assert out["ok"] is True
     assert out["run_id"] == "run_1"
+
+
+def test_runtime_service_delegates_agentic_enqueue_and_sql(monkeypatch):
+    central = _FakeCentral()
+    monkeypatch.setattr("src.zubot.runtime.service.get_control_panel", lambda: central)
+    monkeypatch.setattr("src.zubot.runtime.service.get_memory_summary_worker", lambda: _FakeMemoryWorker())
+    svc = RuntimeService()
+    enq = svc.central_enqueue_agentic_task(
+        task_name="Research",
+        instructions="Research X",
+        requested_by="ui",
+        model_tier="medium",
+        tool_access=[],
+        skill_access=[],
+        timeout_sec=90,
+        metadata={"source": "test"},
+    )
+    assert enq["ok"] is True
+    assert enq["run_id"] == "trun_agentic_1"
+
+    sql = svc.central_execute_sql(sql="SELECT 1 AS ok;", read_only=True, max_rows=5)
+    assert sql["ok"] is True
+    assert sql["rows"][0]["ok"] == 1

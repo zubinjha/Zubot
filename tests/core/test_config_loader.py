@@ -61,6 +61,7 @@ def test_helpers_resolve_default_model_and_location():
         "agent_loop": {"max_concurrent_workers": 3},
         "central_service": {
             "enabled": False,
+            "heartbeat_poll_interval_sec": 75,
             "poll_interval_sec": 90,
             "task_runner_concurrency": 2,
             "scheduler_db_path": "memory/central/zubot_core.db",
@@ -71,6 +72,8 @@ def test_helpers_resolve_default_model_and_location():
             "memory_manager_completion_debounce_sec": 120,
             "queue_warning_threshold": 10,
             "running_age_warning_sec": 600,
+            "db_queue_busy_timeout_ms": 7000,
+            "db_queue_default_max_rows": 250,
         },
         "pre_defined_tasks": {
             "tasks": {
@@ -106,12 +109,15 @@ def test_helpers_resolve_default_model_and_location():
     central = get_central_service_config(config)
     assert central["enabled"] is False
     assert central["poll_interval_sec"] == 90
+    assert central["heartbeat_poll_interval_sec"] == 75
     assert central["run_history_retention_days"] == 14
     assert central["run_history_max_rows"] == 1000
     assert central["memory_manager_sweep_interval_sec"] == 7200
     assert central["memory_manager_completion_debounce_sec"] == 120
     assert central["queue_warning_threshold"] == 10
     assert central["running_age_warning_sec"] == 600
+    assert central["db_queue_busy_timeout_ms"] == 7000
+    assert central["db_queue_default_max_rows"] == 250
     predefined = get_predefined_task_config(config)
     assert "profile_a" in predefined["tasks"]
     compat = get_task_agent_config(config)

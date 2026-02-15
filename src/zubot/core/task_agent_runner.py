@@ -23,8 +23,7 @@ class TaskAgentRunner:
     """Resolve and execute predefined task runs from config."""
 
     def __init__(self, *, runner: SubAgentRunner | None = None) -> None:
-        # Reserved for future hybrid execution modes.
-        self._runner = runner
+        self._runner = runner or SubAgentRunner()
 
     @staticmethod
     def _load_predefined_tasks() -> dict[str, dict[str, Any]]:
@@ -227,7 +226,16 @@ class TaskAgentRunner:
         }
 
     def describe_run(self, *, profile_id: str, payload: dict[str, Any] | None = None) -> str:
-        _ = payload
+        payload_dict = payload if isinstance(payload, dict) else {}
+        run_kind = str(payload_dict.get("run_kind") or "predefined").strip().lower()
+        if run_kind == "agentic":
+            task_name = str(payload_dict.get("task_name") or "Agentic Task").strip() or "Agentic Task"
+            instructions = str(payload_dict.get("instructions") or "").strip()
+            preview = instructions[:72] + ("..." if len(instructions) > 72 else "")
+            if preview:
+                return f"{task_name}: agentic execution ({preview})"
+            return f"{task_name}: agentic execution"
+
         predefined = self._load_predefined_tasks().get(profile_id)
         if not isinstance(predefined, dict):
             return f"Predefined task `{profile_id}` is not defined."
@@ -238,6 +246,122 @@ class TaskAgentRunner:
             return f"{task_name}: executing `{entrypoint}`."
         return f"{task_name}: predefined task execution."
 
+    def _run_agentic_task(
+        self,
+        *,
+        payload: dict[str, Any] | None = None,
+        cancel_event: Event | None = None,
+    ) -> dict[str, Any]:
+        payload_dict = payload if isinstance(payload, dict) else {}
+        task_name = str(payload_dict.get("task_name") or "Agentic Task").strip() or "Agentic Task"
+        instructions = str(payload_dict.get("instructions") or "").strip()
+        if not instructions:
+            return {
+                "ok": False,
+                "status": "failed",
+                "summary": None,
+                "error": "Agentic task is missing instructions.",
+                "current_description": f"{task_name}: missing instructions.",
+                "model_alias": "medium",
+                "used_tool_access": [],
+                "used_skill_access": [],
+                "retryable_error": False,
+                "attempts_used": None,
+                "attempts_configured": None,
+            }
+
+        if cancel_event is not None and cancel_event.is_set():
+            return {
+                "ok": False,
+                "status": "blocked",
+                "summary": None,
+                "error": "Agentic task cancelled before start.",
+                "current_description": f"{task_name}: cancelled before start.",
+                "model_alias": "medium",
+                "used_tool_access": [],
+                "used_skill_access": [],
+                "retryable_error": False,
+                "attempts_used": 0,
+                "attempts_configured": 1,
+            }
+
+        model_tier = str(payload_dict.get("model_tier") or "medium").strip().lower() or "medium"
+        tool_access = [str(item).strip() for item in payload_dict.get("tool_access", []) if isinstance(item, str)]
+        skill_access = [str(item).strip() for item in payload_dict.get("skill_access", []) if isinstance(item, str)]
+        timeout_raw = payload_dict.get("timeout_sec")
+        timeout_sec = int(timeout_raw) if isinstance(timeout_raw, int) and timeout_raw > 0 else 120
+        max_steps_raw = payload_dict.get("max_steps")
+        max_steps = int(max_steps_raw) if isinstance(max_steps_raw, int) and max_steps_raw > 0 else 4
+        max_tool_calls_raw = payload_dict.get("max_tool_calls")
+        max_tool_calls = int(max_tool_calls_raw) if isinstance(max_tool_calls_raw, int) and max_tool_calls_raw > 0 else 3
+        requested_by = str(payload_dict.get("requested_by") or "main_agent").strip() or "main_agent"
+
+        out = self._runner.run_task(
+            {
+                "task_id": str(payload_dict.get("task_id") or "agentic_task"),
+                "requested_by": requested_by,
+                "instructions": instructions,
+                "model_tier": model_tier,
+                "tool_access": tool_access,
+                "skill_access": skill_access,
+                "metadata": payload_dict.get("metadata") if isinstance(payload_dict.get("metadata"), dict) else {},
+            },
+            model=model_tier,
+            max_steps=max_steps,
+            max_tool_calls=max_tool_calls,
+            timeout_sec=float(timeout_sec),
+            allow_orchestration_tools=False,
+        )
+        result = out.get("result") if isinstance(out.get("result"), dict) else {}
+        summary = str(result.get("summary") or "").strip() or None
+        error = str(result.get("error") or "").strip() or None
+        sub_status = str(result.get("status") or "").strip().lower()
+
+        if cancel_event is not None and cancel_event.is_set():
+            return {
+                "ok": False,
+                "status": "blocked",
+                "summary": summary,
+                "error": "Agentic task was killed by user request.",
+                "current_description": f"{task_name}: killed by user.",
+                "model_alias": model_tier,
+                "used_tool_access": tool_access,
+                "used_skill_access": skill_access,
+                "retryable_error": False,
+                "attempts_used": 1,
+                "attempts_configured": 1,
+            }
+
+        if out.get("ok") and sub_status in {"success", "needs_user_input"}:
+            terminal_status = "done" if sub_status == "success" else "blocked"
+            return {
+                "ok": terminal_status == "done",
+                "status": terminal_status,
+                "summary": summary or f"{task_name} completed.",
+                "error": error,
+                "current_description": f"{task_name}: {terminal_status}.",
+                "model_alias": model_tier,
+                "used_tool_access": tool_access,
+                "used_skill_access": skill_access,
+                "retryable_error": False,
+                "attempts_used": 1,
+                "attempts_configured": 1,
+            }
+
+        return {
+            "ok": False,
+            "status": "failed",
+            "summary": summary,
+            "error": error or "Agentic task execution failed.",
+            "current_description": f"{task_name}: failed.",
+            "model_alias": model_tier,
+            "used_tool_access": tool_access,
+            "used_skill_access": skill_access,
+            "retryable_error": False,
+            "attempts_used": 1,
+            "attempts_configured": 1,
+        }
+
     def run_profile(
         self,
         *,
@@ -245,6 +369,11 @@ class TaskAgentRunner:
         payload: dict[str, Any] | None = None,
         cancel_event: Event | None = None,
     ) -> dict[str, Any]:
+        payload_dict = payload if isinstance(payload, dict) else {}
+        run_kind = str(payload_dict.get("run_kind") or "predefined").strip().lower()
+        if run_kind == "agentic":
+            return self._run_agentic_task(payload=payload_dict, cancel_event=cancel_event)
+
         predefined = self._load_predefined_tasks().get(profile_id)
         if not isinstance(predefined, dict):
             return {

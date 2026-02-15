@@ -2,19 +2,32 @@
 
 This document captures the conceptual architecture of Zubot at the system level.
 
-## Agent Hierarchy
+## Runtime Components
 
-### 1) User-Facing Agent (Main Agent)
-- Primary chat-facing agent.
-- Handles direct user interaction.
-- Can inspect task-agent queue status and orchestrate follow-up actions.
-- Operates through the runtime/app chat path.
+### 1) Control Panel
+- Central orchestration boundary for runtime operations.
+- Owns queue/runtime controls via central service and provides SQL queue access to central DB.
+- Exposes deterministic operations used by API/tools:
+  - start/stop/status
+  - enqueue task runs (predefined + agentic)
+  - list/kill runs
+  - schedule CRUD
+  - serialized SQL execution (`central DB queue`)
 
-### 2) Task Agents
-- Profile-driven agents executed by the central scheduler runtime.
-- Runs are queue-based (`queued` -> `running` -> terminal status).
-- Intended for recurring or structured jobs (for example job search workflows).
-- Task-agent slots are fixed-concurrency and consume queued tasks when idle.
+### 2) User-Facing Agent
+- Primary chat-facing main agent.
+- Handles direct user interaction, context assembly, memory-aware response generation.
+- Uses tool contracts to query/control the Control Panel (non-blocking queue operations).
+
+### 3) Heartbeat
+- Dedicated scheduler tick component that only decides what should be queued.
+- Runs on a polling interval and enqueues due scheduled tasks.
+- Does not execute tasks directly.
+
+### 4) Task Agent Slots
+- Fixed-capacity execution slots (`central_service.task_runner_concurrency`).
+- Consume queued runs when free and transition through lifecycle states.
+- Slot metadata is surfaced for observability (`slot_id`, state, run/task bindings, timestamps, last result).
 
 ## Runtime Topology
 
@@ -32,11 +45,19 @@ This document captures the conceptual architecture of Zubot at the system level.
 - Backed by SQLite (`memory/central/zubot_core.db`).
 - Primary tables: `defined_tasks`, `defined_tasks_run_times`, `defined_task_runs`, `defined_task_run_history`.
 - Supports frequency and wall-clock schedule modes.
+- Run payloads support:
+  - predefined script runs
+  - agentic background runs
 
 ### Memory Summary Queue
 - Backed by SQLite (`memory_summary_jobs`).
 - Dedupes active summary jobs per day.
 - Drained by background summary worker.
+
+### Central DB SQL Queue
+- Serialized SQL execution path for central DB calls.
+- Designed to avoid write contention under concurrent callers.
+- Uses correlation IDs and bounded response rows.
 
 ## Tool System
 
@@ -47,6 +68,13 @@ This document captures the conceptual architecture of Zubot at the system level.
 ### Invocation Pattern
 - User-facing agent uses model tool-calls routed through registry dispatch.
 - Task runs are queued/claimed through central service and exposed via task-oriented orchestration tools.
+- Orchestration tools include:
+  - `enqueue_task`
+  - `enqueue_agentic_task`
+  - `kill_task_run`
+  - `list_task_runs`
+  - `get_task_agent_checkin`
+  - `query_central_db`
 
 ## Memory and Database Layers
 

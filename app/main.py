@@ -32,8 +32,27 @@ class TriggerTaskProfileRequest(BaseModel):
     description: str | None = None
 
 
+class EnqueueAgenticTaskRequest(BaseModel):
+    task_name: str = "Background Research Task"
+    instructions: str
+    requested_by: str = "main_agent"
+    model_tier: Literal["low", "medium", "high"] = "medium"
+    tool_access: list[str] = Field(default_factory=list)
+    skill_access: list[str] = Field(default_factory=list)
+    timeout_sec: int = 180
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
 class KillTaskRunRequest(BaseModel):
     requested_by: str = "main_agent"
+
+
+class CentralSqlRequest(BaseModel):
+    sql: str
+    params: list[object] | dict[str, object] | None = None
+    read_only: bool = True
+    timeout_sec: float = 5.0
+    max_rows: int | None = None
 
 
 class ScheduleUpsertRequest(BaseModel):
@@ -140,10 +159,35 @@ def central_trigger_profile(task_id: str, req: TriggerTaskProfileRequest | None 
     return get_runtime_service().central_trigger_profile(profile_id=task_id, description=description)
 
 
+@app.post("/api/central/agentic/enqueue")
+def central_enqueue_agentic_task(req: EnqueueAgenticTaskRequest) -> dict:
+    return get_runtime_service().central_enqueue_agentic_task(
+        task_name=req.task_name,
+        instructions=req.instructions,
+        requested_by=req.requested_by,
+        model_tier=req.model_tier,
+        tool_access=req.tool_access,
+        skill_access=req.skill_access,
+        timeout_sec=req.timeout_sec,
+        metadata=req.metadata,
+    )
+
+
 @app.post("/api/central/runs/{run_id}/kill")
 def central_kill_run(run_id: str, req: KillTaskRunRequest | None = None) -> dict:
     requested_by = req.requested_by if isinstance(req, KillTaskRunRequest) else "main_agent"
     return get_runtime_service().central_kill_run(run_id=run_id, requested_by=requested_by)
+
+
+@app.post("/api/central/sql")
+def central_execute_sql(req: CentralSqlRequest) -> dict:
+    return get_runtime_service().central_execute_sql(
+        sql=req.sql,
+        params=req.params,
+        read_only=req.read_only,
+        timeout_sec=req.timeout_sec,
+        max_rows=req.max_rows,
+    )
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -929,7 +973,9 @@ def index() -> HTMLResponse:
             centralEl.textContent =
               'service_running=' + (!!body.service.running) + ' enabled_in_config=' + (!!body.service.enabled_in_config) + '\\n' +
               'queued=' + (body.runtime.queued_count != null ? body.runtime.queued_count : 0) +
-              ' running=' + (body.runtime.running_count != null ? body.runtime.running_count : 0);
+              ' running=' + (body.runtime.running_count != null ? body.runtime.running_count : 0) +
+              ' slots_busy=' + (body.runtime.task_slot_busy_count != null ? body.runtime.task_slot_busy_count : 0) +
+              ' slots_free=' + (body.runtime.task_slot_free_count != null ? body.runtime.task_slot_free_count : 0);
           };
           xhrC.send();
         }
@@ -1690,6 +1736,7 @@ def index() -> HTMLResponse:
       const lines = [
         `service_running=${!!service.running} enabled_in_config=${!!service.enabled_in_config}`,
         `queued=${runtime.queued_count != null ? runtime.queued_count : 0} running=${runtime.running_count != null ? runtime.running_count : 0} active_threads=${runtime.active_task_threads != null ? runtime.active_task_threads : 0}`,
+        `slots_busy=${runtime.task_slot_busy_count != null ? runtime.task_slot_busy_count : 0} slots_free=${runtime.task_slot_free_count != null ? runtime.task_slot_free_count : 0} slots_disabled=${runtime.task_slot_disabled_count != null ? runtime.task_slot_disabled_count : 0}`,
       ];
       if (Array.isArray(runtime.warnings) && runtime.warnings.length) {
         lines.push(`warnings=${runtime.warnings.join(',')}`);

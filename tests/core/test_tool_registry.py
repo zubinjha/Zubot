@@ -5,6 +5,7 @@ def test_list_tools_contains_expected_names():
     names = {entry["name"] for entry in list_tools()}
     expected = {
         "append_file",
+        "enqueue_agentic_task",
         "enqueue_task",
         "fetch_url",
         "kill_task_run",
@@ -21,6 +22,7 @@ def test_list_tools_contains_expected_names():
         "list_dir",
         "list_task_runs",
         "path_exists",
+        "query_central_db",
         "read_file",
         "read_json",
         "search_text",
@@ -166,14 +168,34 @@ def test_enqueue_task_and_kill_task_run_tools(monkeypatch):
         def trigger_profile(self, *, profile_id: str, description: str | None = None):
             return {"ok": True, "profile_id": profile_id, "description": description}
 
+        def enqueue_agentic_task(self, **kwargs):
+            return {"ok": True, "run_id": "trun_agentic_1", **kwargs}
+
         def kill_run(self, *, run_id: str, requested_by: str = "main_agent"):
             return {"ok": True, "run_id": run_id, "requested_by": requested_by}
+
+        def execute_sql(self, **kwargs):
+            return {"ok": True, "rows": [{"ok": 1}], **kwargs}
 
     monkeypatch.setattr("src.zubot.core.tool_registry.get_central_service", lambda: _FakeCentral())
     enq = invoke_tool("enqueue_task", task_id="task_a", description="manual")
     assert enq["ok"] is True
     assert enq["profile_id"] == "task_a"
 
+    agentic = invoke_tool(
+        "enqueue_agentic_task",
+        task_name="Research",
+        instructions="Research topic X",
+        requested_by="ui",
+        model_tier="medium",
+    )
+    assert agentic["ok"] is True
+    assert agentic["run_id"] == "trun_agentic_1"
+
     kill = invoke_tool("kill_task_run", run_id="run_1", requested_by="ui")
     assert kill["ok"] is True
     assert kill["run_id"] == "run_1"
+
+    sql = invoke_tool("query_central_db", sql="SELECT 1 AS ok;", read_only=True, max_rows=5)
+    assert sql["ok"] is True
+    assert sql["rows"][0]["ok"] == 1

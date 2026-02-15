@@ -30,6 +30,7 @@ from .config_loader import (
     resolve_config_path,
 )
 from .central_service import get_central_service
+from .control_panel import get_control_panel
 from .llm_client import call_llm
 from .memory_index import (
     claim_next_day_summary_job,
@@ -91,6 +92,7 @@ __all__ = [
     "cleanup_session_logs_older_than",
     "claim_next_day_summary_job",
     "get_central_service",
+    "get_control_panel",
     "get_central_service_config",
     "complete_day_summary_job",
     "estimate_messages_tokens",
