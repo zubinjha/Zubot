@@ -7,7 +7,7 @@ dist/
 .env
 config/*
 !config/example_config.json
-tasks/
+/tasks/
 memory/*
 context/*
 !context/README.md

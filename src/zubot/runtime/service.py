@@ -149,6 +149,16 @@ class RuntimeService:
     def central_kill_run(self, *, run_id: str, requested_by: str = "main_agent") -> dict[str, Any]:
         return get_control_panel().kill_run(run_id=run_id, requested_by=requested_by)
 
+    def central_waiting_runs(self, *, limit: int = 50) -> dict[str, Any]:
+        return get_control_panel().list_waiting_runs(limit=limit)
+
+    def central_resume_run(self, *, run_id: str, user_response: str, requested_by: str = "main_agent") -> dict[str, Any]:
+        return get_control_panel().resume_run(
+            run_id=run_id,
+            user_response=user_response,
+            requested_by=requested_by,
+        )
+
     def central_execute_sql(
         self,
         *,
@@ -165,6 +175,42 @@ class RuntimeService:
             timeout_sec=timeout_sec,
             max_rows=max_rows,
         )
+
+    def central_upsert_task_state(
+        self,
+        *,
+        task_id: str,
+        state_key: str,
+        value: dict[str, Any],
+        updated_by: str = "task_runtime",
+    ) -> dict[str, Any]:
+        return get_control_panel().upsert_task_state(
+            task_id=task_id,
+            state_key=state_key,
+            value=value,
+            updated_by=updated_by,
+        )
+
+    def central_get_task_state(self, *, task_id: str, state_key: str) -> dict[str, Any]:
+        return get_control_panel().get_task_state(task_id=task_id, state_key=state_key)
+
+    def central_mark_task_item_seen(
+        self,
+        *,
+        task_id: str,
+        provider: str,
+        item_key: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return get_control_panel().mark_task_item_seen(
+            task_id=task_id,
+            provider=provider,
+            item_key=item_key,
+            metadata=metadata,
+        )
+
+    def central_has_task_item_seen(self, *, task_id: str, provider: str, item_key: str) -> dict[str, Any]:
+        return get_control_panel().has_task_item_seen(task_id=task_id, provider=provider, item_key=item_key)
 
     def central_list_defined_tasks(self) -> dict[str, Any]:
         return get_control_panel().list_defined_tasks()

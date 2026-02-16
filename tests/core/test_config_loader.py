@@ -16,6 +16,7 @@ from src.zubot.core.config_loader import (
     get_task_agent_config,
     get_worker_runtime_config,
     get_provider_config,
+    get_task_profiles_config,
     get_timezone,
     load_config,
     resolve_config_path,
@@ -74,6 +75,7 @@ def test_helpers_resolve_default_model_and_location():
             "running_age_warning_sec": 600,
             "db_queue_busy_timeout_ms": 7000,
             "db_queue_default_max_rows": 250,
+            "waiting_for_user_timeout_sec": 1234,
         },
         "pre_defined_tasks": {
             "tasks": {
@@ -118,7 +120,22 @@ def test_helpers_resolve_default_model_and_location():
     assert central["running_age_warning_sec"] == 600
     assert central["db_queue_busy_timeout_ms"] == 7000
     assert central["db_queue_default_max_rows"] == 250
+    assert central["waiting_for_user_timeout_sec"] == 1234
     predefined = get_predefined_task_config(config)
     assert "profile_a" in predefined["tasks"]
+    profiles = get_task_profiles_config(config)
+    assert "profile_a" in profiles["tasks"]
     compat = get_task_agent_config(config)
     assert "profile_a" in compat["tasks"]
+
+
+def test_task_profiles_config_falls_back_to_legacy_key():
+    cfg = {
+        "pre_defined_tasks": {
+            "tasks": {
+                "legacy_task": {"name": "Legacy", "entrypoint_path": "x.py"},
+            }
+        }
+    }
+    out = get_task_profiles_config(cfg)
+    assert "legacy_task" in out["tasks"]

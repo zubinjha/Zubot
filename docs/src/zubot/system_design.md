@@ -10,8 +10,10 @@ This document captures the conceptual architecture of Zubot at the system level.
 - Exposes deterministic operations used by API/tools:
   - start/stop/status
   - enqueue task runs (predefined + agentic)
-  - list/kill runs
+  - list/kill/resume runs
+  - list waiting runs
   - schedule CRUD
+  - task state + seen-item atomic helpers
   - serialized SQL execution (`central DB queue`)
 
 ### 2) User-Facing Agent
@@ -27,6 +29,7 @@ This document captures the conceptual architecture of Zubot at the system level.
 ### 4) Task Agent Slots
 - Fixed-capacity execution slots (`central_service.task_runner_concurrency`).
 - Consume queued runs when free and transition through lifecycle states.
+- Interactive runs can pause in `waiting_for_user` and free their slot until resumed.
 - Slot metadata is surfaced for observability (`slot_id`, state, run/task bindings, timestamps, last result).
 
 ## Runtime Topology
@@ -44,10 +47,12 @@ This document captures the conceptual architecture of Zubot at the system level.
 ### Task-Agent Queue
 - Backed by SQLite (`memory/central/zubot_core.db`).
 - Primary tables: `defined_tasks`, `defined_tasks_run_times`, `defined_task_runs`, `defined_task_run_history`.
+- Task runtime helper tables: `task_state_kv`, `task_seen_items`, `job_applications`.
 - Supports frequency and wall-clock schedule modes.
 - Run payloads support:
   - predefined script runs
   - agentic background runs
+  - interactive wrapper runs that can pause/resume for user input
 
 ### Memory Summary Queue
 - Backed by SQLite (`memory_summary_jobs`).
@@ -58,6 +63,15 @@ This document captures the conceptual architecture of Zubot at the system level.
 - Serialized SQL execution path for central DB calls.
 - Designed to avoid write contention under concurrent callers.
 - Uses correlation IDs and bounded response rows.
+- Task atomic write helpers route through this queue (`upsert_task_state`, `mark_task_item_seen`).
+
+### Provider Serialization Queue
+- Runtime-local provider queue manager serializes calls per provider group.
+- HasData calls run through queue group `hasdata` with configurable:
+  - min interval
+  - jitter
+  - retry/backoff for transient failures
+- Queue metrics include depth/wait/failure counters for observability.
 
 ## Tool System
 
@@ -73,8 +87,14 @@ This document captures the conceptual architecture of Zubot at the system level.
   - `enqueue_agentic_task`
   - `kill_task_run`
   - `list_task_runs`
+  - `list_waiting_runs`
+  - `resume_task_run`
   - `get_task_agent_checkin`
   - `query_central_db`
+  - `upsert_task_state`
+  - `get_task_state`
+  - `mark_task_item_seen`
+  - `has_task_item_seen`
 
 ## Memory and Database Layers
 
@@ -90,6 +110,7 @@ This document captures the conceptual architecture of Zubot at the system level.
 ### Memory Signal Policy
 - Prioritize user <-> main-agent interaction.
 - Include task-agent queue/finalization milestones (`run_queued`, `run_finished`, `run_failed`, `run_blocked`).
+- Include interactive milestones (`run_waiting`, `run_resumed`).
 - Exclude routine low-value system chatter.
 
 ## Why SQLite For Summaries Is Acceptable

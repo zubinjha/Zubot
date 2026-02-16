@@ -11,7 +11,7 @@ from time import monotonic, sleep
 from pathlib import Path
 from typing import Any
 
-from .config_loader import load_config
+from .config_loader import get_task_profiles_config, load_config
 from .sub_agent_runner import SubAgentRunner
 
 
@@ -26,13 +26,13 @@ class TaskAgentRunner:
         self._runner = runner or SubAgentRunner()
 
     @staticmethod
-    def _load_predefined_tasks() -> dict[str, dict[str, Any]]:
+    def _load_task_profiles() -> dict[str, dict[str, Any]]:
         try:
             cfg = load_config()
         except Exception:
             return {}
-        root = cfg.get("pre_defined_tasks") if isinstance(cfg, dict) else None
-        tasks = root.get("tasks") if isinstance(root, dict) else None
+        task_cfg = get_task_profiles_config(cfg if isinstance(cfg, dict) else None)
+        tasks = task_cfg.get("tasks")
         if not isinstance(tasks, dict):
             return {}
         out: dict[str, dict[str, Any]] = {}
@@ -53,6 +53,32 @@ class TaskAgentRunner:
         if not resolved.exists() or not resolved.is_file():
             raise ValueError(f"Predefined task entrypoint file not found: {entrypoint_path}")
         return resolved
+
+    @staticmethod
+    def _resolve_task_resources_dir(*, task_id: str, task_def: dict[str, Any]) -> Path:
+        candidate_raw = task_def.get("resources_path")
+        if isinstance(candidate_raw, str) and candidate_raw.strip():
+            candidate = Path(candidate_raw.strip())
+        else:
+            candidate = Path("src") / "zubot" / "tasks" / task_id
+
+        if candidate.is_absolute():
+            raise ValueError("Task resources_path must be repository-relative.")
+        normalized_parts = [part for part in candidate.parts if part not in ("", ".")]
+        if any(part == ".." for part in normalized_parts):
+            raise ValueError("Path traversal is not allowed in task resources_path.")
+        return (_repo_root() / candidate).resolve()
+
+    @staticmethod
+    def _load_task_local_config(resources_dir: Path) -> dict[str, Any]:
+        config_path = resources_dir / "config.json"
+        if not config_path.exists() or not config_path.is_file():
+            return {}
+        try:
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
 
     @staticmethod
     def _run_predefined_task(
@@ -100,10 +126,30 @@ class TaskAgentRunner:
         arg_list = [str(item) for item in args if isinstance(item, (str, int, float))] if isinstance(args, list) else []
         timeout_raw = task_def.get("timeout_sec")
         timeout_sec = int(timeout_raw) if isinstance(timeout_raw, int) and timeout_raw > 0 else 1800
+        try:
+            resources_dir = TaskAgentRunner._resolve_task_resources_dir(task_id=task_id, task_def=task_def)
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "status": "failed",
+                "summary": None,
+                "error": str(exc),
+                "current_description": f"{name}: invalid resources_path.",
+                "model_alias": "predefined",
+                "used_tool_access": [],
+                "used_skill_access": [],
+                "retryable_error": False,
+                "attempts_used": None,
+                "attempts_configured": None,
+            }
+        task_local_config = TaskAgentRunner._load_task_local_config(resources_dir)
 
         env = os.environ.copy()
         env["ZUBOT_TASK_ID"] = task_id
         env["ZUBOT_TASK_PAYLOAD_JSON"] = json.dumps(payload if isinstance(payload, dict) else {})
+        env["ZUBOT_TASK_RESOURCES_DIR"] = str(resources_dir)
+        env["ZUBOT_TASK_LOCAL_CONFIG_JSON"] = json.dumps(task_local_config)
+        env["ZUBOT_TASK_PROFILE_JSON"] = json.dumps(task_def)
 
         try:
             process = subprocess.Popen(
@@ -236,15 +282,20 @@ class TaskAgentRunner:
                 return f"{task_name}: agentic execution ({preview})"
             return f"{task_name}: agentic execution"
 
-        predefined = self._load_predefined_tasks().get(profile_id)
-        if not isinstance(predefined, dict):
-            return f"Predefined task `{profile_id}` is not defined."
+        profile = self._load_task_profiles().get(profile_id)
+        if not isinstance(profile, dict):
+            return f"Task profile `{profile_id}` is not defined."
 
-        task_name = str(predefined.get("name") or profile_id)
-        entrypoint = str(predefined.get("entrypoint_path") or "").strip()
+        task_name = str(profile.get("name") or profile_id)
+        kind = str(profile.get("kind") or "script").strip().lower()
+        entrypoint = str(profile.get("entrypoint_path") or "").strip()
+        if kind == "interactive_wrapper":
+            return f"{task_name}: interactive wrapper execution."
+        if kind == "agentic":
+            return f"{task_name}: agentic profile execution."
         if entrypoint:
             return f"{task_name}: executing `{entrypoint}`."
-        return f"{task_name}: predefined task execution."
+        return f"{task_name}: script profile execution."
 
     def _run_agentic_task(
         self,
@@ -316,6 +367,8 @@ class TaskAgentRunner:
         summary = str(result.get("summary") or "").strip() or None
         error = str(result.get("error") or "").strip() or None
         sub_status = str(result.get("status") or "").strip().lower()
+        wait_context = result.get("wait_context") if isinstance(result.get("wait_context"), dict) else {}
+        wait_timeout_sec = result.get("wait_timeout_sec") if isinstance(result.get("wait_timeout_sec"), int) else None
 
         if cancel_event is not None and cancel_event.is_set():
             return {
@@ -333,12 +386,17 @@ class TaskAgentRunner:
             }
 
         if out.get("ok") and sub_status in {"success", "needs_user_input"}:
-            terminal_status = "done" if sub_status == "success" else "blocked"
+            terminal_status = "done" if sub_status == "success" else "waiting_for_user"
+            question = summary if terminal_status == "waiting_for_user" else None
             return {
-                "ok": terminal_status == "done",
+                "ok": terminal_status in {"done", "waiting_for_user"},
                 "status": terminal_status,
                 "summary": summary or f"{task_name} completed.",
                 "error": error,
+                "needs_user_input": terminal_status == "waiting_for_user",
+                "question": question,
+                "wait_context": wait_context,
+                "wait_timeout_sec": wait_timeout_sec,
                 "current_description": f"{task_name}: {terminal_status}.",
                 "model_alias": model_tier,
                 "used_tool_access": tool_access,
@@ -371,17 +429,17 @@ class TaskAgentRunner:
     ) -> dict[str, Any]:
         payload_dict = payload if isinstance(payload, dict) else {}
         run_kind = str(payload_dict.get("run_kind") or "predefined").strip().lower()
-        if run_kind == "agentic":
+        if run_kind in {"agentic", "interactive_wrapper"}:
             return self._run_agentic_task(payload=payload_dict, cancel_event=cancel_event)
 
-        predefined = self._load_predefined_tasks().get(profile_id)
-        if not isinstance(predefined, dict):
+        profile = self._load_task_profiles().get(profile_id)
+        if not isinstance(profile, dict):
             return {
                 "ok": False,
                 "status": "failed",
                 "summary": None,
-                "error": f"Predefined task `{profile_id}` not found.",
-                "current_description": f"Failed to resolve predefined task `{profile_id}`.",
+                "error": f"Task profile `{profile_id}` not found.",
+                "current_description": f"Failed to resolve task profile `{profile_id}`.",
                 "model_alias": "predefined",
                 "used_tool_access": [],
                 "used_skill_access": [],
@@ -390,9 +448,18 @@ class TaskAgentRunner:
                 "attempts_configured": None,
             }
 
+        profile_kind = str(profile.get("kind") or "script").strip().lower()
+        if profile_kind in {"agentic", "interactive_wrapper"}:
+            payload_agentic = {
+                **payload_dict,
+                "run_kind": "interactive_wrapper" if profile_kind == "interactive_wrapper" else "agentic",
+                "task_name": str(profile.get("name") or profile_id),
+            }
+            return self._run_agentic_task(payload=payload_agentic, cancel_event=cancel_event)
+
         return self._run_predefined_task(
             task_id=profile_id,
-            task_def=predefined,
+            task_def=profile,
             payload=payload,
             cancel_event=cancel_event,
         )

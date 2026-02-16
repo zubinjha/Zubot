@@ -186,11 +186,33 @@ def _kill_task_run(**kwargs: Any) -> dict[str, Any]:
     return get_central_service().kill_run(run_id=run_id, requested_by=requested_by)
 
 
+def _resume_task_run(**kwargs: Any) -> dict[str, Any]:
+    run_id = str(kwargs.get("run_id") or "").strip()
+    if not run_id:
+        return {"ok": False, "error": "run_id is required.", "source": "tool_registry"}
+    user_response = str(kwargs.get("user_response") or "").strip()
+    if not user_response:
+        return {"ok": False, "error": "user_response is required.", "source": "tool_registry"}
+    requested_by = str(kwargs.get("requested_by") or "main_agent").strip() or "main_agent"
+    return get_central_service().resume_run(
+        run_id=run_id,
+        user_response=user_response,
+        requested_by=requested_by,
+    )
+
+
 def _list_task_runs(**kwargs: Any) -> dict[str, Any]:
     limit_raw = kwargs.get("limit", 50)
     limit = int(limit_raw) if isinstance(limit_raw, int) else 50
     safe_limit = max(1, min(200, limit))
     return get_central_service().list_runs(limit=safe_limit)
+
+
+def _list_waiting_runs(**kwargs: Any) -> dict[str, Any]:
+    limit_raw = kwargs.get("limit", 50)
+    limit = int(limit_raw) if isinstance(limit_raw, int) else 50
+    safe_limit = max(1, min(200, limit))
+    return get_central_service().list_waiting_runs(limit=safe_limit)
 
 
 def _query_central_db(**kwargs: Any) -> dict[str, Any]:
@@ -211,6 +233,45 @@ def _query_central_db(**kwargs: Any) -> dict[str, Any]:
         timeout_sec=timeout_sec,
         max_rows=max_rows,
     )
+
+
+def _upsert_task_state(**kwargs: Any) -> dict[str, Any]:
+    task_id = str(kwargs.get("task_id") or "").strip()
+    state_key = str(kwargs.get("state_key") or "").strip()
+    value = kwargs.get("value") if isinstance(kwargs.get("value"), dict) else {}
+    updated_by = str(kwargs.get("updated_by") or "task_runtime").strip() or "task_runtime"
+    return get_central_service().upsert_task_state(
+        task_id=task_id,
+        state_key=state_key,
+        value=value,
+        updated_by=updated_by,
+    )
+
+
+def _get_task_state(**kwargs: Any) -> dict[str, Any]:
+    task_id = str(kwargs.get("task_id") or "").strip()
+    state_key = str(kwargs.get("state_key") or "").strip()
+    return get_central_service().get_task_state(task_id=task_id, state_key=state_key)
+
+
+def _mark_task_item_seen(**kwargs: Any) -> dict[str, Any]:
+    task_id = str(kwargs.get("task_id") or "").strip()
+    provider = str(kwargs.get("provider") or "").strip()
+    item_key = str(kwargs.get("item_key") or "").strip()
+    metadata = kwargs.get("metadata") if isinstance(kwargs.get("metadata"), dict) else {}
+    return get_central_service().mark_task_item_seen(
+        task_id=task_id,
+        provider=provider,
+        item_key=item_key,
+        metadata=metadata,
+    )
+
+
+def _has_task_item_seen(**kwargs: Any) -> dict[str, Any]:
+    task_id = str(kwargs.get("task_id") or "").strip()
+    provider = str(kwargs.get("provider") or "").strip()
+    item_key = str(kwargs.get("item_key") or "").strip()
+    return get_central_service().has_task_item_seen(task_id=task_id, provider=provider, item_key=item_key)
 
 
 def _create_default_registry() -> ToolRegistry:
@@ -260,10 +321,32 @@ def _create_default_registry() -> ToolRegistry:
     )
     registry.register(
         ToolSpec(
+            name="resume_task_run",
+            handler=_resume_task_run,
+            category="orchestration",
+            description="Resume a waiting task run with user-provided response text.",
+            parameters={
+                "run_id": {"type": "string", "required": True},
+                "user_response": {"type": "string", "required": True},
+                "requested_by": {"type": "string", "required": False},
+            },
+        )
+    )
+    registry.register(
+        ToolSpec(
             name="list_task_runs",
             handler=_list_task_runs,
             category="orchestration",
             description="List recent task runs from the central queue store.",
+            parameters={"limit": {"type": "integer", "required": False}},
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="list_waiting_runs",
+            handler=_list_waiting_runs,
+            category="orchestration",
+            description="List task runs currently waiting for user input.",
             parameters={"limit": {"type": "integer", "required": False}},
         )
     )
@@ -279,6 +362,59 @@ def _create_default_registry() -> ToolRegistry:
                 "read_only": {"type": "boolean", "required": False},
                 "timeout_sec": {"type": "number", "required": False},
                 "max_rows": {"type": "integer", "required": False},
+            },
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="upsert_task_state",
+            handler=_upsert_task_state,
+            category="orchestration",
+            description="Atomically upsert a task state key/value snapshot.",
+            parameters={
+                "task_id": {"type": "string", "required": True},
+                "state_key": {"type": "string", "required": True},
+                "value": {"type": "object", "required": False},
+                "updated_by": {"type": "string", "required": False},
+            },
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="get_task_state",
+            handler=_get_task_state,
+            category="orchestration",
+            description="Get a task state value by task_id/state_key.",
+            parameters={
+                "task_id": {"type": "string", "required": True},
+                "state_key": {"type": "string", "required": True},
+            },
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="mark_task_item_seen",
+            handler=_mark_task_item_seen,
+            category="orchestration",
+            description="Atomically mark an external item as seen for a task/provider/item key.",
+            parameters={
+                "task_id": {"type": "string", "required": True},
+                "provider": {"type": "string", "required": True},
+                "item_key": {"type": "string", "required": True},
+                "metadata": {"type": "object", "required": False},
+            },
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="has_task_item_seen",
+            handler=_has_task_item_seen,
+            category="orchestration",
+            description="Check if a task has already seen an external item key.",
+            parameters={
+                "task_id": {"type": "string", "required": True},
+                "provider": {"type": "string", "required": True},
+                "item_key": {"type": "string", "required": True},
             },
         )
     )

@@ -107,6 +107,8 @@ def test_get_indeed_jobs_success(configured_hasdata, monkeypatch):
     assert out["ok"] is True
     assert out["jobs_count"] == 1
     assert out["jobs"][0]["title"] == "Software Engineer I"
+    assert out["queue"]["group"] == "hasdata"
+    assert "wait_sec_last" in out["queue_stats"]
     assert out["error"] is None
 
 
@@ -156,6 +158,8 @@ def test_get_indeed_job_detail_success(configured_hasdata, monkeypatch):
     out = get_indeed_job_detail(url="https://www.indeed.com/viewjob?jk=abc")
     assert out["ok"] is True
     assert out["job"]["company"] == "Google"
+    assert out["queue"]["group"] == "hasdata"
+    assert "wait_sec_last" in out["queue_stats"]
     assert out["error"] is None
 
 

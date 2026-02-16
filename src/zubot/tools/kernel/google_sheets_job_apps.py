@@ -9,27 +9,23 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from src.zubot.core.config_loader import load_config
+from src.zubot.core.job_applications_schema import (
+    ALLOWED_STATUS_VALUES as SCHEMA_ALLOWED_STATUS_VALUES,
+    DEFAULT_STATUS as SCHEMA_DEFAULT_STATUS,
+    REQUIRED_SHEET_COLUMNS,
+    SHEET_COLUMNS,
+    db_row_to_sheet_row,
+    normalize_sheet_row,
+    sheet_row_to_db_row,
+)
 from src.zubot.tools.kernel.google_auth import get_google_access_token
 
 DEFAULT_TIMEOUT_SEC = 15
 DEFAULT_SHEET_NAME = "Job Applications"
-DEFAULT_STATUS = "Found"
-ALLOWED_STATUS_VALUES = {"Found", "Applied", "Interviewing", "Offer", "Rejected", "Closed"}
-COLUMNS = [
-    "JobKey",
-    "Company",
-    "Job Title",
-    "Location",
-    "Date Found",
-    "Date Applied",
-    "Status",
-    "Pay Range",
-    "Job Link",
-    "Source",
-    "Cover Letter",
-    "Notes",
-]
-REQUIRED_COLUMNS = ["JobKey", "Company", "Job Title", "Location", "Date Found", "Status", "Job Link", "Source"]
+DEFAULT_STATUS = SCHEMA_DEFAULT_STATUS
+ALLOWED_STATUS_VALUES = set(SCHEMA_ALLOWED_STATUS_VALUES)
+COLUMNS = list(SHEET_COLUMNS)
+REQUIRED_COLUMNS = list(REQUIRED_SHEET_COLUMNS)
 
 
 def _google_drive_settings() -> dict[str, Any]:
@@ -158,10 +154,10 @@ def _normalize_date_string(raw_value: str | None) -> str | None:
 
 
 def _row_values_to_dict(row_values: list[Any]) -> dict[str, str]:
-    mapped: dict[str, str] = {}
+    raw_row: dict[str, Any] = {}
     for index, column in enumerate(COLUMNS):
-        raw = row_values[index] if index < len(row_values) else ""
-        mapped[column] = str(raw) if raw is not None else ""
+        raw_row[column] = row_values[index] if index < len(row_values) else ""
+    mapped = normalize_sheet_row(raw_row)
 
     for field in ("Date Found", "Date Applied"):
         try:
@@ -226,9 +222,10 @@ def _get_sheet_id(payload: dict[str, Any], title: str) -> int | None:
 
 
 def _row_dict_to_sheet_values(row: dict[str, Any]) -> list[str]:
+    normalized = normalize_sheet_row(row)
     output: list[str] = []
     for column in COLUMNS:
-        value = row.get(column, "")
+        value = normalized.get(column, "")
         output.append(str(value) if value is not None else "")
     return output
 
@@ -291,7 +288,7 @@ def list_job_app_rows(*, start_date: str | None = None, end_date: str | None = N
                 continue
             if end_iso and date_found_iso > end_iso:
                 continue
-        mapped_rows.append(mapped)
+        mapped_rows.append(db_row_to_sheet_row(sheet_row_to_db_row(mapped)))
 
     return {
         "ok": True,
@@ -312,7 +309,7 @@ def append_job_app_row(*, row: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(row, dict):
         return _error_payload(source, "row must be an object.")
 
-    normalized_row: dict[str, Any] = {column: row.get(column, "") for column in COLUMNS}
+    normalized_row: dict[str, Any] = normalize_sheet_row(row)
     for required in REQUIRED_COLUMNS:
         value = normalized_row.get(required)
         if not isinstance(value, str) or not value.strip():
@@ -376,7 +373,7 @@ def append_job_app_row(*, row: dict[str, Any]) -> dict[str, Any]:
         "updated_range": updated_range,
         "updated_rows": updated_rows,
         "target_row": target_row,
-        "row": {column: str(normalized_row.get(column, "")) for column in COLUMNS},
+        "row": db_row_to_sheet_row(sheet_row_to_db_row(normalized_row)),
         "error": None,
     }
 

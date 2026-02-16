@@ -47,12 +47,42 @@ class KillTaskRunRequest(BaseModel):
     requested_by: str = "main_agent"
 
 
+class ResumeTaskRunRequest(BaseModel):
+    user_response: str
+    requested_by: str = "main_agent"
+
+
 class CentralSqlRequest(BaseModel):
     sql: str
     params: list[object] | dict[str, object] | None = None
     read_only: bool = True
     timeout_sec: float = 5.0
     max_rows: int | None = None
+
+
+class TaskStateUpsertRequest(BaseModel):
+    task_id: str
+    state_key: str
+    value: dict[str, object] = Field(default_factory=dict)
+    updated_by: str = "task_runtime"
+
+
+class TaskStateGetRequest(BaseModel):
+    task_id: str
+    state_key: str
+
+
+class TaskSeenMarkRequest(BaseModel):
+    task_id: str
+    provider: str
+    item_key: str
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class TaskSeenHasRequest(BaseModel):
+    task_id: str
+    provider: str
+    item_key: str
 
 
 class ScheduleUpsertRequest(BaseModel):
@@ -123,6 +153,11 @@ def central_runs(limit: int = 50) -> dict:
     return get_runtime_service().central_runs(limit=limit)
 
 
+@app.get("/api/central/runs/waiting")
+def central_waiting_runs(limit: int = 50) -> dict:
+    return get_runtime_service().central_waiting_runs(limit=limit)
+
+
 @app.get("/api/central/metrics")
 def central_metrics() -> dict:
     return get_runtime_service().central_metrics()
@@ -179,6 +214,15 @@ def central_kill_run(run_id: str, req: KillTaskRunRequest | None = None) -> dict
     return get_runtime_service().central_kill_run(run_id=run_id, requested_by=requested_by)
 
 
+@app.post("/api/central/runs/{run_id}/resume")
+def central_resume_run(run_id: str, req: ResumeTaskRunRequest) -> dict:
+    return get_runtime_service().central_resume_run(
+        run_id=run_id,
+        user_response=req.user_response,
+        requested_by=req.requested_by,
+    )
+
+
 @app.post("/api/central/sql")
 def central_execute_sql(req: CentralSqlRequest) -> dict:
     return get_runtime_service().central_execute_sql(
@@ -187,6 +231,40 @@ def central_execute_sql(req: CentralSqlRequest) -> dict:
         read_only=req.read_only,
         timeout_sec=req.timeout_sec,
         max_rows=req.max_rows,
+    )
+
+
+@app.post("/api/central/task-state/upsert")
+def central_upsert_task_state(req: TaskStateUpsertRequest) -> dict:
+    return get_runtime_service().central_upsert_task_state(
+        task_id=req.task_id,
+        state_key=req.state_key,
+        value=req.value,
+        updated_by=req.updated_by,
+    )
+
+
+@app.post("/api/central/task-state/get")
+def central_get_task_state(req: TaskStateGetRequest) -> dict:
+    return get_runtime_service().central_get_task_state(task_id=req.task_id, state_key=req.state_key)
+
+
+@app.post("/api/central/task-seen/mark")
+def central_mark_task_item_seen(req: TaskSeenMarkRequest) -> dict:
+    return get_runtime_service().central_mark_task_item_seen(
+        task_id=req.task_id,
+        provider=req.provider,
+        item_key=req.item_key,
+        metadata=req.metadata,
+    )
+
+
+@app.post("/api/central/task-seen/has")
+def central_has_task_item_seen(req: TaskSeenHasRequest) -> dict:
+    return get_runtime_service().central_has_task_item_seen(
+        task_id=req.task_id,
+        provider=req.provider,
+        item_key=req.item_key,
     )
 
 
@@ -824,7 +902,7 @@ def index() -> HTMLResponse:
         <div id="progress" class="body">Idle</div>
       </div>
       <div class="card">
-        <h3>Task Agents</h3>
+        <h3>Task Slots</h3>
         <div id="central-status" class="body">Loading central status...</div>
       </div>
       <div class="card" style="min-height: 0;">
@@ -974,6 +1052,7 @@ def index() -> HTMLResponse:
               'service_running=' + (!!body.service.running) + ' enabled_in_config=' + (!!body.service.enabled_in_config) + '\\n' +
               'queued=' + (body.runtime.queued_count != null ? body.runtime.queued_count : 0) +
               ' running=' + (body.runtime.running_count != null ? body.runtime.running_count : 0) +
+              ' waiting=' + (body.runtime.waiting_count != null ? body.runtime.waiting_count : 0) +
               ' slots_busy=' + (body.runtime.task_slot_busy_count != null ? body.runtime.task_slot_busy_count : 0) +
               ' slots_free=' + (body.runtime.task_slot_free_count != null ? body.runtime.task_slot_free_count : 0);
           };
@@ -1730,31 +1809,32 @@ def index() -> HTMLResponse:
     function renderCentralStatus(statusPayload, runsPayload) {
       const service = statusPayload && statusPayload.service ? statusPayload.service : {};
       const runtime = statusPayload && statusPayload.runtime ? statusPayload.runtime : {};
-      const taskAgents = statusPayload && Array.isArray(statusPayload.task_agents) ? statusPayload.task_agents : [];
+      const taskSlots = statusPayload && Array.isArray(statusPayload.task_slots) ? statusPayload.task_slots : [];
       const recentRuns = runsPayload && Array.isArray(runsPayload.runs) ? runsPayload.runs : [];
 
       const lines = [
         `service_running=${!!service.running} enabled_in_config=${!!service.enabled_in_config}`,
-        `queued=${runtime.queued_count != null ? runtime.queued_count : 0} running=${runtime.running_count != null ? runtime.running_count : 0} active_threads=${runtime.active_task_threads != null ? runtime.active_task_threads : 0}`,
+        `queued=${runtime.queued_count != null ? runtime.queued_count : 0} running=${runtime.running_count != null ? runtime.running_count : 0} waiting=${runtime.waiting_count != null ? runtime.waiting_count : 0} active_threads=${runtime.active_task_threads != null ? runtime.active_task_threads : 0}`,
         `slots_busy=${runtime.task_slot_busy_count != null ? runtime.task_slot_busy_count : 0} slots_free=${runtime.task_slot_free_count != null ? runtime.task_slot_free_count : 0} slots_disabled=${runtime.task_slot_disabled_count != null ? runtime.task_slot_disabled_count : 0}`,
       ];
       if (Array.isArray(runtime.warnings) && runtime.warnings.length) {
         lines.push(`warnings=${runtime.warnings.join(',')}`);
       }
 
-      if (!taskAgents.length) {
-        lines.push('task_agents: none configured');
+      if (!taskSlots.length) {
+        lines.push('task_slots: none reported');
       } else {
-        lines.push('task_agents:');
-        taskAgents.forEach((agent) => {
-          const name = agent && (agent.name || agent.profile_id) ? (agent.name || agent.profile_id) : 'unknown';
-          const state = agent && agent.state ? agent.state : 'free';
-          const desc = agent && agent.current_description ? agent.current_description : '';
-          const queuePos = Number.isInteger(agent && agent.queue_position) ? ` queue_pos=${agent.queue_position}` : '';
-          lines.push(`- ${name} state=${state}${queuePos}`);
-          if (desc) lines.push(`  desc=${desc}`);
-          if (agent && agent.last_result && agent.last_result.status) {
-            lines.push(`  last=${agent.last_result.status}`);
+        lines.push('task_slots:');
+        taskSlots.forEach((slot) => {
+          const slotId = slot && slot.slot_id ? slot.slot_id : 'slot?';
+          const enabled = slot && typeof slot.enabled === 'boolean' ? slot.enabled : true;
+          const state = slot && slot.state ? slot.state : (enabled ? 'free' : 'disabled');
+          const runId = slot && slot.run_id ? slot.run_id : '-';
+          const taskId = slot && slot.task_id ? slot.task_id : '-';
+          const taskName = slot && slot.task_name ? slot.task_name : '-';
+          lines.push(`- ${slotId} enabled=${enabled} state=${state} run_id=${runId} task_id=${taskId} task_name=${taskName}`);
+          if (slot && slot.last_result && slot.last_result.status) {
+            lines.push(`  last=${slot.last_result.status}`);
           }
         });
       }

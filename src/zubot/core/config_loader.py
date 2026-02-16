@@ -206,13 +206,18 @@ def get_central_service_config(config: dict[str, Any] | None = None) -> dict[str
         "db_queue_default_max_rows": int(cfg.get("db_queue_default_max_rows", 500))
         if isinstance(cfg.get("db_queue_default_max_rows", 500), int)
         else 500,
+        "waiting_for_user_timeout_sec": int(cfg.get("waiting_for_user_timeout_sec", 24 * 60 * 60))
+        if isinstance(cfg.get("waiting_for_user_timeout_sec", 24 * 60 * 60), int)
+        else 24 * 60 * 60,
     }
 
 
-def get_predefined_task_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Return predefined task config from `pre_defined_tasks`."""
+def get_task_profiles_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return task profile config with backward-compatible fallback."""
     payload = config or load_config()
-    root = payload.get("pre_defined_tasks")
+    root = payload.get("task_profiles")
+    if not isinstance(root, dict):
+        root = payload.get("pre_defined_tasks")
     cfg = root if isinstance(root, dict) else {}
     tasks = cfg.get("tasks")
     return {
@@ -220,6 +225,11 @@ def get_predefined_task_config(config: dict[str, Any] | None = None) -> dict[str
     }
 
 
+def get_predefined_task_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Backward-compatible alias for task profile config."""
+    return get_task_profiles_config(config)
+
+
 def get_task_agent_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Backward-compatible alias for predefined-task config."""
-    return get_predefined_task_config(config)
+    """Backward-compatible alias for task profile config."""
+    return get_task_profiles_config(config)

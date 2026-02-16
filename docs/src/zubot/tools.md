@@ -45,7 +45,10 @@ This document defines the initial tools scaffold in `src/zubot/tools/`.
   - Returns normalized payloads with:
     - `provider` (`hasdata`)
     - `source` (`hasdata_indeed_listing`, `hasdata_indeed_job`, or `*_error`)
+    - `queue` metadata (`group`, `wait_sec`, `attempt`)
+    - `queue_stats` (`pending`, `calls_*`, `wait_sec_*`, `last_error`)
     - `error` when request/parsing fails
+  - All HasData calls are serialized through provider queue group `hasdata` (concurrency=1).
 - `src/zubot/tools/kernel/google_auth.py` (unregistered helper)
   - `get_google_access_token(force_refresh=False)`
   - Reads OAuth config from `tool_profiles.user_specific.google_oauth`.
@@ -63,6 +66,11 @@ This document defines the initial tools scaffold in `src/zubot/tools/`.
     - `tool_profiles.user_specific.google_drive.job_application_spreadsheet_id`
   - Uses tab name `Job Applications` and fixed column schema:
     - `JobKey`, `Company`, `Job Title`, `Location`, `Date Found`, `Date Applied`, `Status`, `Pay Range`, `Job Link`, `Source`, `Cover Letter`, `Notes`
+  - Canonical sheet/db schema contract is centralized in:
+    - `src/zubot/core/job_applications_schema.py`
+  - Local SQLite mirror table:
+    - `job_applications` in `memory/central/zubot_core.db`
+    - DB columns align to sheet columns by semantic field (`job_key` <-> `JobKey`, etc.)
   - Date handling:
     - accepts `YYYY-MM-DD` and `MM/DD/YYYY`
     - normalizes to `YYYY-MM-DD` for comparisons/writes
@@ -136,6 +144,10 @@ This document defines the initial tools scaffold in `src/zubot/tools/`.
   - `api_key`
   - `base_url` (default `https://api.hasdata.com`)
   - `timeout_sec`
+  - `queue_min_interval_sec`
+  - `queue_jitter_sec`
+  - `queue_max_retries`
+  - `queue_retry_backoff_sec`
 - Google auth/drive config for Google helper modules lives under:
   - `tool_profiles.user_specific.google_oauth`
   - `tool_profiles.user_specific.google_drive`
@@ -174,7 +186,13 @@ Behavior:
 - runtime dispatch should go through `invoke_tool(name, **kwargs)` instead of importing tool handlers ad hoc
 - weather/time tools auto-inject `get_location()` when `location` is omitted or explicitly `null`
 - task orchestration is queue-centric (`enqueue_task`, `enqueue_agentic_task`, `kill_task_run`, `list_task_runs`) instead of worker-centric spawning.
+- waiting-run orchestration is supported (`list_waiting_runs`, `resume_task_run`).
 - central SQL access is routed through serialized queue tool (`query_central_db`) for concurrency safety.
+- task atomic state helpers are exposed through tools:
+  - `upsert_task_state`
+  - `get_task_state`
+  - `mark_task_item_seen`
+  - `has_task_item_seen`
 
 LLM integration:
 - `app/chat_logic.py` builds OpenAI-style tool schemas from registry metadata each turn
@@ -187,8 +205,14 @@ Current registered tools:
   - `enqueue_agentic_task`
   - `kill_task_run`
   - `list_task_runs`
+  - `list_waiting_runs`
+  - `resume_task_run`
   - `get_task_agent_checkin`
   - `query_central_db`
+  - `upsert_task_state`
+  - `get_task_state`
+  - `mark_task_item_seen`
+  - `has_task_item_seen`
 - Kernel:
   - `get_location`
   - `get_current_time`

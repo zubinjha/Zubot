@@ -118,12 +118,14 @@ def test_runtime_counts(tmp_path):
     counts = store.runtime_counts()
     assert counts["queued_count"] == 1
     assert counts["running_count"] == 0
+    assert counts["waiting_count"] == 0
 
     claimed = store.claim_next_run()
     assert claimed is not None
     counts_after = store.runtime_counts()
     assert counts_after["queued_count"] == 0
     assert counts_after["running_count"] == 1
+    assert counts_after["waiting_count"] == 0
 
 
 def test_prune_runs_keeps_recent_history_and_active_runs(tmp_path):
@@ -357,3 +359,87 @@ def test_delete_schedule_cascades_child_rows(tmp_path):
         ).fetchone()
     assert int(after_times["c"]) == 0
     assert int(after_days["c"]) == 0
+
+
+def test_waiting_resume_state_machine(tmp_path):
+    store = TaskSchedulerStore(db_path=tmp_path / "scheduler.sqlite3")
+    enq = store.enqueue_manual_run(profile_id="profile_wait")
+    assert enq["ok"] is True
+    run_id = str(enq["run_id"])
+
+    claimed = store.claim_next_run()
+    assert claimed is not None
+    assert claimed["run_id"] == run_id
+    assert claimed["status"] == "running"
+
+    marked = store.mark_waiting_for_user(
+        run_id=run_id,
+        question="Which option?",
+        wait_context={"choices": ["a", "b"]},
+        requested_by="ui",
+        expires_at="2030-01-01T00:00:00+00:00",
+    )
+    assert marked["ok"] is True
+    assert marked["status"] == "waiting_for_user"
+    assert marked["waiting"]["request_id"].startswith("wait_")
+    assert marked["waiting"]["expires_at"] == "2030-01-01T00:00:00+00:00"
+
+    row_wait = store.get_run(run_id=run_id)
+    assert row_wait is not None
+    assert row_wait["status"] == "waiting_for_user"
+    assert row_wait["payload"]["waiting"]["question"] == "Which option?"
+    counts = store.runtime_counts()
+    assert counts["waiting_count"] == 1
+    metrics = store.runtime_metrics()
+    assert metrics["longest_waiting_age_sec"] is not None
+
+    resumed = store.resume_waiting_run(run_id=run_id, user_response="choose a", requested_by="ui")
+    assert resumed["ok"] is True
+    assert resumed["status"] == "queued"
+    assert resumed["resumed"] is True
+    assert resumed["waiting"]["state"] == "resumed"
+
+    row_resume = store.get_run(run_id=run_id)
+    assert row_resume is not None
+    assert row_resume["status"] == "queued"
+    assert row_resume["payload"]["resume_response"] == "choose a"
+    assert row_resume["payload"]["resume_history"][-1]["response"] == "choose a"
+
+
+def test_cancel_waiting_run_becomes_blocked(tmp_path):
+    store = TaskSchedulerStore(db_path=tmp_path / "scheduler.sqlite3")
+    enq = store.enqueue_manual_run(profile_id="profile_wait")
+    run_id = str(enq["run_id"])
+    _ = store.claim_next_run()
+    _ = store.mark_waiting_for_user(run_id=run_id, question="Need input")
+
+    out = store.cancel_run(run_id=run_id, reason="killed_by_user")
+    assert out["ok"] is True
+    assert out["status"] == "blocked"
+
+    row = store.get_run(run_id=run_id)
+    assert row is not None
+    assert row["status"] == "blocked"
+
+
+def test_job_applications_table_schema_matches_sheet_columns(tmp_path):
+    store = TaskSchedulerStore(db_path=tmp_path / "scheduler.sqlite3")
+    with store._connect() as conn:  # noqa: SLF001 - test-only inspection
+        rows = conn.execute("PRAGMA table_info(job_applications);").fetchall()
+    columns = [str(row["name"]) for row in rows]
+    assert columns == [
+        "job_key",
+        "company",
+        "job_title",
+        "location",
+        "date_found",
+        "date_applied",
+        "status",
+        "pay_range",
+        "job_link",
+        "source",
+        "cover_letter",
+        "notes",
+        "created_at",
+        "updated_at",
+    ]

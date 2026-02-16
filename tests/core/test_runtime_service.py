@@ -77,6 +77,18 @@ class _FakeCentral:
     def kill_run(self, *, run_id: str, requested_by: str = "main_agent") -> dict[str, Any]:
         return {"ok": True, "run_id": run_id, "requested_by": requested_by}
 
+    def list_waiting_runs(self, *, limit: int = 50) -> dict[str, Any]:
+        return {"ok": True, "runs": [{"run_id": "run_wait_1"}], "count": 1, "limit": limit}
+
+    def resume_run(self, *, run_id: str, user_response: str, requested_by: str = "main_agent") -> dict[str, Any]:
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "user_response": user_response,
+            "requested_by": requested_by,
+            "resumed": True,
+        }
+
     def execute_sql(
         self,
         *,
@@ -85,7 +97,7 @@ class _FakeCentral:
         read_only: bool = True,
         timeout_sec: float = 5.0,
         max_rows: int | None = None,
-    ) -> dict[str, Any]:
+        ) -> dict[str, Any]:
         return {
             "ok": True,
             "sql": sql,
@@ -95,6 +107,44 @@ class _FakeCentral:
             "max_rows": max_rows,
             "rows": [{"ok": 1}],
         }
+
+    def upsert_task_state(
+        self,
+        *,
+        task_id: str,
+        state_key: str,
+        value: dict[str, Any],
+        updated_by: str = "task_runtime",
+    ) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "task_id": task_id,
+            "state_key": state_key,
+            "value": value,
+            "updated_by": updated_by,
+        }
+
+    def get_task_state(self, *, task_id: str, state_key: str) -> dict[str, Any]:
+        return {"ok": True, "task_id": task_id, "state_key": state_key, "value": {"v": 1}}
+
+    def mark_task_item_seen(
+        self,
+        *,
+        task_id: str,
+        provider: str,
+        item_key: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "task_id": task_id,
+            "provider": provider,
+            "item_key": item_key,
+            "metadata": metadata or {},
+        }
+
+    def has_task_item_seen(self, *, task_id: str, provider: str, item_key: str) -> dict[str, Any]:
+        return {"ok": True, "seen": True, "seen_count": 2}
 
 
 class _FakeMemoryWorker:
@@ -244,3 +294,25 @@ def test_runtime_service_delegates_agentic_enqueue_and_sql(monkeypatch):
     sql = svc.central_execute_sql(sql="SELECT 1 AS ok;", read_only=True, max_rows=5)
     assert sql["ok"] is True
     assert sql["rows"][0]["ok"] == 1
+
+    waiting = svc.central_waiting_runs(limit=5)
+    assert waiting["ok"] is True
+    assert waiting["runs"][0]["run_id"] == "run_wait_1"
+
+    resume = svc.central_resume_run(run_id="run_wait_1", user_response="continue", requested_by="ui")
+    assert resume["ok"] is True
+    assert resume["resumed"] is True
+
+    upsert_state = svc.central_upsert_task_state(task_id="t1", state_key="cursor", value={"x": 1}, updated_by="ui")
+    assert upsert_state["ok"] is True
+
+    get_state = svc.central_get_task_state(task_id="t1", state_key="cursor")
+    assert get_state["ok"] is True
+    assert get_state["value"]["v"] == 1
+
+    mark_seen = svc.central_mark_task_item_seen(task_id="t1", provider="indeed", item_key="job1", metadata={"a": 1})
+    assert mark_seen["ok"] is True
+
+    has_seen = svc.central_has_task_item_seen(task_id="t1", provider="indeed", item_key="job1")
+    assert has_seen["ok"] is True
+    assert has_seen["seen"] is True

@@ -128,6 +128,18 @@ class _FakeRuntimeService:
     def central_kill_run(self, *, run_id: str, requested_by: str = "main_agent"):
         return {"ok": True, "run_id": run_id, "requested_by": requested_by}
 
+    def central_waiting_runs(self, *, limit: int = 50):
+        return {"ok": True, "runs": [{"run_id": "run_wait_1"}], "count": 1, "limit": limit}
+
+    def central_resume_run(self, *, run_id: str, user_response: str, requested_by: str = "main_agent"):
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "user_response": user_response,
+            "requested_by": requested_by,
+            "resumed": True,
+        }
+
     def central_execute_sql(
         self,
         *,
@@ -147,6 +159,18 @@ class _FakeRuntimeService:
             "rows": [{"ok": 1}],
             "row_count": 1,
         }
+
+    def central_upsert_task_state(self, *, task_id: str, state_key: str, value: dict, updated_by: str = "task_runtime"):
+        return {"ok": True, "task_id": task_id, "state_key": state_key, "value": value, "updated_by": updated_by}
+
+    def central_get_task_state(self, *, task_id: str, state_key: str):
+        return {"ok": True, "task_id": task_id, "state_key": state_key, "value": {"v": 1}}
+
+    def central_mark_task_item_seen(self, *, task_id: str, provider: str, item_key: str, metadata: dict | None = None):
+        return {"ok": True, "task_id": task_id, "provider": provider, "item_key": item_key, "metadata": metadata or {}}
+
+    def central_has_task_item_seen(self, *, task_id: str, provider: str, item_key: str):
+        return {"ok": True, "seen": True, "seen_count": 1}
 
 
 def test_health_endpoint_uses_runtime_service(monkeypatch):
@@ -264,10 +288,44 @@ def test_central_endpoints(monkeypatch):
     assert kill_run.status_code == 200
     assert kill_run.json()["run_id"] == "run_x"
 
+    waiting = client.get("/api/central/runs/waiting?limit=5")
+    assert waiting.status_code == 200
+    assert waiting.json()["ok"] is True
+    assert waiting.json()["runs"][0]["run_id"] == "run_wait_1"
+
+    resumed = client.post("/api/central/runs/run_wait_1/resume", json={"user_response": "continue", "requested_by": "ui"})
+    assert resumed.status_code == 200
+    assert resumed.json()["ok"] is True
+    assert resumed.json()["resumed"] is True
+
     sql = client.post("/api/central/sql", json={"sql": "SELECT 1 AS ok;", "read_only": True, "max_rows": 10})
     assert sql.status_code == 200
     assert sql.json()["ok"] is True
     assert sql.json()["row_count"] == 1
+
+    state_upsert = client.post(
+        "/api/central/task-state/upsert",
+        json={"task_id": "t1", "state_key": "cursor", "value": {"x": 1}, "updated_by": "ui"},
+    )
+    assert state_upsert.status_code == 200
+    assert state_upsert.json()["ok"] is True
+
+    state_get = client.post("/api/central/task-state/get", json={"task_id": "t1", "state_key": "cursor"})
+    assert state_get.status_code == 200
+    assert state_get.json()["ok"] is True
+    assert state_get.json()["value"]["v"] == 1
+
+    seen_mark = client.post(
+        "/api/central/task-seen/mark",
+        json={"task_id": "t1", "provider": "indeed", "item_key": "job_1", "metadata": {"title": "SE"}},
+    )
+    assert seen_mark.status_code == 200
+    assert seen_mark.json()["ok"] is True
+
+    seen_has = client.post("/api/central/task-seen/has", json={"task_id": "t1", "provider": "indeed", "item_key": "job_1"})
+    assert seen_has.status_code == 200
+    assert seen_has.json()["ok"] is True
+    assert seen_has.json()["seen"] is True
 
     stop = client.post("/api/central/stop")
     assert stop.status_code == 200

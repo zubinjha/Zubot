@@ -42,13 +42,14 @@ Responsibilities:
 - resolve config path (`ZUBOT_CONFIG_PATH` or `config/config.json`)
 - safely parse JSON config with cache
 - expose normalized runtime helpers
+- keep schema-driven contracts centralized (for example `job_applications_schema`)
 
 Common helpers used by runtime:
 - `load_config()`
 - `get_model_config()`
 - `get_provider_config()`
 - `get_central_service_config()`
-- `get_predefined_task_config()`
+- `get_task_profiles_config()` (`get_predefined_task_config()` compatibility alias)
 
 Design rule:
 - do not parse config ad hoc in feature modules; use config loader helpers.
@@ -80,9 +81,17 @@ Responsibilities:
 
 Active orchestration tools are task-run-centric:
 - `enqueue_task`
+- `enqueue_agentic_task`
 - `kill_task_run`
 - `list_task_runs`
+- `list_waiting_runs`
+- `resume_task_run`
 - `get_task_agent_checkin`
+- `query_central_db`
+- `upsert_task_state`
+- `get_task_state`
+- `mark_task_item_seen`
+- `has_task_item_seen`
 
 ## Context Pipeline
 
@@ -118,17 +127,19 @@ Primary modules:
 Responsibilities:
 - heartbeat enqueues due schedule runs from SQLite
 - claim queued runs under fixed concurrency cap
-- execute predefined script entrypoints and agentic background runs
+- execute task-profile script entrypoints and agentic background runs
+- support interactive pause/resume (`waiting_for_user` + resume API/tool)
 - persist run lifecycle transitions and history
 - support run kill/cancel via central service API/tool surface
 - provide serialized SQL queue access for concurrent DB callers
+- provide provider-level serialized external API calls for rate-limited tools (for example HasData)
 
 Structured task progress payloads include:
 - `task_id`
 - `task_name`
 - `run_id`
 - `slot_id`
-- `status` (`queued`, `running`, `progress`, `completed`, `failed`, `killed`)
+- `status` (`queued`, `running`, `progress`, `waiting_for_user`, `completed`, `failed`, `killed`)
 - optional `message` / `percent` / `origin`
 - `started_at`, `updated_at`, `finished_at`
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import re
 from threading import Event, RLock, Thread
 from typing import Any
@@ -34,6 +35,7 @@ class CentralServiceSettings:
     running_age_warning_sec: int = 1800
     db_queue_busy_timeout_ms: int = 5000
     db_queue_default_max_rows: int = 500
+    waiting_for_user_timeout_sec: int = 24 * 60 * 60
 
 
 def _load_central_settings() -> CentralServiceSettings:
@@ -59,6 +61,7 @@ def _load_central_settings() -> CentralServiceSettings:
     running_age_warning = central.get("running_age_warning_sec", 1800)
     db_queue_busy_timeout = central.get("db_queue_busy_timeout_ms", 5000)
     db_queue_max_rows = central.get("db_queue_default_max_rows", 500)
+    waiting_timeout = central.get("waiting_for_user_timeout_sec", 24 * 60 * 60)
 
     return CentralServiceSettings(
         enabled=enabled,
@@ -76,6 +79,7 @@ def _load_central_settings() -> CentralServiceSettings:
         if isinstance(db_queue_busy_timeout, int) and db_queue_busy_timeout > 0
         else 5000,
         db_queue_default_max_rows=int(db_queue_max_rows) if isinstance(db_queue_max_rows, int) and db_queue_max_rows > 0 else 500,
+        waiting_for_user_timeout_sec=int(waiting_timeout) if isinstance(waiting_timeout, int) and waiting_timeout >= 0 else 24 * 60 * 60,
     )
 
 
@@ -87,15 +91,26 @@ def _load_task_profiles() -> dict[str, dict[str, Any]]:
 
     out: dict[str, dict[str, Any]] = {}
 
-    predefined_root = cfg.get("pre_defined_tasks") if isinstance(cfg, dict) else None
-    predefined_tasks = predefined_root.get("tasks") if isinstance(predefined_root, dict) else None
-    if isinstance(predefined_tasks, dict):
-        for task_id, payload in predefined_tasks.items():
+    profiles_root = cfg.get("task_profiles") if isinstance(cfg, dict) else None
+    if not isinstance(profiles_root, dict):
+        profiles_root = cfg.get("pre_defined_tasks") if isinstance(cfg, dict) else None
+    profiles = profiles_root.get("tasks") if isinstance(profiles_root, dict) else None
+    if isinstance(profiles, dict):
+        for task_id, payload in profiles.items():
             if not isinstance(task_id, str) or not isinstance(payload, dict):
                 continue
+            kind = str(payload.get("kind") or "script").strip().lower()
+            if kind not in {"script", "agentic", "interactive_wrapper"}:
+                kind = "script"
             out[task_id] = {
                 "name": payload.get("name") or task_id,
+                "kind": kind,
                 "entrypoint_path": payload.get("entrypoint_path"),
+                "resources_path": payload.get("resources_path"),
+                "module": payload.get("module"),
+                "queue_group": payload.get("queue_group"),
+                "timeout_sec": payload.get("timeout_sec"),
+                "retry_policy": payload.get("retry_policy"),
             }
 
     return out
@@ -123,7 +138,7 @@ def summarize_task_agent_check_in(task_agents: list[dict[str, Any]]) -> str:
         state_desc = state
         if state == "queued" and isinstance(queue_position, int):
             state_desc = f"queued (position {queue_position})"
-        if state in {"running", "queued"} and description:
+        if state in {"running", "queued", "waiting_for_user"} and description:
             parts.append(f"{name}: {state_desc}; {description}")
             continue
         if last_status:
@@ -164,6 +179,26 @@ class CentralService:
         from datetime import UTC, datetime
 
         return datetime.now(tz=UTC).isoformat()
+
+    @staticmethod
+    def _parse_iso_utc(value: Any) -> Any | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        from datetime import UTC, datetime
+
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _future_iso(*, timeout_sec: int) -> str | None:
+        safe_timeout = int(timeout_sec) if isinstance(timeout_sec, int) else 0
+        if safe_timeout <= 0:
+            return None
+        from datetime import UTC, datetime, timedelta
+
+        return (datetime.now(tz=UTC) + timedelta(seconds=safe_timeout)).isoformat()
 
     def _record_event(
         self,
@@ -321,11 +356,11 @@ class CentralService:
 
     @staticmethod
     def _is_high_signal_task_memory_event(event_type: str) -> bool:
-        return event_type in {"run_queued", "run_finished", "run_failed", "run_blocked"}
+        return event_type in {"run_queued", "run_finished", "run_failed", "run_blocked", "run_waiting", "run_resumed"}
 
     @staticmethod
     def _extract_run_status_from_detail(detail: str) -> str | None:
-        match = re.search(r"\bstatus=(done|failed|blocked)\b", detail)
+        match = re.search(r"\bstatus=(done|failed|blocked|waiting_for_user)\b", detail)
         if match:
             return str(match.group(1))
         return None
@@ -349,6 +384,10 @@ class CentralService:
             if "killed_by" in low or "killed" in low:
                 return "killed"
             return "failed"
+        if event_type == "run_waiting":
+            return "waiting_for_user"
+        if event_type == "run_resumed":
+            return "queued"
         if event_type == "run_finished":
             if normalized == "done":
                 return "completed"
@@ -359,6 +398,8 @@ class CentralService:
                 if "killed_by" in low or "killed" in low:
                     return "killed"
                 return "failed"
+            if normalized == "waiting_for_user":
+                return "waiting_for_user"
             return "completed"
         return "progress"
 
@@ -374,6 +415,7 @@ class CentralService:
         percent: int | None = None,
         slot_id: str | None = None,
         origin: str | None = None,
+        extra_payload: dict[str, Any] | None = None,
     ) -> None:
         text = f"{event_type} profile={profile_id} run_id={run_id} {detail}".strip()
         day = local_day_str()
@@ -423,11 +465,70 @@ class CentralService:
             "origin": origin,
             "detail": detail,
         }
+        if isinstance(extra_payload, dict):
+            progress_payload.update(extra_payload)
         self._record_event(
             event_type="task_agent_event",
             payload=progress_payload,
             forward_to_user=True,
         )
+
+    def _expire_waiting_runs(self) -> dict[str, Any]:
+        timeout_sec = int(self._settings.waiting_for_user_timeout_sec)
+        if timeout_sec == 0:
+            return {"ok": True, "expired_count": 0, "expired_run_ids": []}
+
+        from datetime import UTC, datetime, timedelta
+
+        now_dt = datetime.now(tz=UTC)
+        expired: list[str] = []
+        for row in self._store.list_runs(limit=500):
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("status") or "") != "waiting_for_user":
+                continue
+
+            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+            waiting = payload.get("waiting") if isinstance(payload.get("waiting"), dict) else {}
+            expires_at_raw = waiting.get("expires_at")
+            expires_at = self._parse_iso_utc(expires_at_raw)
+            if expires_at is None:
+                waiting_since = self._parse_iso_utc(waiting.get("waiting_since"))
+                if waiting_since is None:
+                    continue
+                expires_at = waiting_since + timedelta(seconds=timeout_sec)
+            if now_dt < expires_at:
+                continue
+
+            run_id = str(row.get("run_id") or "").strip()
+            if not run_id:
+                continue
+            out = self._store.complete_run(
+                run_id=run_id,
+                status="blocked",
+                summary=None,
+                error="waiting_for_user_timeout",
+            )
+            if not out.get("ok"):
+                continue
+            expired.append(run_id)
+            profile_id = str(row.get("profile_id") or "unknown")
+            self._log_task_agent_event(
+                event_type="run_blocked",
+                profile_id=profile_id,
+                run_id=run_id,
+                detail=f"status=blocked reason=waiting_for_user_timeout request_id={str(waiting.get('request_id') or '')[:80]}",
+                run_status="blocked",
+                origin=str(payload.get("origin") or payload.get("trigger") or "manual"),
+                extra_payload={
+                    "request_id": waiting.get("request_id"),
+                    "question": waiting.get("question"),
+                    "context": waiting.get("context") if isinstance(waiting.get("context"), dict) else {},
+                    "expires_at": expires_at.isoformat(),
+                },
+            )
+
+        return {"ok": True, "expired_count": len(expired), "expired_run_ids": expired}
 
     def _memory_manager_settings(self) -> MemoryManagerSettings:
         return MemoryManagerSettings(
@@ -436,6 +537,7 @@ class CentralService:
         )
 
     def _run_housekeeping(self, *, on_completion: bool = False) -> dict[str, Any]:
+        waiting_expiry = self._expire_waiting_runs()
         prune = self._store.prune_runs(
             max_age_days=self._settings.run_history_retention_days,
             max_history_rows=self._settings.run_history_max_rows,
@@ -455,7 +557,7 @@ class CentralService:
                 },
                 forward_to_user=False,
             )
-        return {"ok": True, "prune": prune, "memory": memory}
+        return {"ok": True, "waiting_expiry": waiting_expiry, "prune": prune, "memory": memory}
 
     def _refresh_settings(self) -> CentralServiceSettings:
         settings = _load_central_settings()
@@ -538,7 +640,7 @@ class CentralService:
         try:
             result = self._runner.run_profile(profile_id=profile_id, payload=payload, cancel_event=cancel_event)
             status = str(result.get("status") or "done")
-            if status not in {"done", "failed", "blocked"}:
+            if status not in {"done", "failed", "blocked", "waiting_for_user"}:
                 status = "failed"
             summary = result.get("summary") if isinstance(result.get("summary"), str) else None
             error = result.get("error") if isinstance(result.get("error"), str) else None
@@ -549,7 +651,26 @@ class CentralService:
                 if isinstance(result.get("attempts_configured"), int)
                 else None
             )
-            self._store.complete_run(run_id=run_id, status=status, summary=summary, error=error)
+            waiting_payload: dict[str, Any] = {}
+            if status == "waiting_for_user":
+                question = result.get("question") if isinstance(result.get("question"), str) else None
+                wait_ctx = result.get("wait_context") if isinstance(result.get("wait_context"), dict) else None
+                wait_timeout_raw = result.get("wait_timeout_sec")
+                wait_timeout_sec = (
+                    int(wait_timeout_raw)
+                    if isinstance(wait_timeout_raw, int) and wait_timeout_raw >= 0
+                    else int(self._settings.waiting_for_user_timeout_sec)
+                )
+                wait_mark = self._store.mark_waiting_for_user(
+                    run_id=run_id,
+                    question=question,
+                    wait_context=wait_ctx,
+                    requested_by=str(payload.get("requested_by") or "main_agent"),
+                    expires_at=self._future_iso(timeout_sec=wait_timeout_sec),
+                )
+                waiting_payload = wait_mark.get("waiting") if isinstance(wait_mark.get("waiting"), dict) else {}
+            else:
+                self._store.complete_run(run_id=run_id, status=status, summary=summary, error=error)
             detail = f"status={status}"
             if summary:
                 detail += f" summary={summary[:160]}"
@@ -561,15 +682,34 @@ class CentralService:
                     detail += f" attempts_used={attempts_used}"
                 if attempts_configured is not None:
                     detail += f" attempts_configured={attempts_configured}"
-            self._log_task_agent_event(
-                event_type="run_finished",
-                profile_id=profile_id,
-                run_id=run_id,
-                detail=detail,
-                run_status=status,
-                slot_id=slot_id,
-                origin=origin,
-            )
+            if status == "waiting_for_user":
+                self._log_task_agent_event(
+                    event_type="run_waiting",
+                    profile_id=profile_id,
+                    run_id=run_id,
+                    detail=detail,
+                    run_status=status,
+                    slot_id=slot_id,
+                    origin=origin,
+                    extra_payload={
+                        "request_id": waiting_payload.get("request_id"),
+                        "question": waiting_payload.get("question"),
+                        "context": waiting_payload.get("context")
+                        if isinstance(waiting_payload.get("context"), dict)
+                        else {},
+                        "expires_at": waiting_payload.get("expires_at"),
+                    },
+                )
+            else:
+                self._log_task_agent_event(
+                    event_type="run_finished",
+                    profile_id=profile_id,
+                    run_id=run_id,
+                    detail=detail,
+                    run_status=status,
+                    slot_id=slot_id,
+                    origin=origin,
+                )
             final_status = status
             final_summary = summary
             final_error = error
@@ -675,6 +815,7 @@ class CentralService:
                 "running_age_warning_sec": settings.running_age_warning_sec,
                 "db_queue_busy_timeout_ms": settings.db_queue_busy_timeout_ms,
                 "db_queue_default_max_rows": settings.db_queue_default_max_rows,
+                "waiting_for_user_timeout_sec": settings.waiting_for_user_timeout_sec,
             },
             "enqueue": enqueue,
             "dispatch": dispatch,
@@ -749,14 +890,14 @@ class CentralService:
         if status in {"done", "failed", "blocked"}:
             return {"ok": True, "run_id": clean_run_id, "status": status, "already_terminal": True}
 
-        if status == "queued":
+        if status in {"queued", "waiting_for_user"}:
             out = self._store.cancel_run(run_id=clean_run_id, reason=f"killed_by_user:{requested_by}")
             if out.get("ok"):
                 self._log_task_agent_event(
                     event_type="run_blocked",
                     profile_id=profile_id,
                     run_id=clean_run_id,
-                    detail=f"killed_by={requested_by} state=queued",
+                    detail=f"killed_by={requested_by} state={status}",
                     origin=str(
                         row.get("payload", {}).get("origin")
                         or row.get("payload", {}).get("trigger")
@@ -799,15 +940,193 @@ class CentralService:
 
         return {"ok": False, "error": f"unsupported run status `{status}`"}
 
+    def list_waiting_runs(self, *, limit: int = 50) -> dict[str, Any]:
+        safe_limit = max(1, min(500, int(limit)))
+        runs: list[dict[str, Any]] = []
+        for row in self._store.list_runs(limit=max(500, safe_limit)):
+            if str(row.get("status") or "") != "waiting_for_user":
+                continue
+            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+            waiting = payload.get("waiting") if isinstance(payload.get("waiting"), dict) else {}
+            runs.append(
+                {
+                    **row,
+                    "request_id": waiting.get("request_id"),
+                    "question": waiting.get("question"),
+                    "context": waiting.get("context") if isinstance(waiting.get("context"), dict) else {},
+                    "expires_at": waiting.get("expires_at"),
+                }
+            )
+        return {"ok": True, "runs": runs[:safe_limit], "count": len(runs)}
+
+    def resume_run(self, *, run_id: str, user_response: str, requested_by: str = "main_agent") -> dict[str, Any]:
+        clean_run_id = str(run_id or "").strip()
+        clean_response = str(user_response or "").strip()
+        clean_requested_by = str(requested_by or "main_agent").strip() or "main_agent"
+        if not clean_run_id:
+            return {"ok": False, "error": "run_id is required."}
+        if not clean_response:
+            return {"ok": False, "error": "user_response is required."}
+
+        row = self._store.get_run(run_id=clean_run_id)
+        if row is None:
+            return {"ok": False, "error": "run not found"}
+        if str(row.get("status") or "") != "waiting_for_user":
+            return {"ok": False, "error": "run is not waiting for user input"}
+
+        out = self._store.resume_waiting_run(
+            run_id=clean_run_id,
+            user_response=clean_response,
+            requested_by=clean_requested_by,
+        )
+        if out.get("ok"):
+            profile_id = str(row.get("profile_id") or "unknown")
+            waiting = out.get("waiting") if isinstance(out.get("waiting"), dict) else {}
+            self._log_task_agent_event(
+                event_type="run_resumed",
+                profile_id=profile_id,
+                run_id=clean_run_id,
+                detail=f"resumed_by={clean_requested_by}",
+                origin=str(
+                    row.get("payload", {}).get("origin")
+                    or row.get("payload", {}).get("trigger")
+                    or "manual"
+                )
+                if isinstance(row.get("payload"), dict)
+                else "manual",
+                extra_payload={
+                    "request_id": waiting.get("request_id"),
+                    "question": waiting.get("question"),
+                    "context": waiting.get("context") if isinstance(waiting.get("context"), dict) else {},
+                    "expires_at": waiting.get("expires_at"),
+                },
+            )
+            self._dispatch_available()
+        return out
+
+    def upsert_task_state(
+        self,
+        *,
+        task_id: str,
+        state_key: str,
+        value: dict[str, Any],
+        updated_by: str = "task_runtime",
+    ) -> dict[str, Any]:
+        clean_task_id = str(task_id or "").strip()
+        clean_key = str(state_key or "").strip()
+        if not clean_task_id:
+            return {"ok": False, "error": "task_id is required."}
+        if not clean_key:
+            return {"ok": False, "error": "state_key is required."}
+
+        value_json = json.dumps(value if isinstance(value, dict) else {})
+        return self.execute_sql(
+            sql=(
+                "INSERT INTO task_state_kv(task_id, state_key, value_json, updated_at, updated_by) "
+                "VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?) "
+                "ON CONFLICT(task_id, state_key) DO UPDATE SET "
+                "value_json = excluded.value_json, updated_at = excluded.updated_at, updated_by = excluded.updated_by;"
+            ),
+            params=[clean_task_id, clean_key, value_json, str(updated_by or "task_runtime")],
+            read_only=False,
+        )
+
+    def get_task_state(self, *, task_id: str, state_key: str) -> dict[str, Any]:
+        clean_task_id = str(task_id or "").strip()
+        clean_key = str(state_key or "").strip()
+        if not clean_task_id or not clean_key:
+            return {"ok": False, "error": "task_id and state_key are required."}
+        out = self.execute_sql(
+            sql="SELECT task_id, state_key, value_json, updated_at, updated_by FROM task_state_kv WHERE task_id = ? AND state_key = ?;",
+            params=[clean_task_id, clean_key],
+            read_only=True,
+            max_rows=1,
+        )
+        rows = out.get("rows") if isinstance(out.get("rows"), list) else []
+        row = rows[0] if rows else None
+        if not isinstance(row, dict):
+            return {"ok": True, "task_id": clean_task_id, "state_key": clean_key, "value": None}
+        try:
+            value = json.loads(str(row.get("value_json") or "{}"))
+        except Exception:
+            value = {}
+        return {
+            "ok": True,
+            "task_id": clean_task_id,
+            "state_key": clean_key,
+            "value": value if isinstance(value, dict) else {},
+            "updated_at": row.get("updated_at"),
+            "updated_by": row.get("updated_by"),
+        }
+
+    def mark_task_item_seen(
+        self,
+        *,
+        task_id: str,
+        provider: str,
+        item_key: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        clean_task_id = str(task_id or "").strip()
+        clean_provider = str(provider or "").strip()
+        clean_item_key = str(item_key or "").strip()
+        if not clean_task_id or not clean_provider or not clean_item_key:
+            return {"ok": False, "error": "task_id, provider, and item_key are required."}
+        meta_json = json.dumps(metadata if isinstance(metadata, dict) else {})
+        return self.execute_sql(
+            sql=(
+                "INSERT INTO task_seen_items(task_id, provider, item_key, metadata_json, first_seen_at, last_seen_at, seen_count) "
+                "VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1) "
+                "ON CONFLICT(task_id, provider, item_key) DO UPDATE SET "
+                "metadata_json = excluded.metadata_json, last_seen_at = excluded.last_seen_at, seen_count = task_seen_items.seen_count + 1;"
+            ),
+            params=[clean_task_id, clean_provider, clean_item_key, meta_json],
+            read_only=False,
+        )
+
+    def has_task_item_seen(self, *, task_id: str, provider: str, item_key: str) -> dict[str, Any]:
+        clean_task_id = str(task_id or "").strip()
+        clean_provider = str(provider or "").strip()
+        clean_item_key = str(item_key or "").strip()
+        if not clean_task_id or not clean_provider or not clean_item_key:
+            return {"ok": False, "error": "task_id, provider, and item_key are required."}
+        out = self.execute_sql(
+            sql=(
+                "SELECT seen_count, first_seen_at, last_seen_at "
+                "FROM task_seen_items WHERE task_id = ? AND provider = ? AND item_key = ?;"
+            ),
+            params=[clean_task_id, clean_provider, clean_item_key],
+            read_only=True,
+            max_rows=1,
+        )
+        rows = out.get("rows") if isinstance(out.get("rows"), list) else []
+        if not rows:
+            return {"ok": True, "seen": False, "seen_count": 0}
+        row = rows[0] if isinstance(rows[0], dict) else {}
+        return {
+            "ok": True,
+            "seen": True,
+            "seen_count": int(row.get("seen_count") or 0),
+            "first_seen_at": row.get("first_seen_at"),
+            "last_seen_at": row.get("last_seen_at"),
+        }
+
     def list_defined_tasks(self) -> dict[str, Any]:
         tasks = _load_task_profiles()
         out: list[dict[str, Any]] = []
         for task_id, payload in sorted(tasks.items(), key=lambda item: item[0]):
+            kind = str(payload.get("kind") or "script")
             out.append(
                 {
                     "task_id": task_id,
                     "name": str(payload.get("name") or task_id),
+                    "kind": kind,
                     "entrypoint_path": payload.get("entrypoint_path"),
+                    "module": payload.get("module"),
+                    "resources_path": payload.get("resources_path"),
+                    "queue_group": payload.get("queue_group"),
+                    "timeout_sec": payload.get("timeout_sec"),
+                    "retry_policy": payload.get("retry_policy"),
                 }
             )
         return {"ok": True, "tasks": out}
@@ -887,13 +1206,20 @@ class CentralService:
             profile_runs = [r for r in runs if str(r.get("profile_id") or "") == profile_id]
             running = [r for r in profile_runs if r.get("status") == "running"]
             queued = [r for r in profile_runs if r.get("status") == "queued"]
+            waiting = [r for r in profile_runs if r.get("status") == "waiting_for_user"]
             historical = [r for r in profile_runs if r.get("status") in {"done", "failed", "blocked"}]
 
-            current_run = running[0] if running else (queued[0] if queued else None)
+            current_run = (
+                running[0]
+                if running
+                else (waiting[0] if waiting else (queued[0] if queued else None))
+            )
             current_run_id = str(current_run.get("run_id")) if isinstance(current_run, dict) else None
 
             if running:
                 state = "running"
+            elif waiting:
+                state = "waiting_for_user"
             elif queued:
                 state = "queued"
             else:
@@ -905,6 +1231,11 @@ class CentralService:
             elif isinstance(current_run, dict):
                 payload = current_run.get("payload") if isinstance(current_run.get("payload"), dict) else {}
                 description = self._runner.describe_run(profile_id=profile_id, payload=payload)
+                if state == "waiting_for_user":
+                    waiting = payload.get("waiting") if isinstance(payload.get("waiting"), dict) else {}
+                    question = waiting.get("question")
+                    if isinstance(question, str) and question.strip():
+                        description = f"waiting for user: {question.strip()[:140]}"
 
             last_result = None
             if historical:
@@ -925,6 +1256,14 @@ class CentralService:
                     "current_description": description,
                     "started_at": current_run.get("started_at") if isinstance(current_run, dict) else None,
                     "queue_position": queue_position.get(current_run_id) if state == "queued" and current_run_id else None,
+                    "waiting_question": (
+                        current_run.get("payload", {}).get("waiting", {}).get("question")
+                        if state == "waiting_for_user"
+                        and isinstance(current_run, dict)
+                        and isinstance(current_run.get("payload"), dict)
+                        and isinstance(current_run.get("payload", {}).get("waiting"), dict)
+                        else None
+                    ),
                     "last_result": last_result,
                 }
             )
@@ -955,6 +1294,7 @@ class CentralService:
         runs = self._store.list_runs(limit=200)
         active_runs = [row for row in runs if str(row.get("status") or "") == "running"]
         queued_preview = [row for row in runs if str(row.get("status") or "") == "queued"][:10]
+        waiting_preview = [row for row in runs if str(row.get("status") or "") == "waiting_for_user"][:10]
 
         return {
             "ok": True,
@@ -973,10 +1313,12 @@ class CentralService:
                 "running_age_warning_sec": settings.running_age_warning_sec,
                 "db_queue_busy_timeout_ms": settings.db_queue_busy_timeout_ms,
                 "db_queue_default_max_rows": settings.db_queue_default_max_rows,
+                "waiting_for_user_timeout_sec": settings.waiting_for_user_timeout_sec,
             },
             "runtime": {
                 "queued_count": counts["queued_count"],
                 "running_count": counts["running_count"],
+                "waiting_count": counts.get("waiting_count", 0),
                 "active_task_threads": active,
                 "task_slot_busy_count": busy_slots,
                 "task_slot_free_count": free_slots,
@@ -986,6 +1328,7 @@ class CentralService:
                 "warnings": warnings,
                 "active_runs": active_runs,
                 "queued_runs_preview": queued_preview,
+                "waiting_runs_preview": waiting_preview,
             },
             "task_agents": self._check_in_payload(),
             "task_slots": slots,

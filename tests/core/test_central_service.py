@@ -471,3 +471,143 @@ def test_execute_sql_uses_db_queue(configured_central):
     assert out["ok"] is True
     assert out["source"] == "central_db_queue"
     assert out["rows"][0]["ok"] == 1
+
+
+def test_waiting_run_resume_flow(configured_central):
+    service = CentralService()
+    service._runner = type(  # noqa: SLF001
+        "_FakeRunner",
+        (),
+        {
+            "describe_run": staticmethod(lambda *, profile_id, payload=None: f"{profile_id}: waiting"),
+            "run_profile": staticmethod(
+                lambda *, profile_id, payload=None, cancel_event=None: (
+                    {
+                        "ok": True,
+                        "status": "done",
+                        "summary": "resumed and completed",
+                        "error": None,
+                        "current_description": "done",
+                    }
+                    if payload and payload.get("resume_response")
+                    else {
+                        "ok": True,
+                        "status": "waiting_for_user",
+                        "summary": "Need your preference.",
+                        "question": "Need your preference.",
+                        "error": None,
+                        "current_description": "waiting",
+                    }
+                )
+            ),
+        },
+    )()
+
+    trigger = service.enqueue_agentic_task(
+        task_name="Ask User",
+        instructions="Ask a follow up",
+        requested_by="ui",
+        model_tier="medium",
+        tool_access=[],
+        skill_access=[],
+        timeout_sec=60,
+        metadata={},
+    )
+    assert trigger["ok"] is True
+    run_id = trigger["run_id"]
+
+    deadline = time.time() + 2.0
+    waiting = None
+    while time.time() < deadline:
+        row = service._store.get_run(run_id=run_id)  # noqa: SLF001
+        if isinstance(row, dict) and row.get("status") == "waiting_for_user":
+            waiting = row
+            break
+        time.sleep(0.05)
+
+    assert waiting is not None
+    waiting_meta = waiting["payload"]["waiting"]
+    assert isinstance(waiting_meta.get("request_id"), str)
+    assert waiting_meta.get("request_id", "").startswith("wait_")
+    assert waiting_meta.get("question") == "Need your preference."
+    assert isinstance(waiting_meta.get("expires_at"), str)
+    waiting_runs = service.list_waiting_runs(limit=10)
+    assert waiting_runs["ok"] is True
+    waiting_row = next((item for item in waiting_runs["runs"] if item.get("run_id") == run_id), None)
+    assert waiting_row is not None
+    assert waiting_row["request_id"] == waiting_meta["request_id"]
+    assert waiting_row["question"] == "Need your preference."
+
+    resumed = service.resume_run(run_id=run_id, user_response="Use option A", requested_by="ui")
+    assert resumed["ok"] is True
+
+    deadline_done = time.time() + 2.0
+    done = None
+    while time.time() < deadline_done:
+        row = service._store.get_run(run_id=run_id)  # noqa: SLF001
+        if isinstance(row, dict) and row.get("status") in {"done", "failed", "blocked"}:
+            done = row
+            break
+        time.sleep(0.05)
+    assert done is not None
+    assert done["status"] == "done"
+    resumed_events = [
+        event
+        for event in service.metrics().get("recent_events", [])
+        if event.get("type") == "task_agent_event"
+        and isinstance(event.get("payload"), dict)
+        and event["payload"].get("event_type") == "run_resumed"
+    ]
+    assert resumed_events
+    assert resumed_events[-1]["payload"].get("request_id") == waiting_meta["request_id"]
+
+
+def test_task_state_and_seen_helpers(configured_central):
+    service = CentralService()
+    upsert = service.upsert_task_state(
+        task_id="profile_a",
+        state_key="cursor",
+        value={"page": 3},
+        updated_by="test",
+    )
+    assert upsert["ok"] is True
+    state = service.get_task_state(task_id="profile_a", state_key="cursor")
+    assert state["ok"] is True
+    assert state["value"]["page"] == 3
+
+    seen0 = service.has_task_item_seen(task_id="profile_a", provider="indeed", item_key="job_1")
+    assert seen0["ok"] is True
+    assert seen0["seen"] is False
+    mark = service.mark_task_item_seen(
+        task_id="profile_a",
+        provider="indeed",
+        item_key="job_1",
+        metadata={"title": "SE"},
+    )
+    assert mark["ok"] is True
+    seen1 = service.has_task_item_seen(task_id="profile_a", provider="indeed", item_key="job_1")
+    assert seen1["ok"] is True
+    assert seen1["seen"] is True
+
+
+def test_waiting_runs_expire_to_blocked(configured_central):
+    service = CentralService()
+    trigger = service._store.enqueue_manual_run(profile_id="profile_a", description="expire test")  # noqa: SLF001
+    assert trigger["ok"] is True
+    run_id = str(trigger["run_id"])
+    _ = service._store.claim_next_run()  # noqa: SLF001
+    marked = service._store.mark_waiting_for_user(  # noqa: SLF001
+        run_id=run_id,
+        question="Need reply",
+        requested_by="ui",
+        expires_at="2000-01-01T00:00:00+00:00",
+    )
+    assert marked["ok"] is True
+
+    expiry = service._expire_waiting_runs()  # noqa: SLF001
+    assert expiry["ok"] is True
+    assert run_id in expiry["expired_run_ids"]
+
+    row = service._store.get_run(run_id=run_id)  # noqa: SLF001
+    assert row is not None
+    assert row["status"] == "blocked"

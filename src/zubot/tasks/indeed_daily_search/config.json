@@ -1,0 +1,6 @@
+{
+  "name": "Indeed Daily Search Routine",
+  "notes": "Task-local config scaffold. Script logic remains in entrypoint_path.",
+  "job_sources": ["indeed"],
+  "output_table": "task_seen_items"
+}

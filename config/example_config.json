@@ -56,7 +56,8 @@
         "queue_warning_threshold": 25,
         "running_age_warning_sec": 1800,
         "db_queue_busy_timeout_ms": 5000,
-        "db_queue_default_max_rows": 500
+        "db_queue_default_max_rows": 500,
+        "waiting_for_user_timeout_sec": 86400
     },
     "filesystem": {
         "default_access": "deny",
@@ -120,7 +121,11 @@
                 "api_key": "XXXXXX",
                 "site": "https://hasdata.com/",
                 "base_url": "https://api.hasdata.com",
-                "timeout_sec": 15
+                "timeout_sec": 15,
+                "queue_min_interval_sec": 0.0,
+                "queue_jitter_sec": 0.0,
+                "queue_max_retries": 1,
+                "queue_retry_backoff_sec": 1.0
             },
             "google_oauth": {
                 "credentials_path": "personal_notes/google_auth_kjha2025_credentials.json",
@@ -142,13 +147,20 @@
             }
         }
     },
-    "pre_defined_tasks": {
+    "task_profiles": {
         "tasks": {
             "indeed_daily_search": {
                 "name": "Indeed Daily Search Routine",
-                "entrypoint_path": "src/zubot/predefined_tasks/indeed_daily_search.py",
+                "kind": "script",
+                "entrypoint_path": "src/zubot/tasks/indeed_daily_search/task.py",
+                "resources_path": "src/zubot/tasks/indeed_daily_search",
+                "queue_group": "default",
                 "args": [],
-                "timeout_sec": 1800
+                "timeout_sec": 1800,
+                "retry_policy": {
+                    "max_attempts": 1,
+                    "backoff_sec": 0.0
+                }
             }
         }
     }

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import shutil
+import time as pytime
 from datetime import time as dt_time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -247,12 +248,26 @@ class TaskSchedulerStore:
         return self._db_path
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._db_path)
+        conn = sqlite3.connect(self._db_path, timeout=5.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
-        conn.execute("PRAGMA journal_mode = WAL;")
         conn.execute("PRAGMA busy_timeout = 5000;")
         return conn
+
+    def _enable_wal_mode(self, conn: sqlite3.Connection) -> None:
+        """Best-effort WAL enablement without failing under transient lock pressure."""
+        attempts = 0
+        while attempts < 3:
+            try:
+                conn.execute("PRAGMA journal_mode = WAL;")
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower():
+                    raise
+                attempts += 1
+                if attempts >= 3:
+                    return
+                pytime.sleep(0.05)
 
     def _maybe_migrate_from_legacy_sqlite3(self) -> None:
         if self._db_path.exists():
@@ -265,6 +280,7 @@ class TaskSchedulerStore:
 
     def ensure_schema(self) -> None:
         with self._connect() as conn:
+            self._enable_wal_mode(conn)
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS defined_tasks (
@@ -308,7 +324,7 @@ class TaskSchedulerStore:
                     run_id TEXT PRIMARY KEY,
                     schedule_id TEXT,
                     profile_id TEXT NOT NULL,
-                    status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'done', 'failed', 'blocked')),
+                    status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'waiting_for_user', 'done', 'failed', 'blocked')),
                     queued_at TEXT NOT NULL,
                     started_at TEXT,
                     finished_at TEXT,
@@ -347,8 +363,84 @@ class TaskSchedulerStore:
                     ON defined_task_run_history(status, finished_at);
                 CREATE INDEX IF NOT EXISTS idx_defined_task_run_history_profile_finished_at
                     ON defined_task_run_history(profile_id, finished_at);
+
+                CREATE TABLE IF NOT EXISTS task_state_kv (
+                    task_id TEXT NOT NULL,
+                    state_key TEXT NOT NULL,
+                    value_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    updated_by TEXT,
+                    PRIMARY KEY(task_id, state_key)
+                );
+
+                CREATE TABLE IF NOT EXISTS task_seen_items (
+                    task_id TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    item_key TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    first_seen_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    seen_count INTEGER NOT NULL DEFAULT 1,
+                    PRIMARY KEY(task_id, provider, item_key)
+                );
+
+                CREATE TABLE IF NOT EXISTS job_applications (
+                    job_key TEXT PRIMARY KEY,
+                    company TEXT NOT NULL,
+                    job_title TEXT NOT NULL,
+                    location TEXT NOT NULL,
+                    date_found TEXT NOT NULL,
+                    date_applied TEXT,
+                    status TEXT NOT NULL CHECK (status IN ('Found', 'Applied', 'Interviewing', 'Offer', 'Rejected', 'Closed')),
+                    pay_range TEXT,
+                    job_link TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    cover_letter TEXT,
+                    notes TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_job_applications_date_found
+                    ON job_applications(date_found);
+                CREATE INDEX IF NOT EXISTS idx_job_applications_status
+                    ON job_applications(status);
                 """
             )
+            run_table_sql = conn.execute(
+                """
+                SELECT sql
+                FROM sqlite_master
+                WHERE type = 'table' AND name = 'defined_task_runs';
+                """
+            ).fetchone()
+            run_table_sql_text = str(run_table_sql["sql"] or "").lower() if run_table_sql else ""
+            if "waiting_for_user" not in run_table_sql_text:
+                conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS defined_task_runs_new (
+                        run_id TEXT PRIMARY KEY,
+                        schedule_id TEXT,
+                        profile_id TEXT NOT NULL,
+                        status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'waiting_for_user', 'done', 'failed', 'blocked')),
+                        queued_at TEXT NOT NULL,
+                        started_at TEXT,
+                        finished_at TEXT,
+                        summary TEXT,
+                        error TEXT,
+                        payload_json TEXT NOT NULL,
+                        FOREIGN KEY(schedule_id) REFERENCES defined_tasks(schedule_id) ON DELETE SET NULL
+                    );
+                    INSERT INTO defined_task_runs_new(run_id, schedule_id, profile_id, status, queued_at, started_at, finished_at, summary, error, payload_json)
+                    SELECT run_id, schedule_id, profile_id, status, queued_at, started_at, finished_at, summary, error, payload_json
+                    FROM defined_task_runs;
+                    DROP TABLE defined_task_runs;
+                    ALTER TABLE defined_task_runs_new RENAME TO defined_task_runs;
+                    CREATE INDEX IF NOT EXISTS idx_defined_task_runs_status_queued_at
+                        ON defined_task_runs(status, queued_at);
+                    CREATE INDEX IF NOT EXISTS idx_defined_task_runs_profile_queued_at
+                        ON defined_task_runs(profile_id, queued_at);
+                    """
+                )
             # One-time compatibility migration from older schema where weekdays
             # were attached to run_time rows instead of schedule rows.
             old_days_table = conn.execute(
@@ -919,6 +1011,128 @@ class TaskSchedulerStore:
 
         return {"ok": True, "run_id": run_id, "status": status}
 
+    def mark_waiting_for_user(
+        self,
+        *,
+        run_id: str,
+        question: str | None = None,
+        wait_context: dict[str, Any] | None = None,
+        requested_by: str = "main_agent",
+        expires_at: str | None = None,
+    ) -> dict[str, Any]:
+        clean_run_id = str(run_id or "").strip()
+        if not clean_run_id:
+            return {"ok": False, "error": "run_id is required."}
+        now_iso = _iso(_utc_now())
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT run_id, status, payload_json
+                FROM defined_task_runs
+                WHERE run_id = ?;
+                """,
+                (clean_run_id,),
+            ).fetchone()
+            if row is None:
+                return {"ok": False, "error": "run not found"}
+            payload = json.loads(row["payload_json"]) if row["payload_json"] else {}
+            payload_dict = payload if isinstance(payload, dict) else {}
+            waiting = {
+                "request_id": f"wait_{uuid4().hex[:10]}",
+                "question": str(question or "").strip() or None,
+                "context": wait_context if isinstance(wait_context, dict) else {},
+                "requested_by": str(requested_by or "main_agent").strip() or "main_agent",
+                "waiting_since": now_iso,
+                "expires_at": str(expires_at or "").strip() or None,
+                "state": "waiting_for_user",
+            }
+            payload_dict["waiting"] = waiting
+            conn.execute(
+                """
+                UPDATE defined_task_runs
+                SET status = 'waiting_for_user',
+                    summary = ?,
+                    error = NULL,
+                    payload_json = ?
+                WHERE run_id = ?;
+                """,
+                (waiting.get("question"), json.dumps(payload_dict), clean_run_id),
+            )
+        return {
+            "ok": True,
+            "run_id": clean_run_id,
+            "status": "waiting_for_user",
+            "waiting": waiting,
+        }
+
+    def resume_waiting_run(
+        self,
+        *,
+        run_id: str,
+        user_response: str,
+        requested_by: str = "main_agent",
+    ) -> dict[str, Any]:
+        clean_run_id = str(run_id or "").strip()
+        clean_response = str(user_response or "").strip()
+        if not clean_run_id:
+            return {"ok": False, "error": "run_id is required."}
+        if not clean_response:
+            return {"ok": False, "error": "user_response is required."}
+        now_iso = _iso(_utc_now())
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT run_id, status, payload_json
+                FROM defined_task_runs
+                WHERE run_id = ?;
+                """,
+                (clean_run_id,),
+            ).fetchone()
+            if row is None:
+                return {"ok": False, "error": "run not found"}
+            if str(row["status"] or "") != "waiting_for_user":
+                return {"ok": False, "error": "run is not waiting for user input"}
+            payload = json.loads(row["payload_json"]) if row["payload_json"] else {}
+            payload_dict = payload if isinstance(payload, dict) else {}
+            waiting = payload_dict.get("waiting") if isinstance(payload_dict.get("waiting"), dict) else {}
+            history = payload_dict.get("resume_history")
+            resume_history = history if isinstance(history, list) else []
+            resume_history.append(
+                {
+                    "response": clean_response,
+                    "requested_by": str(requested_by or "main_agent").strip() or "main_agent",
+                    "at": now_iso,
+                }
+            )
+            payload_dict["resume_history"] = resume_history[-20:]
+            payload_dict["resume_response"] = clean_response
+            if isinstance(payload_dict.get("instructions"), str):
+                payload_dict["instructions"] = f"{payload_dict['instructions']}\n\n[User Response]\n{clean_response}"
+            waiting["resumed_at"] = now_iso
+            waiting["resumed_by"] = str(requested_by or "main_agent").strip() or "main_agent"
+            waiting["resume_requested_at"] = now_iso
+            waiting["state"] = "resumed"
+            payload_dict["waiting"] = waiting
+            conn.execute(
+                """
+                UPDATE defined_task_runs
+                SET status = 'queued',
+                    queued_at = ?,
+                    payload_json = ?,
+                    summary = NULL,
+                    error = NULL
+                WHERE run_id = ?;
+                """,
+                (now_iso, json.dumps(payload_dict), clean_run_id),
+            )
+        return {
+            "ok": True,
+            "run_id": clean_run_id,
+            "status": "queued",
+            "resumed": True,
+            "waiting": waiting,
+        }
+
     def cancel_run(self, *, run_id: str, reason: str = "killed_by_user") -> dict[str, Any]:
         clean_run_id = str(run_id or "").strip()
         if not clean_run_id:
@@ -936,7 +1150,7 @@ class TaskSchedulerStore:
                 "status": status,
                 "already_terminal": True,
             }
-        if status == "queued":
+        if status in {"queued", "waiting_for_user"}:
             out = self.complete_run(run_id=clean_run_id, status="blocked", summary=None, error=reason)
             if out.get("ok"):
                 out["already_terminal"] = False
@@ -987,7 +1201,14 @@ class TaskSchedulerStore:
         with self._connect() as conn:
             queued = conn.execute("SELECT COUNT(*) AS c FROM defined_task_runs WHERE status = 'queued';").fetchone()["c"]
             running = conn.execute("SELECT COUNT(*) AS c FROM defined_task_runs WHERE status = 'running';").fetchone()["c"]
-        return {"queued_count": int(queued), "running_count": int(running)}
+            waiting = conn.execute(
+                "SELECT COUNT(*) AS c FROM defined_task_runs WHERE status = 'waiting_for_user';"
+            ).fetchone()["c"]
+        return {
+            "queued_count": int(queued),
+            "running_count": int(running),
+            "waiting_count": int(waiting),
+        }
 
     def runtime_metrics(self, *, now: datetime | None = None) -> dict[str, Any]:
         now_dt = now.astimezone(UTC) if isinstance(now, datetime) else _utc_now()
@@ -998,18 +1219,26 @@ class TaskSchedulerStore:
             oldest_running = conn.execute(
                 "SELECT MIN(started_at) AS t FROM defined_task_runs WHERE status = 'running';"
             ).fetchone()["t"]
+            oldest_waiting = conn.execute(
+                "SELECT MIN(started_at) AS t FROM defined_task_runs WHERE status = 'waiting_for_user';"
+            ).fetchone()["t"]
 
         queued_age = None
         running_age = None
+        waiting_age = None
         queued_dt = _parse_iso(oldest_queued) if isinstance(oldest_queued, str) else None
         running_dt = _parse_iso(oldest_running) if isinstance(oldest_running, str) else None
+        waiting_dt = _parse_iso(oldest_waiting) if isinstance(oldest_waiting, str) else None
         if queued_dt is not None:
             queued_age = max(0.0, (now_dt - queued_dt).total_seconds())
         if running_dt is not None:
             running_age = max(0.0, (now_dt - running_dt).total_seconds())
+        if waiting_dt is not None:
+            waiting_age = max(0.0, (now_dt - waiting_dt).total_seconds())
         return {
             "oldest_queued_age_sec": queued_age,
             "longest_running_age_sec": running_age,
+            "longest_waiting_age_sec": waiting_age,
         }
 
     def list_run_history(self, *, limit: int = 50) -> list[dict[str, Any]]:

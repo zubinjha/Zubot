@@ -21,6 +21,12 @@ def test_list_tools_contains_expected_names():
         "get_week_outlook",
         "list_dir",
         "list_task_runs",
+        "list_waiting_runs",
+        "resume_task_run",
+        "upsert_task_state",
+        "get_task_state",
+        "mark_task_item_seen",
+        "has_task_item_seen",
         "path_exists",
         "query_central_db",
         "read_file",
@@ -177,6 +183,24 @@ def test_enqueue_task_and_kill_task_run_tools(monkeypatch):
         def execute_sql(self, **kwargs):
             return {"ok": True, "rows": [{"ok": 1}], **kwargs}
 
+        def list_waiting_runs(self, *, limit: int = 50):
+            return {"ok": True, "runs": [{"run_id": "run_wait"}], "count": 1, "limit": limit}
+
+        def resume_run(self, *, run_id: str, user_response: str, requested_by: str = "main_agent"):
+            return {"ok": True, "run_id": run_id, "user_response": user_response, "requested_by": requested_by}
+
+        def upsert_task_state(self, *, task_id: str, state_key: str, value: dict, updated_by: str = "task_runtime"):
+            return {"ok": True, "task_id": task_id, "state_key": state_key, "value": value, "updated_by": updated_by}
+
+        def get_task_state(self, *, task_id: str, state_key: str):
+            return {"ok": True, "task_id": task_id, "state_key": state_key, "value": {"cursor": 1}}
+
+        def mark_task_item_seen(self, *, task_id: str, provider: str, item_key: str, metadata: dict | None = None):
+            return {"ok": True, "task_id": task_id, "provider": provider, "item_key": item_key, "metadata": metadata or {}}
+
+        def has_task_item_seen(self, *, task_id: str, provider: str, item_key: str):
+            return {"ok": True, "seen": True, "seen_count": 2}
+
     monkeypatch.setattr("src.zubot.core.tool_registry.get_central_service", lambda: _FakeCentral())
     enq = invoke_tool("enqueue_task", task_id="task_a", description="manual")
     assert enq["ok"] is True
@@ -199,3 +223,32 @@ def test_enqueue_task_and_kill_task_run_tools(monkeypatch):
     sql = invoke_tool("query_central_db", sql="SELECT 1 AS ok;", read_only=True, max_rows=5)
     assert sql["ok"] is True
     assert sql["rows"][0]["ok"] == 1
+
+    waiting = invoke_tool("list_waiting_runs", limit=3)
+    assert waiting["ok"] is True
+    assert waiting["runs"][0]["run_id"] == "run_wait"
+
+    resumed = invoke_tool("resume_task_run", run_id="run_wait", user_response="continue", requested_by="ui")
+    assert resumed["ok"] is True
+    assert resumed["run_id"] == "run_wait"
+
+    upsert_state = invoke_tool("upsert_task_state", task_id="profile_a", state_key="cursor", value={"page": 2}, updated_by="ui")
+    assert upsert_state["ok"] is True
+    assert upsert_state["value"]["page"] == 2
+
+    get_state = invoke_tool("get_task_state", task_id="profile_a", state_key="cursor")
+    assert get_state["ok"] is True
+    assert get_state["value"]["cursor"] == 1
+
+    mark_seen = invoke_tool(
+        "mark_task_item_seen",
+        task_id="profile_a",
+        provider="indeed",
+        item_key="job_1",
+        metadata={"title": "SE"},
+    )
+    assert mark_seen["ok"] is True
+
+    has_seen = invoke_tool("has_task_item_seen", task_id="profile_a", provider="indeed", item_key="job_1")
+    assert has_seen["ok"] is True
+    assert has_seen["seen"] is True

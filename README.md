@@ -46,7 +46,10 @@ Operations guidance for long-running mode lives in [docs/src/zubot/operations.md
   - session event persistence + daily memory helpers
   - SQLite-backed daily memory events/summaries + day-status + summary-job queue
   - background memory-summary worker (non-blocking queue drain)
-  - predefined task execution support (`pre_defined_tasks` config + script entrypoints)
+  - task profile execution support (`task_profiles` config + script/agentic/interactive wrapper kinds)
+    - waiting-for-user pause/resume lifecycle for interactive runs
+    - automatic waiting-run timeout handling
+  - provider-level serialized queue support for rate-limited integrations (for example HasData)
 - Daemon-first runtime facade:
   - shared runtime service in `src/zubot/runtime/service.py`
   - daemon entrypoint in `src/zubot/daemon/main.py`
@@ -55,12 +58,18 @@ Operations guidance for long-running mode lives in [docs/src/zubot/operations.md
   - `context/TASK_SOUL.md`
 - Automated tests in `tests/` with `pytest`.
 
-## Predefined Tasks
+## Task Profiles
 - Configure executable scheduled tasks in `config/config.json` under:
-  - `pre_defined_tasks.tasks`
-- Script entrypoints should be repository-relative paths (for example `src/zubot/predefined_tasks/indeed_daily_search.py`).
+  - `task_profiles.tasks`
+- Backward compatibility:
+  - legacy `pre_defined_tasks.tasks` still loads if `task_profiles.tasks` is absent.
+- Script entrypoints should be repository-relative paths (for example `src/zubot/tasks/indeed_daily_search/task.py`).
+- Standardized task package layout is supported under `src/zubot/tasks/<task_id>/`:
+  - `task.py`
+  - `config.json`
+  - optional `prompts/`, `assets/`, `state/`
 - Scheduler rows live in SQLite (`defined_tasks` / `defined_tasks_run_times`) and reference `profile_id == task_id`.
-- Central service resolves `task_id -> pre_defined_tasks.tasks.<task_id>` at execution time.
+- Central service resolves `task_id -> task_profiles.tasks.<task_id>` at execution time.
 
 ## Agent Resume Checklist
 For new agents or fresh sessions, use this order:
@@ -149,22 +158,30 @@ Choose one of these startup modes based on what you want to run.
   - `POST /api/central/schedules`
   - `DELETE /api/central/schedules/{schedule_id}`
   - `GET /api/central/runs`
+  - `GET /api/central/runs/waiting`
   - `GET /api/central/metrics`
   - `POST /api/central/trigger/{task_id}`
   - `POST /api/central/agentic/enqueue`
   - `POST /api/central/runs/{run_id}/kill`
+  - `POST /api/central/runs/{run_id}/resume`
   - `POST /api/central/sql`
+  - `POST /api/central/task-state/upsert`
+  - `POST /api/central/task-state/get`
+  - `POST /api/central/task-seen/mark`
+  - `POST /api/central/task-seen/has`
 - Session reset clears chat working context but preserves persisted daily memory in SQLite.
 - Daily memory is DB-backed in `memory/central/zubot_core.db`:
   - raw events (`daily_memory_events`)
   - summary snapshots (`daily_memory_summaries`)
   - status + queue metadata (`day_memory_status`, `memory_summary_jobs`)
+  - task runtime helper tables (`task_state_kv`, `task_seen_items`, `job_applications`)
 - Daily summaries are queue-driven from full raw-day replay (deduped per day) and processed by background worker.
 - Daily raw memory uses signal-first ingestion (user/main-agent interactions plus task queue/finalization milestones; routine system chatter and tool-call telemetry are excluded).
 - Session JSONL logging is optional (`memory.session_event_logging_enabled`) and disabled by default.
 - LLM-routed queries run through a registry-backed tool-call loop (tool schema -> tool execution -> final response).
 - Tool registry includes task queue orchestration tools:
-  - `enqueue_task`, `enqueue_agentic_task`, `kill_task_run`, `list_task_runs`, `get_task_agent_checkin`, `query_central_db`
+  - `enqueue_task`, `enqueue_agentic_task`, `kill_task_run`, `list_task_runs`, `list_waiting_runs`, `resume_task_run`, `get_task_agent_checkin`, `query_central_db`
+  - `upsert_task_state`, `get_task_state`, `mark_task_item_seen`, `has_task_item_seen`
 - UI now includes:
   - chat-style message timeline
   - Chat/Scheduled Tasks tab split in the left panel

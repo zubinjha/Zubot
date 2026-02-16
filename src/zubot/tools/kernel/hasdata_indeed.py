@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from src.zubot.core.config_loader import load_config
+from src.zubot.core.provider_queue import execute_provider_call, provider_queue_stats
 
 DEFAULT_HASDATA_BASE_URL = "https://api.hasdata.com"
 DEFAULT_INDEED_DOMAIN = "www.indeed.com"
@@ -39,6 +41,18 @@ def _hasdata_settings() -> dict[str, Any]:
         "base_url": str(config.get("base_url", DEFAULT_HASDATA_BASE_URL)).rstrip("/"),
         "api_key": api_key if isinstance(api_key, str) else None,
         "timeout_sec": int(config.get("timeout_sec", 15)),
+        "queue_min_interval_sec": float(config.get("queue_min_interval_sec", 0.0))
+        if isinstance(config.get("queue_min_interval_sec", 0.0), (int, float))
+        else 0.0,
+        "queue_max_retries": int(config.get("queue_max_retries", 1))
+        if isinstance(config.get("queue_max_retries", 1), int)
+        else 1,
+        "queue_retry_backoff_sec": float(config.get("queue_retry_backoff_sec", 1.0))
+        if isinstance(config.get("queue_retry_backoff_sec", 1.0), (int, float))
+        else 1.0,
+        "queue_jitter_sec": float(config.get("queue_jitter_sec", 0.0))
+        if isinstance(config.get("queue_jitter_sec", 0.0), (int, float))
+        else 0.0,
     }
 
 
@@ -59,6 +73,15 @@ def _missing_key_payload(source: str) -> dict[str, Any]:
         "source": source,
         "error": "Missing `tool_profiles.user_specific.has_data.api_key` in config.",
     }
+
+
+def _is_retryable_hasdata_error(exc: Exception) -> bool:
+    if isinstance(exc, HTTPError):
+        code = int(getattr(exc, "code", 0) or 0)
+        return code == 429 or 500 <= code < 600
+    if isinstance(exc, URLError):
+        return True
+    return False
 
 
 def get_indeed_jobs(
@@ -107,14 +130,24 @@ def get_indeed_jobs(
         "x-api-key": settings["api_key"],
     }
 
-    try:
-        payload = _fetch_json(url, headers=headers, timeout_sec=settings["timeout_sec"])
-    except Exception as exc:
+    queued = execute_provider_call(
+        group="hasdata",
+        fn=lambda: _fetch_json(url, headers=headers, timeout_sec=settings["timeout_sec"]),
+        min_interval_sec=settings["queue_min_interval_sec"],
+        jitter_sec=settings["queue_jitter_sec"],
+        max_retries=settings["queue_max_retries"],
+        retry_backoff_sec=settings["queue_retry_backoff_sec"],
+        is_retryable=_is_retryable_hasdata_error,
+    )
+    if not queued.get("ok"):
+        exc = queued.get("error")
         return {
             "ok": False,
             "provider": "hasdata",
             "source": "hasdata_indeed_listing_error",
             "error": str(exc),
+            "queue": queued.get("queue"),
+            "queue_stats": provider_queue_stats("hasdata"),
             "request": {
                 "keyword": keyword,
                 "location": location,
@@ -122,6 +155,7 @@ def get_indeed_jobs(
                 "domain": DEFAULT_INDEED_DOMAIN,
             },
         }
+    payload = queued.get("value") if isinstance(queued.get("value"), dict) else {}
 
     request_meta = payload.get("requestMetadata") if isinstance(payload.get("requestMetadata"), dict) else {}
     search_info = payload.get("searchInformation") if isinstance(payload.get("searchInformation"), dict) else {}
@@ -144,6 +178,8 @@ def get_indeed_jobs(
         "jobs": jobs,
         "jobs_count": len(jobs),
         "pagination": pagination,
+        "queue": queued.get("queue"),
+        "queue_stats": provider_queue_stats("hasdata"),
         "error": None,
     }
 
@@ -171,16 +207,27 @@ def get_indeed_job_detail(*, url: str) -> dict[str, Any]:
         "x-api-key": settings["api_key"],
     }
 
-    try:
-        payload = _fetch_json(request_url, headers=headers, timeout_sec=settings["timeout_sec"])
-    except Exception as exc:
+    queued = execute_provider_call(
+        group="hasdata",
+        fn=lambda: _fetch_json(request_url, headers=headers, timeout_sec=settings["timeout_sec"]),
+        min_interval_sec=settings["queue_min_interval_sec"],
+        jitter_sec=settings["queue_jitter_sec"],
+        max_retries=settings["queue_max_retries"],
+        retry_backoff_sec=settings["queue_retry_backoff_sec"],
+        is_retryable=_is_retryable_hasdata_error,
+    )
+    if not queued.get("ok"):
+        exc = queued.get("error")
         return {
             "ok": False,
             "provider": "hasdata",
             "source": "hasdata_indeed_job_error",
             "error": str(exc),
+            "queue": queued.get("queue"),
+            "queue_stats": provider_queue_stats("hasdata"),
             "request": {"url": job_url},
         }
+    payload = queued.get("value") if isinstance(queued.get("value"), dict) else {}
 
     request_meta = payload.get("requestMetadata") if isinstance(payload.get("requestMetadata"), dict) else {}
     job = payload.get("job") if isinstance(payload.get("job"), dict) else {}
@@ -192,5 +239,7 @@ def get_indeed_job_detail(*, url: str) -> dict[str, Any]:
         "request": {"url": job_url},
         "request_metadata": request_meta,
         "job": job,
+        "queue": queued.get("queue"),
+        "queue_stats": provider_queue_stats("hasdata"),
         "error": None,
     }

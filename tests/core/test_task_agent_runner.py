@@ -161,3 +161,94 @@ def test_run_profile_agentic_task_uses_sub_agent_runner():
     assert out["ok"] is True
     assert out["status"] == "done"
     assert out["summary"] == "Research complete."
+
+
+def test_run_profile_agentic_waiting_for_user_maps_status():
+    class _FakeSubRunner:
+        def run_task(self, task, **kwargs):  # noqa: ANN001
+            _ = task
+            _ = kwargs
+            return {
+                "ok": True,
+                "result": {
+                    "status": "needs_user_input",
+                    "summary": "Need your choice.",
+                    "error": None,
+                    "wait_context": {"choices": ["a", "b"]},
+                    "wait_timeout_sec": 30,
+                },
+            }
+
+    runner = TaskAgentRunner(runner=_FakeSubRunner())
+    out = runner.run_profile(
+        profile_id="agentic_task",
+        payload={
+            "run_kind": "agentic",
+            "task_name": "Research Task",
+            "instructions": "Research XYZ",
+        },
+    )
+    assert out["ok"] is True
+    assert out["status"] == "waiting_for_user"
+    assert out["question"] == "Need your choice."
+    assert out["wait_context"]["choices"] == ["a", "b"]
+    assert out["wait_timeout_sec"] == 30
+
+
+def test_run_profile_script_injects_task_local_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    entrypoint = tmp_path / "scripts" / "task.py"
+    entrypoint.parent.mkdir(parents=True, exist_ok=True)
+    entrypoint.write_text("print('ok')\n", encoding="utf-8")
+
+    resources_dir = tmp_path / "tasks" / "script_task"
+    resources_dir.mkdir(parents=True, exist_ok=True)
+    (resources_dir / "config.json").write_text(json.dumps({"cursor": 3}), encoding="utf-8")
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "task_profiles": {
+                    "tasks": {
+                        "script_task": {
+                            "name": "Script Task",
+                            "kind": "script",
+                            "entrypoint_path": "scripts/task.py",
+                            "resources_path": "tasks/script_task",
+                            "args": [],
+                            "timeout_sec": 60,
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ZUBOT_CONFIG_PATH", str(cfg_path))
+    monkeypatch.setattr("src.zubot.core.task_agent_runner._repo_root", lambda: tmp_path)
+    clear_config_cache()
+
+    captured: dict[str, dict] = {}
+
+    class _FakePopen:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            _ = args
+            captured["env"] = kwargs.get("env") or {}
+            self.returncode = 0
+
+        def poll(self):
+            return self.returncode
+
+        def communicate(self):
+            return ("ok\n", "")
+
+    monkeypatch.setattr("src.zubot.core.task_agent_runner.subprocess.Popen", _FakePopen)
+
+    runner = TaskAgentRunner()
+    out = runner.run_profile(profile_id="script_task", payload={"trigger": "manual"})
+    assert out["ok"] is True
+    env = captured["env"]
+    assert json.loads(env["ZUBOT_TASK_LOCAL_CONFIG_JSON"]) == {"cursor": 3}
+    assert json.loads(env["ZUBOT_TASK_PROFILE_JSON"])["resources_path"] == "tasks/script_task"
+    assert env["ZUBOT_TASK_RESOURCES_DIR"] == str(resources_dir.resolve())
+    clear_config_cache()

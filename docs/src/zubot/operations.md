@@ -10,6 +10,7 @@ This runbook covers practical operation of Zubot for long-running local usage.
    - `central_service.enabled = true`
    - `central_service.heartbeat_poll_interval_sec` (default `3600`) and `task_runner_concurrency` (current default `3`) set to desired values
    - `central_service.db_queue_busy_timeout_ms` and `central_service.db_queue_default_max_rows` set for desired SQL queue behavior
+   - `central_service.waiting_for_user_timeout_sec` set for interactive run expiry policy
 3. Start daemon (runtime-first):
    - `python -m src.zubot.daemon.main`
    - optional host/port override: `python -m src.zubot.daemon.main --host 127.0.0.1 --port 8000`
@@ -50,14 +51,17 @@ Because v1 is single-process, "rolling restart" means controlled brief downtime:
 Use `GET /api/central/metrics` and monitor:
 - `runtime.queued_count`
 - `runtime.running_count`
+- `runtime.waiting_count`
 - `runtime.task_slot_busy_count`
 - `runtime.task_slot_free_count`
 - `runtime.task_slot_disabled_count`
 - `runtime.oldest_queued_age_sec`
 - `runtime.longest_running_age_sec`
+- `runtime.longest_waiting_age_sec`
 - `runtime.warnings`
 - `runtime.active_runs`
 - `runtime.queued_runs_preview`
+- `runtime.waiting_runs_preview`
 
 Warning semantics:
 - `queue_depth_high`: queued runs crossed configured threshold.
@@ -67,7 +71,37 @@ Operational control:
 - enqueue manual task run: `POST /api/central/trigger/{task_id}`
 - enqueue agentic background task: `POST /api/central/agentic/enqueue`
 - kill queued/running run: `POST /api/central/runs/{run_id}/kill`
+- inspect waiting runs: `GET /api/central/runs/waiting`
+- resume waiting run: `POST /api/central/runs/{run_id}/resume`
 - run serialized SQL query: `POST /api/central/sql` (read-only default)
+- atomic task state:
+  - `POST /api/central/task-state/upsert`
+  - `POST /api/central/task-state/get`
+- seen-item idempotency:
+  - `POST /api/central/task-seen/mark`
+  - `POST /api/central/task-seen/has`
+
+## Provider Queue Monitoring (HasData)
+
+HasData-backed tools are serialized through provider queue group `hasdata`.
+
+Observe from tool responses:
+- `queue.group`
+- `queue.wait_sec`
+- `queue.attempt`
+- `queue_stats.pending`
+- `queue_stats.calls_total`
+- `queue_stats.calls_success`
+- `queue_stats.calls_failed`
+- `queue_stats.wait_sec_last`
+- `queue_stats.wait_sec_max`
+- `queue_stats.wait_sec_avg`
+
+Tuning knobs (`tool_profiles.user_specific.has_data`):
+- `queue_min_interval_sec`
+- `queue_jitter_sec`
+- `queue_max_retries`
+- `queue_retry_backoff_sec`
 
 ## Retention and Pruning
 

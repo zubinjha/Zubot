@@ -94,6 +94,16 @@ class ControlPanel:
     def kill_run(self, *, run_id: str, requested_by: str = "main_agent") -> dict[str, Any]:
         return get_central_service().kill_run(run_id=run_id, requested_by=requested_by)
 
+    def list_waiting_runs(self, *, limit: int = 50) -> dict[str, Any]:
+        return get_central_service().list_waiting_runs(limit=limit)
+
+    def resume_run(self, *, run_id: str, user_response: str, requested_by: str = "main_agent") -> dict[str, Any]:
+        return get_central_service().resume_run(
+            run_id=run_id,
+            user_response=user_response,
+            requested_by=requested_by,
+        )
+
     def execute_sql(
         self,
         *,
@@ -111,6 +121,42 @@ class ControlPanel:
             max_rows=max_rows,
         )
 
+    def upsert_task_state(
+        self,
+        *,
+        task_id: str,
+        state_key: str,
+        value: dict[str, Any],
+        updated_by: str = "task_runtime",
+    ) -> dict[str, Any]:
+        return get_central_service().upsert_task_state(
+            task_id=task_id,
+            state_key=state_key,
+            value=value,
+            updated_by=updated_by,
+        )
+
+    def get_task_state(self, *, task_id: str, state_key: str) -> dict[str, Any]:
+        return get_central_service().get_task_state(task_id=task_id, state_key=state_key)
+
+    def mark_task_item_seen(
+        self,
+        *,
+        task_id: str,
+        provider: str,
+        item_key: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return get_central_service().mark_task_item_seen(
+            task_id=task_id,
+            provider=provider,
+            item_key=item_key,
+            metadata=metadata,
+        )
+
+    def has_task_item_seen(self, *, task_id: str, provider: str, item_key: str) -> dict[str, Any]:
+        return get_central_service().has_task_item_seen(task_id=task_id, provider=provider, item_key=item_key)
+
 
 _CONTROL_PANEL: ControlPanel | None = None
 
@@ -120,4 +166,3 @@ def get_control_panel() -> ControlPanel:
     if _CONTROL_PANEL is None:
         _CONTROL_PANEL = ControlPanel()
     return _CONTROL_PANEL
-

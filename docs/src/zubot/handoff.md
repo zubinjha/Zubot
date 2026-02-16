@@ -22,15 +22,17 @@ This file is the fastest way for a new agent to resume productive work.
     - `user`
     - `main_agent`
   - central task lifecycle milestones:
-    - `task_agent_event` with `run_queued`, `run_finished`, `run_failed`, `run_blocked`
+    - `task_agent_event` with `run_queued`, `run_finished`, `run_failed`, `run_blocked`, `run_waiting`, `run_resumed`
 - Do not persist internal/system chatter:
   - task-agent internal chatter
   - tool telemetry
   - routine runtime/system events
 
 ## 4) Central Scheduler Model
-- Configured predefined task scripts live under:
-  - `pre_defined_tasks.tasks`
+- Configured task profiles live under:
+  - `task_profiles.tasks`
+- Backward compatibility:
+  - `pre_defined_tasks.tasks` still loads when `task_profiles` is absent
 - Scheduled rows live in DB tables:
   - `defined_tasks`
   - `defined_tasks_run_times`
@@ -38,6 +40,9 @@ This file is the fastest way for a new agent to resume productive work.
 - Run queue/history:
   - `defined_task_runs`
   - `defined_task_run_history`
+  - `task_state_kv`
+  - `task_seen_items`
+  - `job_applications`
 
 ## 5) Scheduled Tasks UI
 - Top tabs: Chat / Scheduled Tasks.
