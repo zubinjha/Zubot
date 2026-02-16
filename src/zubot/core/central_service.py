@@ -1248,6 +1248,7 @@ class CentralService:
         enabled: bool,
         mode: str,
         execution_order: int,
+        misfire_policy: str = "queue_latest",
         run_frequency_minutes: int | None = None,
         timezone: str | None = None,
         run_times: list[str] | None = None,
@@ -1269,6 +1270,9 @@ class CentralService:
             mode_value = "frequency"
         if mode_value not in {"frequency", "calendar"}:
             return {"ok": False, "error": "mode must be `frequency` or `calendar`."}
+        policy_value = str(misfire_policy or "queue_latest").strip().lower()
+        if policy_value not in {"queue_all", "queue_latest", "skip"}:
+            return {"ok": False, "error": "misfire_policy must be `queue_all`, `queue_latest`, or `skip`."}
 
         payload: dict[str, Any] = {
             "schedule_id": clean_schedule_id,
@@ -1276,6 +1280,7 @@ class CentralService:
             "enabled": bool(enabled),
             "mode": mode_value,
             "execution_order": int(execution_order) if execution_order >= 0 else 100,
+            "misfire_policy": policy_value,
         }
 
         if mode_value == "frequency":
@@ -1383,6 +1388,12 @@ class CentralService:
         settings = self._refresh_settings()
         counts = self._store.runtime_counts()
         metrics = self._store.runtime_metrics()
+        heartbeat_state_out = self._store.heartbeat_state()
+        heartbeat_state = (
+            heartbeat_state_out.get("state")
+            if isinstance(heartbeat_state_out, dict) and isinstance(heartbeat_state_out.get("state"), dict)
+            else {}
+        )
         with self._lock:
             running = self._loop_thread is not None and self._loop_thread.is_alive()
             active = len(self._active_threads)
@@ -1434,6 +1445,7 @@ class CentralService:
                 "task_slot_disabled_count": disabled_slots,
                 "task_event_buffer_count": event_buffer_count,
                 **metrics,
+                "heartbeat": heartbeat_state,
                 "warnings": warnings,
                 "active_runs": active_runs,
                 "queued_runs_preview": queued_preview,

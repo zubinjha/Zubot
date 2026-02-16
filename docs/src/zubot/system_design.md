@@ -47,6 +47,14 @@ This document captures the conceptual architecture of Zubot at the system level.
 ### Task-Agent Queue
 - Backed by SQLite (`memory/central/zubot_core.db`).
 - Primary tables: `task_profiles`, `defined_tasks`, `defined_tasks_run_times`, `defined_task_runs`, `defined_task_run_history`.
+- Scheduler cursor model:
+  - `defined_tasks.next_run_at` drives due detection
+  - `last_planned_run_at` tracks last processed fire cursor
+  - `misfire_policy` controls backlog handling (`queue_all` / `queue_latest` / `skip`)
+- Strict no-overlap for same task profile:
+  - heartbeat will not enqueue a new run for a profile if queued/running/waiting run already exists
+- `defined_task_runs.planned_fire_at` provides fire-time dedupe/audit key.
+- `scheduler_runtime_state` tracks last heartbeat run metadata.
 - Task runtime helper tables: `task_state_kv`, `task_seen_items`, `job_applications`.
 - Supports frequency and wall-clock schedule modes.
 - Run payloads support:

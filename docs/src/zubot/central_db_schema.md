@@ -23,7 +23,10 @@ Source modules:
 - `enabled` INTEGER NOT NULL
 - `mode` TEXT NOT NULL (`frequency`/`calendar`)
 - `execution_order` INTEGER NOT NULL
+- `misfire_policy` TEXT NOT NULL (`queue_all`/`queue_latest`/`skip`)
 - `run_frequency_minutes` INTEGER
+- `next_run_at` TEXT
+- `last_planned_run_at` TEXT
 - `last_scheduled_fire_time` TEXT
 - `last_run_at` TEXT
 - `last_successful_run_at` TEXT
@@ -32,6 +35,19 @@ Source modules:
 - `last_error` TEXT
 - `created_at` TEXT NOT NULL
 - `updated_at` TEXT NOT NULL
+
+Conceptual behavior:
+- `next_run_at` is the scheduler cursor (UTC) for this schedule.
+- Heartbeat should claim schedules where `enabled=1 AND next_run_at <= now`.
+- When heartbeat enqueues a run, it should transactionally:
+  - copy `next_run_at` to `last_planned_run_at`
+  - compute/store the next future `next_run_at`
+  - enqueue run row(s) using `planned_fire_at = last_planned_run_at`
+- no-overlap rule: no new queued/running/waiting run should be created for the same task profile while one is active.
+- `misfire_policy` controls missed-fire handling:
+  - `queue_all`: enqueue each missed fire instant
+  - `queue_latest`: enqueue only latest missed fire
+  - `skip`: advance cursor without enqueuing missed fires
 
 ### `defined_tasks_run_times`
 - `run_time_id` INTEGER PK AUTOINCREMENT
@@ -51,7 +67,8 @@ Source modules:
 - `run_id` TEXT PK
 - `schedule_id` TEXT NULL FK -> `defined_tasks(schedule_id)` (`ON DELETE SET NULL`)
 - `profile_id` TEXT NOT NULL
-- `status` TEXT NOT NULL (`queued`/`running`/`done`/`failed`/`blocked`)
+- `status` TEXT NOT NULL (`queued`/`running`/`waiting_for_user`/`done`/`failed`/`blocked`)
+- `planned_fire_at` TEXT
 - `queued_at` TEXT NOT NULL
 - `started_at` TEXT
 - `finished_at` TEXT
@@ -64,6 +81,7 @@ Source modules:
 - `schedule_id` TEXT NULL FK -> `defined_tasks(schedule_id)` (`ON DELETE SET NULL`)
 - `profile_id` TEXT NOT NULL
 - `status` TEXT NOT NULL (`done`/`failed`/`blocked`)
+- `planned_fire_at` TEXT
 - `queued_at` TEXT NOT NULL
 - `started_at` TEXT
 - `finished_at` TEXT
@@ -71,6 +89,15 @@ Source modules:
 - `error` TEXT
 - `payload_json` TEXT NOT NULL
 - `archived_at` TEXT NOT NULL
+
+### `scheduler_runtime_state`
+- `id` TEXT PK (`main`)
+- `last_heartbeat_started_at` TEXT
+- `last_heartbeat_finished_at` TEXT
+- `last_heartbeat_status` TEXT (`ok`/`error`)
+- `last_heartbeat_error` TEXT
+- `last_heartbeat_enqueued_count` INTEGER NOT NULL DEFAULT 0
+- `updated_at` TEXT NOT NULL
 
 ### `day_memory_status`
 - `day` TEXT PK
@@ -109,13 +136,23 @@ Source modules:
 - `session_id` TEXT
 - `text` TEXT NOT NULL
 
+### `chat_messages`
+- `message_id` INTEGER PK AUTOINCREMENT
+- `session_id` TEXT NOT NULL
+- `role` TEXT NOT NULL (`user`/`assistant`)
+- `content` TEXT NOT NULL
+- `route` TEXT
+- `created_at` TEXT NOT NULL
+
 ## Current Indexes
 
 - `idx_defined_tasks_enabled_order(enabled, execution_order, schedule_id)` on `defined_tasks`
+- `idx_defined_tasks_next_run_at(enabled, next_run_at)` on `defined_tasks`
 - `idx_defined_task_run_times_schedule_enabled(schedule_id, enabled, time_of_day)` on `defined_tasks_run_times`
 - `idx_defined_tasks_days_schedule(schedule_id, day_of_week)` on `defined_tasks_days_of_week`
 - `idx_defined_task_runs_status_queued_at(status, queued_at)` on `defined_task_runs`
 - `idx_defined_task_runs_profile_queued_at(profile_id, queued_at)` on `defined_task_runs`
+- `idx_defined_task_runs_schedule_planned_fire(schedule_id, planned_fire_at)` unique partial index on `defined_task_runs`
 - `idx_defined_task_run_history_status_finished_at(status, finished_at)` on `defined_task_run_history`
 - `idx_defined_task_run_history_profile_finished_at(profile_id, finished_at)` on `defined_task_run_history`
 - `idx_day_memory_finalized(is_finalized)`
@@ -123,6 +160,8 @@ Source modules:
 - `idx_memory_summary_jobs_day_active(day)` with partial predicate `status IN ('queued','running')`
 - `idx_daily_memory_events_day_time(day, event_time, event_id)`
 - `idx_daily_memory_events_kind_day(kind, day)`
+- `idx_daily_memory_events_session_event(session_id, event_id)`
+- `idx_chat_messages_session_message(session_id, message_id)`
 
 ## Event Taxonomy (Raw Daily Memory)
 
@@ -146,7 +185,7 @@ Legacy/optional kinds that may exist from older snapshots or custom writers:
 1. If configured DB path ends with `.db` and sibling `.sqlite3` exists, scheduler store copies the legacy DB to the `.db` path once.
 2. Memory-index schema init creates/uses `day_memory_status` in the central DB.
 3. If legacy `memory/memory_index.sqlite3` exists, `day_memory_status` rows are upsert-imported into the central DB.
-4. If legacy `memory/daily/raw/*.md` or `memory/daily/summary/*.md` exists, runtime can import into `daily_memory_events`/`daily_memory_summaries`.
+4. If legacy `memory/daily/raw/*.md` or `memory/daily/summary/*.md` exists, runtime can import into `daily_memory_events`/`daily_memory_summaries` only when `memory.legacy_daily_file_migration_enabled=true`.
 
 ## Sample Queries
 

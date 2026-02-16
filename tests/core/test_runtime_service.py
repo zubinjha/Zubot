@@ -219,6 +219,23 @@ def test_runtime_service_delegates_chat_module(monkeypatch):
         def reset_session_context(session_id: str) -> dict[str, Any]:
             return {"ok": True, "reset": True, "session_id": session_id}
 
+        @staticmethod
+        def restart_session_context(session_id: str, history_limit: int | None = None) -> dict[str, Any]:
+            return {
+                "ok": True,
+                "restarted": True,
+                "session_id": session_id,
+                "history_limit": history_limit,
+            }
+
+        @staticmethod
+        def get_session_history(session_id: str, limit: int = 100) -> dict[str, Any]:
+            return {"ok": True, "session_id": session_id, "limit": limit, "entries": [{"role": "user", "content": "hi"}]}
+
+        @staticmethod
+        def clear_session_history(session_id: str) -> dict[str, Any]:
+            return {"ok": True, "session_id": session_id, "deleted_chat_messages": 1}
+
     monkeypatch.setattr("src.zubot.runtime.service.get_control_panel", lambda: _FakeCentral())
     monkeypatch.setattr("src.zubot.runtime.service.get_memory_summary_worker", lambda: _FakeMemoryWorker())
     monkeypatch.setattr(RuntimeService, "_chat_logic_module", staticmethod(lambda: _FakeChat))
@@ -231,6 +248,16 @@ def test_runtime_service_delegates_chat_module(monkeypatch):
     assert init["initialized"] is True
     reset = svc.reset_session(session_id="s1")
     assert reset["reset"] is True
+    restarted = svc.restart_session_context(session_id="s1", history_limit=42)
+    assert restarted["restarted"] is True
+    assert restarted["history_limit"] == 42
+    hist = svc.session_history(session_id="s1", limit=5)
+    assert hist["ok"] is True
+    assert hist["session_id"] == "s1"
+    assert hist["limit"] == 5
+    cleared = svc.clear_session_history(session_id="s1")
+    assert cleared["ok"] is True
+    assert cleared["session_id"] == "s1"
 
 
 def test_runtime_service_central_schedule_crud(monkeypatch):

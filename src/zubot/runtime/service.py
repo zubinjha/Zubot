@@ -98,9 +98,21 @@ class RuntimeService:
         mod = self._chat_logic_module()
         return mod.reset_session_context(session_id)
 
+    def restart_session_context(self, *, session_id: str = "default", history_limit: int | None = None) -> dict[str, Any]:
+        mod = self._chat_logic_module()
+        return mod.restart_session_context(session_id, history_limit=history_limit)
+
     def session_context_snapshot(self, *, session_id: str = "default") -> dict[str, Any]:
         mod = self._chat_logic_module()
         return mod.get_session_context_snapshot(session_id)
+
+    def session_history(self, *, session_id: str = "default", limit: int = 100) -> dict[str, Any]:
+        mod = self._chat_logic_module()
+        return mod.get_session_history(session_id, limit=limit)
+
+    def clear_session_history(self, *, session_id: str = "default") -> dict[str, Any]:
+        mod = self._chat_logic_module()
+        return mod.clear_session_history(session_id)
 
     def central_status(self) -> dict[str, Any]:
         return get_control_panel().status()
@@ -255,6 +267,7 @@ class RuntimeService:
         enabled: bool,
         mode: str,
         execution_order: int,
+        misfire_policy: str = "queue_latest",
         run_frequency_minutes: int | None = None,
         timezone: str | None = None,
         run_times: list[str] | None = None,
@@ -266,6 +279,7 @@ class RuntimeService:
             enabled=enabled,
             mode=mode,
             execution_order=execution_order,
+            misfire_policy=misfire_policy,
             run_frequency_minutes=run_frequency_minutes,
             timezone=timezone,
             run_times=run_times,

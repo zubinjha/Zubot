@@ -42,7 +42,8 @@ Current implementation:
 - Daily summary generation defaults to deterministic summarization; optional low-model summarization can be enabled via config.
 - Raw/summary timestamps reflect event time.
 - Legacy markdown files under `memory/daily/` are migratable legacy inputs:
-  - runtime can import them into SQLite
+  - runtime imports them into SQLite only when `memory.legacy_daily_file_migration_enabled=true`
+  - default is disabled to avoid implicit repopulation of legacy rows
   - after import they are optional and may be removed
 
 Planned direction:
@@ -57,7 +58,10 @@ Planned direction:
 
 Relevant `memory` config keys:
 - `autoload_summary_days`
+- `session_rehydrate_message_limit`
+- `session_rehydrate_message_limit` controls how many recent persisted chat messages are rehydrated into in-memory session context on startup/init and `Restart Context`
 - `session_event_logging_enabled`
+- `legacy_daily_file_migration_enabled`
 - `session_ttl_minutes`
 - `max_active_sessions`
 - `realtime_summary_turn_threshold`

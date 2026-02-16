@@ -21,4 +21,6 @@ def test_heartbeat_enqueues_due_runs(tmp_path):
     assert out["ok"] is True
     assert out["enqueued"] == 1
     assert isinstance(out["runs"], list)
-
+    hb_state = store.heartbeat_state()
+    assert hb_state["ok"] is True
+    assert hb_state["state"]["last_heartbeat_status"] == "ok"

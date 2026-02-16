@@ -88,10 +88,17 @@ def test_helpers_resolve_default_model_and_location():
             }
         },
         "default_model_alias": "medium",
+        "model_aliases": {
+            "low": "gpt5_nano",
+            "med": "gpt5_mini",
+            "medium": "gpt5_mini",
+            "high": "gpt5",
+        },
         "model_providers": {"openrouter": {"apikey": "x"}},
         "models": {
-            "gpt5_mini": {"alias": "medium", "endpoint": "openai/gpt-5-mini", "provider": "openrouter"},
-            "gpt5": {"alias": "high", "endpoint": "openai/gpt-5"},
+            "gpt5_nano": {"endpoint": "openai/gpt-5-nano", "provider": "openrouter"},
+            "gpt5_mini": {"endpoint": "openai/gpt-5-mini", "provider": "openrouter"},
+            "gpt5": {"endpoint": "openai/gpt-5", "provider": "openrouter"},
         },
     }
 
@@ -101,7 +108,8 @@ def test_helpers_resolve_default_model_and_location():
     default_model_id, default_model = get_default_model(config)
     assert default_model_id == "gpt5_mini"
     assert default_model["endpoint"] == "openai/gpt-5-mini"
-    assert get_model_by_id("gpt5_mini", config)["alias"] == "medium"
+    assert get_model_by_alias("med", config)[0] == "gpt5_mini"
+    assert get_model_by_id("gpt5_mini", config)["endpoint"] == "openai/gpt-5-mini"
     assert get_model_config("gpt5_mini", config)[0] == "gpt5_mini"
     assert get_provider_config("openrouter", config)["apikey"] == "x"
     assert get_max_concurrent_workers(config) == 3
@@ -139,3 +147,19 @@ def test_task_profiles_config_falls_back_to_legacy_key():
     }
     out = get_task_profiles_config(cfg)
     assert "legacy_task" in out["tasks"]
+
+
+def test_model_alias_falls_back_to_legacy_model_field():
+    cfg = {
+        "default_model_alias": "medium",
+        "models": {
+            "gpt5_mini": {
+                "alias": "medium",
+                "provider": "openrouter",
+                "endpoint": "openai/gpt-5-mini",
+            }
+        },
+        "model_providers": {"openrouter": {"apikey": "x"}},
+    }
+    model_id, _model = get_default_model(cfg)
+    assert model_id == "gpt5_mini"

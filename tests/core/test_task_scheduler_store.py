@@ -82,6 +82,51 @@ def test_enqueue_due_runs_and_dedupe(tmp_path):
     assert second["enqueued"] == 0
 
 
+def test_frequency_misfire_queue_latest_enqueues_latest_fire(tmp_path):
+    store = TaskSchedulerStore(db_path=tmp_path / "scheduler.sqlite3")
+    store.sync_schedules(
+        [
+            {
+                "schedule_id": "sched_latest",
+                "profile_id": "profile_latest",
+                "enabled": True,
+                "run_frequency_minutes": 10,
+                "misfire_policy": "queue_latest",
+                "next_run_at": datetime(2026, 2, 16, 0, 0, tzinfo=UTC).isoformat(),
+            }
+        ]
+    )
+    out = store.enqueue_due_runs(now=datetime(2026, 2, 16, 0, 35, tzinfo=UTC))
+    assert out["ok"] is True
+    assert out["enqueued"] == 1
+    runs = store.list_runs(limit=5)
+    assert runs[0]["planned_fire_at"] == datetime(2026, 2, 16, 0, 30, tzinfo=UTC).isoformat()
+    schedules = store.list_schedules()
+    assert schedules[0]["next_run_at"] == datetime(2026, 2, 16, 0, 40, tzinfo=UTC).isoformat()
+
+
+def test_frequency_misfire_skip_advances_cursor_without_enqueue(tmp_path):
+    store = TaskSchedulerStore(db_path=tmp_path / "scheduler.sqlite3")
+    store.sync_schedules(
+        [
+            {
+                "schedule_id": "sched_skip",
+                "profile_id": "profile_skip",
+                "enabled": True,
+                "run_frequency_minutes": 10,
+                "misfire_policy": "skip",
+                "next_run_at": datetime(2026, 2, 16, 0, 0, tzinfo=UTC).isoformat(),
+            }
+        ]
+    )
+    out = store.enqueue_due_runs(now=datetime(2026, 2, 16, 0, 35, tzinfo=UTC))
+    assert out["ok"] is True
+    assert out["enqueued"] == 0
+    schedules = store.list_schedules()
+    assert schedules[0]["last_planned_run_at"] == datetime(2026, 2, 16, 0, 30, tzinfo=UTC).isoformat()
+    assert schedules[0]["next_run_at"] == datetime(2026, 2, 16, 0, 40, tzinfo=UTC).isoformat()
+
+
 def test_claim_and_complete_run_updates_schedule_status(tmp_path):
     store = TaskSchedulerStore(db_path=tmp_path / "scheduler.sqlite3")
     store.sync_schedules(

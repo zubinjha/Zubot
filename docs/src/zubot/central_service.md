@@ -69,14 +69,20 @@ Default DB path:
 
 Tables:
 - `defined_tasks`
-  - schedule metadata + cadence + last run info
+  - schedule metadata + cadence + cursor state + last run info
   - supports `frequency` and `calendar` schedule modes
+  - cursor fields: `next_run_at`, `last_planned_run_at`
+  - misfire policy: `queue_all` | `queue_latest` | `skip`
 - `defined_tasks_run_times`
   - optional calendar-mode run-time rows (multiple `HH:MM` entries per defined task)
 - `defined_task_runs`
   - queued/running/waiting/terminal run lifecycle records
+  - includes `planned_fire_at` for dedupe/audit
 - `defined_task_run_history`
   - completion snapshots for historical reporting/pruning
+  - includes `planned_fire_at`
+- `scheduler_runtime_state`
+  - last heartbeat start/finish/status/error/enqueued-count metadata
 - `task_profiles`
   - registered executable tasks (daemon/API managed)
 - `task_profile_run_stats`
@@ -94,11 +100,17 @@ Indexes:
 - profile/queued-time lookup for per-profile state views
 
 ## Queue Flow
-1. Read due schedules from SQLite (`defined_tasks` + `defined_tasks_run_times`) and enqueue run records (`status = queued`).
-2. Claim queued runs (`status = running`) under concurrency cap.
-3. Execute via `TaskAgentRunner`.
-4. Write completion status (`done`/`failed`/`blocked`) and schedule last-run metadata.
-5. Interactive pause/resume:
+1. Heartbeat reads enabled schedules and cursor state (`next_run_at`) from SQLite.
+2. For each due schedule (`next_run_at <= now`), heartbeat transactionally:
+  - determines due fire(s) from cursor
+  - enqueues at most one run per task profile (strict no-overlap for same task)
+  - writes run `planned_fire_at`
+  - advances cursor (`next_run_at`) and `last_planned_run_at`
+  - applies `misfire_policy` (`queue_all`, `queue_latest`, `skip`)
+3. Claim queued runs (`status = running`) under concurrency cap.
+4. Execute via `TaskAgentRunner`.
+5. Write completion status (`done`/`failed`/`blocked`) and schedule last-run metadata.
+6. Interactive pause/resume:
   - runner may return `waiting_for_user`
   - run payload stores waiting contract:
     - `request_id`
@@ -106,20 +118,20 @@ Indexes:
     - `context`
     - `expires_at`
   - run is resumed by API/tool and re-queued.
-6. Waiting timeout handling:
+7. Waiting timeout handling:
   - housekeeping expires overdue waiting runs to terminal `blocked` (`waiting_for_user_timeout`).
-7. Support explicit run kill:
+8. Support explicit run kill:
   - queued run -> immediate `blocked`
   - running run -> cancellation requested, executor terminates subprocess and finalizes `blocked`
-8. Agentic queueing:
+9. Agentic queueing:
   - enqueue non-blocking background tasks with `instructions` + model/tool scope
   - task runner executes through sub-agent path and writes terminal state to queue DB
-9. Run housekeeping:
+10. Run housekeeping:
   - prune old completed run history rows
   - expire overdue waiting runs
   - run debounced/periodic memory finalization sweeps for prior non-finalized days (full raw-day replay summary)
   - emit structured memory-manager sweep events for observability (not persisted to daily-memory raw events)
-10. Memory ingestion behavior for task-agent events:
+11. Memory ingestion behavior for task-agent events:
   - append raw memory events (`task_agent_event`) for queue + terminal lifecycle milestones:
     - `run_queued`
     - `run_finished`

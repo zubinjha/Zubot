@@ -148,6 +148,40 @@ def _next_calendar_fire_after(
     return None
 
 
+def _next_calendar_fire_on_or_after(
+    *,
+    now_dt: datetime,
+    timezone_name: str,
+    time_of_day: str,
+    days_of_week: list[str],
+) -> datetime | None:
+    try:
+        zone = ZoneInfo(timezone_name)
+    except Exception:
+        return None
+    tod = _parse_time_of_day(time_of_day)
+    if tod is None:
+        return None
+
+    local_now = now_dt.astimezone(zone)
+    for delta in range(0, 15):
+        candidate_date = local_now.date() + timedelta(days=delta)
+        candidate_local = datetime(
+            year=candidate_date.year,
+            month=candidate_date.month,
+            day=candidate_date.day,
+            hour=tod.hour,
+            minute=tod.minute,
+            tzinfo=zone,
+        )
+        if candidate_local < local_now:
+            continue
+        if not _weekday_allowed(days_of_week, candidate_local):
+            continue
+        return candidate_local.astimezone(UTC)
+    return None
+
+
 def _scheduler_db_path_from_config() -> Path:
     try:
         cfg = load_config()
@@ -289,7 +323,10 @@ class TaskSchedulerStore:
                     enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
                     mode TEXT NOT NULL DEFAULT 'frequency' CHECK (mode IN ('frequency', 'calendar')),
                     execution_order INTEGER NOT NULL DEFAULT 100 CHECK (execution_order >= 0),
+                    misfire_policy TEXT NOT NULL DEFAULT 'queue_latest' CHECK (misfire_policy IN ('queue_all', 'queue_latest', 'skip')),
                     run_frequency_minutes INTEGER CHECK (run_frequency_minutes IS NULL OR run_frequency_minutes > 0),
+                    next_run_at TEXT,
+                    last_planned_run_at TEXT,
                     last_scheduled_fire_time TEXT,
                     last_run_at TEXT,
                     last_successful_run_at TEXT,
@@ -325,6 +362,7 @@ class TaskSchedulerStore:
                     schedule_id TEXT,
                     profile_id TEXT NOT NULL,
                     status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'waiting_for_user', 'done', 'failed', 'blocked')),
+                    planned_fire_at TEXT,
                     queued_at TEXT NOT NULL,
                     started_at TEXT,
                     finished_at TEXT,
@@ -339,6 +377,7 @@ class TaskSchedulerStore:
                     schedule_id TEXT,
                     profile_id TEXT NOT NULL,
                     status TEXT NOT NULL CHECK (status IN ('done', 'failed', 'blocked')),
+                    planned_fire_at TEXT,
                     queued_at TEXT NOT NULL,
                     started_at TEXT,
                     finished_at TEXT,
@@ -351,6 +390,8 @@ class TaskSchedulerStore:
 
                 CREATE INDEX IF NOT EXISTS idx_defined_tasks_enabled_order
                     ON defined_tasks(enabled, execution_order, schedule_id);
+                CREATE INDEX IF NOT EXISTS idx_defined_tasks_next_run_at
+                    ON defined_tasks(enabled, next_run_at);
                 CREATE INDEX IF NOT EXISTS idx_defined_task_run_times_schedule_enabled
                     ON defined_tasks_run_times(schedule_id, enabled, time_of_day);
                 CREATE INDEX IF NOT EXISTS idx_defined_tasks_days_schedule
@@ -359,6 +400,9 @@ class TaskSchedulerStore:
                     ON defined_task_runs(status, queued_at);
                 CREATE INDEX IF NOT EXISTS idx_defined_task_runs_profile_queued_at
                     ON defined_task_runs(profile_id, queued_at);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_defined_task_runs_schedule_planned_fire
+                    ON defined_task_runs(schedule_id, planned_fire_at)
+                    WHERE schedule_id IS NOT NULL AND planned_fire_at IS NOT NULL;
                 CREATE INDEX IF NOT EXISTS idx_defined_task_run_history_status_finished_at
                     ON defined_task_run_history(status, finished_at);
                 CREATE INDEX IF NOT EXISTS idx_defined_task_run_history_profile_finished_at
@@ -399,6 +443,16 @@ class TaskSchedulerStore:
                     ON task_profiles(kind, enabled);
                 CREATE INDEX IF NOT EXISTS idx_task_profiles_queue_group
                     ON task_profiles(queue_group);
+
+                CREATE TABLE IF NOT EXISTS scheduler_runtime_state (
+                    id TEXT PRIMARY KEY,
+                    last_heartbeat_started_at TEXT,
+                    last_heartbeat_finished_at TEXT,
+                    last_heartbeat_status TEXT,
+                    last_heartbeat_error TEXT,
+                    last_heartbeat_enqueued_count INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                );
 
                 CREATE TABLE IF NOT EXISTS task_state_kv (
                     task_id TEXT NOT NULL,
@@ -458,6 +512,7 @@ class TaskSchedulerStore:
                         schedule_id TEXT,
                         profile_id TEXT NOT NULL,
                         status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'waiting_for_user', 'done', 'failed', 'blocked')),
+                        planned_fire_at TEXT,
                         queued_at TEXT NOT NULL,
                         started_at TEXT,
                         finished_at TEXT,
@@ -466,8 +521,8 @@ class TaskSchedulerStore:
                         payload_json TEXT NOT NULL,
                         FOREIGN KEY(schedule_id) REFERENCES defined_tasks(schedule_id) ON DELETE SET NULL
                     );
-                    INSERT INTO defined_task_runs_new(run_id, schedule_id, profile_id, status, queued_at, started_at, finished_at, summary, error, payload_json)
-                    SELECT run_id, schedule_id, profile_id, status, queued_at, started_at, finished_at, summary, error, payload_json
+                    INSERT INTO defined_task_runs_new(run_id, schedule_id, profile_id, status, planned_fire_at, queued_at, started_at, finished_at, summary, error, payload_json)
+                    SELECT run_id, schedule_id, profile_id, status, NULL, queued_at, started_at, finished_at, summary, error, payload_json
                     FROM defined_task_runs;
                     DROP TABLE defined_task_runs;
                     ALTER TABLE defined_task_runs_new RENAME TO defined_task_runs;
@@ -475,8 +530,37 @@ class TaskSchedulerStore:
                         ON defined_task_runs(status, queued_at);
                     CREATE INDEX IF NOT EXISTS idx_defined_task_runs_profile_queued_at
                         ON defined_task_runs(profile_id, queued_at);
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_defined_task_runs_schedule_planned_fire
+                        ON defined_task_runs(schedule_id, planned_fire_at)
+                        WHERE schedule_id IS NOT NULL AND planned_fire_at IS NOT NULL;
                     """
                 )
+            task_columns = {
+                str(col["name"])
+                for col in conn.execute("PRAGMA table_info(defined_tasks);").fetchall()
+            }
+            if "misfire_policy" not in task_columns:
+                conn.execute(
+                    "ALTER TABLE defined_tasks ADD COLUMN misfire_policy TEXT NOT NULL DEFAULT 'queue_latest';"
+                )
+            if "next_run_at" not in task_columns:
+                conn.execute("ALTER TABLE defined_tasks ADD COLUMN next_run_at TEXT;")
+            if "last_planned_run_at" not in task_columns:
+                conn.execute("ALTER TABLE defined_tasks ADD COLUMN last_planned_run_at TEXT;")
+
+            run_columns = {
+                str(col["name"])
+                for col in conn.execute("PRAGMA table_info(defined_task_runs);").fetchall()
+            }
+            if "planned_fire_at" not in run_columns:
+                conn.execute("ALTER TABLE defined_task_runs ADD COLUMN planned_fire_at TEXT;")
+
+            history_columns = {
+                str(col["name"])
+                for col in conn.execute("PRAGMA table_info(defined_task_run_history);").fetchall()
+            }
+            if "planned_fire_at" not in history_columns:
+                conn.execute("ALTER TABLE defined_task_run_history ADD COLUMN planned_fire_at TEXT;")
             # One-time compatibility migration from older schema where weekdays
             # were attached to run_time rows instead of schedule rows.
             old_days_table = conn.execute(
@@ -533,6 +617,63 @@ class TaskSchedulerStore:
                 """,
                 (schedule_id, day, now),
             )
+
+    @staticmethod
+    def _normalize_misfire_policy(raw: Any) -> str:
+        policy = str(raw or "queue_latest").strip().lower()
+        if policy in {"queue_all", "queue_latest", "skip"}:
+            return policy
+        return "queue_latest"
+
+    @staticmethod
+    def _next_calendar_fire_for_specs(
+        *,
+        run_times: list[dict[str, Any]],
+        schedule_days: list[str],
+        now_dt: datetime,
+    ) -> datetime | None:
+        candidates: list[datetime] = []
+        for spec in run_times:
+            fire = _next_calendar_fire_on_or_after(
+                now_dt=now_dt,
+                timezone_name=str(spec.get("timezone") or "UTC"),
+                time_of_day=str(spec.get("time_of_day") or ""),
+                days_of_week=list(schedule_days),
+            )
+            if fire is not None:
+                candidates.append(fire)
+        if not candidates:
+            return None
+        return min(candidates)
+
+    @staticmethod
+    def _next_fire_after_cursor(
+        *,
+        mode: str,
+        cursor_dt: datetime,
+        frequency_minutes: int | None,
+        run_times: list[dict[str, Any]],
+        schedule_days: list[str],
+    ) -> datetime | None:
+        if mode == "frequency":
+            freq = int(frequency_minutes or 0)
+            if freq <= 0:
+                return None
+            return cursor_dt + timedelta(minutes=freq)
+
+        candidates: list[datetime] = []
+        for spec in run_times:
+            fire = _next_calendar_fire_after(
+                fire_dt=cursor_dt,
+                timezone_name=str(spec.get("timezone") or "UTC"),
+                time_of_day=str(spec.get("time_of_day") or ""),
+                days_of_week=list(schedule_days),
+            )
+            if fire is not None:
+                candidates.append(fire)
+        if not candidates:
+            return None
+        return min(candidates)
 
     @staticmethod
     def _normalize_task_kind(raw: Any) -> str:
@@ -684,12 +825,21 @@ class TaskSchedulerStore:
                 if mode_raw == "interval":
                     mode_raw = "frequency"
                 mode = mode_raw if mode_raw in {"frequency", "calendar"} else "frequency"
+                misfire_policy = self._normalize_misfire_policy(item.get("misfire_policy"))
                 execution_order_raw = item.get("execution_order")
                 execution_order = int(execution_order_raw) if isinstance(execution_order_raw, int) and execution_order_raw >= 0 else 100
 
                 run_frequency_minutes: int | None
                 run_time_specs: list[dict[str, Any]] = []
                 schedule_days: list[str] = []
+                next_run_at: str | None = None
+                next_run_override = _parse_iso(
+                    str(item.get("next_run_at"))
+                    if isinstance(item.get("next_run_at"), str)
+                    else None
+                )
+                if next_run_override is not None:
+                    next_run_at = _iso(next_run_override)
                 if mode == "frequency":
                     freq = item.get("run_frequency_minutes")
                     if not isinstance(freq, int) or freq <= 0:
@@ -706,15 +856,17 @@ class TaskSchedulerStore:
                     """
                     INSERT INTO defined_tasks(
                         schedule_id, profile_id, enabled, mode, execution_order,
-                        run_frequency_minutes, created_at, updated_at
+                        misfire_policy, run_frequency_minutes, next_run_at, created_at, updated_at
                     )
-                    VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(schedule_id) DO UPDATE SET
                         profile_id = excluded.profile_id,
                         enabled = excluded.enabled,
                         mode = excluded.mode,
                         execution_order = excluded.execution_order,
+                        misfire_policy = excluded.misfire_policy,
                         run_frequency_minutes = excluded.run_frequency_minutes,
+                        next_run_at = excluded.next_run_at,
                         updated_at = excluded.updated_at;
                     """,
                     (
@@ -723,7 +875,9 @@ class TaskSchedulerStore:
                         enabled,
                         mode,
                         execution_order,
+                        misfire_policy,
                         run_frequency_minutes,
+                        next_run_at,
                         now,
                         now,
                     ),
@@ -802,7 +956,8 @@ class TaskSchedulerStore:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT schedule_id, profile_id, enabled, mode, execution_order, run_frequency_minutes,
+                SELECT schedule_id, profile_id, enabled, mode, execution_order, misfire_policy,
+                       run_frequency_minutes, next_run_at, last_planned_run_at,
                        last_scheduled_fire_time, last_run_at, last_successful_run_at,
                        last_status, last_summary, last_error
                 FROM defined_tasks
@@ -831,9 +986,12 @@ class TaskSchedulerStore:
                         "enabled": bool(row["enabled"]),
                         "mode": str(row["mode"] or "frequency"),
                         "execution_order": int(row["execution_order"]),
+                        "misfire_policy": self._normalize_misfire_policy(row["misfire_policy"]),
                         "run_frequency_minutes": int(row["run_frequency_minutes"])
                         if row["run_frequency_minutes"] is not None
                         else None,
+                        "next_run_at": row["next_run_at"],
+                        "last_planned_run_at": row["last_planned_run_at"],
                         "last_scheduled_fire_time": row["last_scheduled_fire_time"],
                         "last_run_at": row["last_run_at"],
                         "last_successful_run_at": row["last_successful_run_at"],
@@ -860,7 +1018,8 @@ class TaskSchedulerStore:
             rows = conn.execute(
                 """
                 SELECT schedule_id, profile_id, enabled, mode, execution_order,
-                       run_frequency_minutes, last_scheduled_fire_time
+                       misfire_policy, run_frequency_minutes, next_run_at,
+                       last_planned_run_at, last_scheduled_fire_time
                 FROM defined_tasks
                 WHERE enabled = 1
                 ORDER BY execution_order ASC, schedule_id ASC;
@@ -873,86 +1032,195 @@ class TaskSchedulerStore:
                 mode = str(row["mode"] or "frequency").strip().lower()
                 if mode == "interval":
                     mode = "frequency"
-                last_fire = _parse_iso(row["last_scheduled_fire_time"] if isinstance(row["last_scheduled_fire_time"], str) else None)
+                policy = self._normalize_misfire_policy(row["misfire_policy"])
                 execution_order = int(row["execution_order"]) if row["execution_order"] is not None else 100
+                freq_minutes = int(row["run_frequency_minutes"]) if row["run_frequency_minutes"] is not None else None
+                run_times = (
+                    [item for item in self._load_run_times_for_schedule(conn, schedule_id=schedule_id) if item.get("enabled")]
+                    if mode == "calendar"
+                    else []
+                )
+                schedule_days = self._load_schedule_days(conn, schedule_id=schedule_id) if mode == "calendar" else []
+                current_cursor = _parse_iso(row["next_run_at"] if isinstance(row["next_run_at"], str) else None)
 
-                scheduled_fire_time: datetime | None = None
-
-                if mode == "frequency":
-                    freq = int(row["run_frequency_minutes"]) if row["run_frequency_minutes"] is not None else 0
-                    if freq <= 0:
-                        continue
-                    if last_fire is None:
-                        scheduled_fire_time = now_dt
-                    elif now_dt >= (last_fire + timedelta(minutes=freq)):
-                        scheduled_fire_time = now_dt
-                else:
-                    run_times = [item for item in self._load_run_times_for_schedule(conn, schedule_id=schedule_id) if item.get("enabled")]
-                    schedule_days = self._load_schedule_days(conn, schedule_id=schedule_id)
-                    candidates: list[tuple[datetime, str, list[str]]] = []
-                    for spec in run_times:
-                        fire = _most_recent_calendar_fire(
-                            now_dt=now_dt,
-                            timezone_name=str(spec["timezone"]),
-                            time_of_day=str(spec["time_of_day"]),
-                            days_of_week=list(schedule_days),
+                if current_cursor is None:
+                    last_planned = _parse_iso(row["last_planned_run_at"] if isinstance(row["last_planned_run_at"], str) else None)
+                    last_scheduled = _parse_iso(
+                        row["last_scheduled_fire_time"] if isinstance(row["last_scheduled_fire_time"], str) else None
+                    )
+                    anchor = last_planned or last_scheduled
+                    if anchor is not None:
+                        current_cursor = self._next_fire_after_cursor(
+                            mode=mode,
+                            cursor_dt=anchor,
+                            frequency_minutes=freq_minutes,
+                            run_times=run_times,
+                            schedule_days=schedule_days,
                         )
-                        if fire is None:
-                            continue
-                        if now_dt > fire + timedelta(minutes=DEFAULT_CALENDAR_CATCHUP_MINUTES):
-                            continue
-                        candidates.append((fire, str(spec["time_of_day"]), list(schedule_days)))
+                    elif mode == "frequency":
+                        current_cursor = now_dt
+                    else:
+                        recent_candidates: list[datetime] = []
+                        for spec in run_times:
+                            recent = _most_recent_calendar_fire(
+                                now_dt=now_dt,
+                                timezone_name=str(spec.get("timezone") or "UTC"),
+                                time_of_day=str(spec.get("time_of_day") or ""),
+                                days_of_week=list(schedule_days),
+                            )
+                            if recent is not None:
+                                recent_candidates.append(recent)
+                        if recent_candidates:
+                            recent_fire = max(recent_candidates)
+                            if now_dt <= recent_fire + timedelta(minutes=DEFAULT_CALENDAR_CATCHUP_MINUTES):
+                                current_cursor = recent_fire
+                            else:
+                                current_cursor = self._next_calendar_fire_for_specs(
+                                    run_times=run_times,
+                                    schedule_days=schedule_days,
+                                    now_dt=now_dt,
+                                )
+                        else:
+                            current_cursor = self._next_calendar_fire_for_specs(
+                                run_times=run_times,
+                                schedule_days=schedule_days,
+                                now_dt=now_dt,
+                            )
+                    if current_cursor is not None:
+                        conn.execute(
+                            """
+                            UPDATE defined_tasks
+                            SET next_run_at = ?, updated_at = ?
+                            WHERE schedule_id = ?;
+                            """,
+                            (_iso(current_cursor), now_iso, schedule_id),
+                        )
 
-                    if candidates:
-                        chosen_fire, _chosen_time, _chosen_days = max(candidates, key=lambda item: item[0])
-                        if last_fire is None or chosen_fire > last_fire:
-                            scheduled_fire_time = chosen_fire
-
-                if scheduled_fire_time is None:
+                if current_cursor is None:
+                    continue
+                if mode == "frequency" and (freq_minutes is None or freq_minutes <= 0):
+                    continue
+                if mode == "calendar" and not run_times:
+                    continue
+                if current_cursor > now_dt:
                     continue
 
-                existing = conn.execute(
+                has_active_profile_run = conn.execute(
                     """
-                    SELECT run_id FROM defined_task_runs
-                    WHERE schedule_id = ? AND status IN ('queued', 'running')
+                    SELECT 1
+                    FROM defined_task_runs
+                    WHERE profile_id = ?
+                      AND status IN ('queued', 'running', 'waiting_for_user')
                     LIMIT 1;
                     """,
-                    (schedule_id,),
+                    (profile_id,),
                 ).fetchone()
-                if existing is not None:
+                if has_active_profile_run is not None:
                     continue
 
-                run_id = f"trun_{uuid4().hex}"
-                payload = {
-                    "schedule_id": schedule_id,
-                    "profile_id": profile_id,
-                    "trigger": "scheduled",
-                    "enqueued_at": now_iso,
-                    "mode": mode,
-                    "scheduled_fire_time": _iso(scheduled_fire_time),
-                }
-                conn.execute(
-                    """
-                    INSERT INTO defined_task_runs(run_id, schedule_id, profile_id, status, queued_at, payload_json)
-                    VALUES (?, ?, ?, 'queued', ?, ?);
-                    """,
-                    (run_id, schedule_id, profile_id, now_iso, json.dumps(payload)),
-                )
+                due_fires: list[datetime] = []
+                cursor = current_cursor
+                for _ in range(0, 512):
+                    if cursor is None or cursor > now_dt:
+                        break
+                    due_fires.append(cursor)
+                    nxt = self._next_fire_after_cursor(
+                        mode=mode,
+                        cursor_dt=cursor,
+                        frequency_minutes=freq_minutes,
+                        run_times=run_times,
+                        schedule_days=schedule_days,
+                    )
+                    if nxt is None or nxt <= cursor:
+                        cursor = None
+                        break
+                    cursor = nxt
+
+                if not due_fires:
+                    continue
+
+                selected_fire: datetime | None
+                if policy == "queue_all":
+                    selected_fire = due_fires[0]
+                elif policy == "skip":
+                    selected_fire = None
+                else:
+                    selected_fire = due_fires[-1]
+
+                if selected_fire is not None:
+                    fire_iso = _iso(selected_fire)
+                    run_id = f"trun_{uuid4().hex}"
+                    payload = {
+                        "schedule_id": schedule_id,
+                        "profile_id": profile_id,
+                        "trigger": "scheduled",
+                        "origin": "scheduled",
+                        "enqueued_at": now_iso,
+                        "mode": mode,
+                        "scheduled_fire_time": fire_iso,
+                    }
+                    try:
+                        conn.execute(
+                            """
+                            INSERT INTO defined_task_runs(
+                                run_id, schedule_id, profile_id, status, planned_fire_at, queued_at, payload_json
+                            )
+                            VALUES (?, ?, ?, 'queued', ?, ?, ?);
+                            """,
+                            (run_id, schedule_id, profile_id, fire_iso, now_iso, json.dumps(payload)),
+                        )
+                    except sqlite3.IntegrityError:
+                        pass
+                    else:
+                        due.append(
+                            {
+                                "run_id": run_id,
+                                "schedule_id": schedule_id,
+                                "profile_id": profile_id,
+                                "execution_order": execution_order,
+                                "planned_fire_at": fire_iso,
+                            }
+                        )
+
+                if policy == "queue_all":
+                    if selected_fire is not None:
+                        next_cursor_dt = self._next_fire_after_cursor(
+                            mode=mode,
+                            cursor_dt=selected_fire,
+                            frequency_minutes=freq_minutes,
+                            run_times=run_times,
+                            schedule_days=schedule_days,
+                        )
+                        last_processed_dt = selected_fire
+                    else:
+                        next_cursor_dt = cursor
+                        last_processed_dt = due_fires[0]
+                elif policy == "skip":
+                    next_cursor_dt = cursor
+                    last_processed_dt = due_fires[-1]
+                else:
+                    next_cursor_dt = cursor
+                    last_processed_dt = selected_fire if selected_fire is not None else due_fires[-1]
+
+                if next_cursor_dt is None:
+                    next_cursor_dt = last_processed_dt
+
                 conn.execute(
                     """
                     UPDATE defined_tasks
-                    SET last_scheduled_fire_time = ?, updated_at = ?
+                    SET next_run_at = ?,
+                        last_planned_run_at = ?,
+                        last_scheduled_fire_time = ?,
+                        updated_at = ?
                     WHERE schedule_id = ?;
                     """,
-                    (_iso(scheduled_fire_time), now_iso, schedule_id),
-                )
-                due.append(
-                    {
-                        "run_id": run_id,
-                        "schedule_id": schedule_id,
-                        "profile_id": profile_id,
-                        "execution_order": execution_order,
-                    }
+                    (
+                        _iso(next_cursor_dt) if isinstance(next_cursor_dt, datetime) else None,
+                        _iso(last_processed_dt),
+                        _iso(last_processed_dt),
+                        now_iso,
+                        schedule_id,
+                    ),
                 )
 
         due.sort(key=lambda item: (int(item.get("execution_order", 100)), str(item.get("schedule_id") or "")))
@@ -1062,7 +1330,8 @@ class TaskSchedulerStore:
 
             result = conn.execute(
                 """
-                SELECT run_id, schedule_id, profile_id, status, queued_at, started_at, finished_at, summary, error, payload_json
+                SELECT run_id, schedule_id, profile_id, status, planned_fire_at,
+                       queued_at, started_at, finished_at, summary, error, payload_json
                 FROM defined_task_runs
                 WHERE run_id = ?;
                 """,
@@ -1078,6 +1347,7 @@ class TaskSchedulerStore:
             "schedule_id": result["schedule_id"],
             "profile_id": result["profile_id"],
             "status": result["status"],
+            "planned_fire_at": result["planned_fire_at"],
             "queued_at": result["queued_at"],
             "started_at": result["started_at"],
             "finished_at": result["finished_at"],
@@ -1093,7 +1363,8 @@ class TaskSchedulerStore:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT run_id, schedule_id, profile_id, status, queued_at, started_at, finished_at, summary, error, payload_json
+                SELECT run_id, schedule_id, profile_id, status, planned_fire_at,
+                       queued_at, started_at, finished_at, summary, error, payload_json
                 FROM defined_task_runs
                 WHERE run_id = ?;
                 """,
@@ -1107,6 +1378,7 @@ class TaskSchedulerStore:
             "schedule_id": row["schedule_id"],
             "profile_id": row["profile_id"],
             "status": row["status"],
+            "planned_fire_at": row["planned_fire_at"],
             "queued_at": row["queued_at"],
             "started_at": row["started_at"],
             "finished_at": row["finished_at"],
@@ -1128,7 +1400,10 @@ class TaskSchedulerStore:
 
         now_iso = _iso(_utc_now())
         with self._connect() as conn:
-            row = conn.execute("SELECT schedule_id FROM defined_task_runs WHERE run_id = ?;", (run_id,)).fetchone()
+            row = conn.execute(
+                "SELECT schedule_id, planned_fire_at, profile_id FROM defined_task_runs WHERE run_id = ?;",
+                (run_id,),
+            ).fetchone()
             if row is None:
                 return {"ok": False, "error": "run not found"}
 
@@ -1143,16 +1418,17 @@ class TaskSchedulerStore:
             conn.execute(
                 """
                 INSERT INTO defined_task_run_history(
-                    run_id, schedule_id, profile_id, status, queued_at, started_at, finished_at,
+                    run_id, schedule_id, profile_id, status, planned_fire_at, queued_at, started_at, finished_at,
                     summary, error, payload_json, archived_at
                 )
                 SELECT
-                    run_id, schedule_id, profile_id, status, queued_at, started_at, finished_at,
+                    run_id, schedule_id, profile_id, status, planned_fire_at, queued_at, started_at, finished_at,
                     summary, error, payload_json, ?
                 FROM defined_task_runs
                 WHERE run_id = ?
                 ON CONFLICT(run_id) DO UPDATE SET
                     status = excluded.status,
+                    planned_fire_at = excluded.planned_fire_at,
                     started_at = excluded.started_at,
                     finished_at = excluded.finished_at,
                     summary = excluded.summary,
@@ -1179,6 +1455,40 @@ class TaskSchedulerStore:
                     """,
                     (now_iso, successful_at, status, summary, error, now_iso, schedule_id),
                 )
+
+            profile_id = str(row["profile_id"] or "").strip()
+            if profile_id:
+                profile_exists = conn.execute(
+                    "SELECT 1 FROM task_profiles WHERE task_id = ? LIMIT 1;",
+                    (profile_id,),
+                ).fetchone()
+                if profile_exists is not None:
+                    conn.execute(
+                        """
+                        INSERT INTO task_profile_run_stats(
+                            task_id, last_finished_at, last_status, last_run_id,
+                            run_count_total, run_count_done, run_count_failed, run_count_blocked, run_count_waiting
+                        )
+                        VALUES (?, ?, ?, ?, 1, ?, ?, ?, 0)
+                        ON CONFLICT(task_id) DO UPDATE SET
+                            last_finished_at = excluded.last_finished_at,
+                            last_status = excluded.last_status,
+                            last_run_id = excluded.last_run_id,
+                            run_count_total = task_profile_run_stats.run_count_total + 1,
+                            run_count_done = task_profile_run_stats.run_count_done + excluded.run_count_done,
+                            run_count_failed = task_profile_run_stats.run_count_failed + excluded.run_count_failed,
+                            run_count_blocked = task_profile_run_stats.run_count_blocked + excluded.run_count_blocked;
+                        """,
+                        (
+                            profile_id,
+                            now_iso,
+                            status,
+                            run_id,
+                            1 if status == "done" else 0,
+                            1 if status == "failed" else 0,
+                            1 if status == "blocked" else 0,
+                        ),
+                    )
 
         return {"ok": True, "run_id": run_id, "status": status}
 
@@ -1341,7 +1651,8 @@ class TaskSchedulerStore:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT run_id, schedule_id, profile_id, status, queued_at, started_at, finished_at, summary, error, payload_json
+                SELECT run_id, schedule_id, profile_id, status, planned_fire_at,
+                       queued_at, started_at, finished_at, summary, error, payload_json
                 FROM defined_task_runs
                 ORDER BY queued_at DESC
                 LIMIT ?;
@@ -1358,6 +1669,7 @@ class TaskSchedulerStore:
                     "schedule_id": row["schedule_id"],
                     "profile_id": row["profile_id"],
                     "status": row["status"],
+                    "planned_fire_at": row["planned_fire_at"],
                     "queued_at": row["queued_at"],
                     "started_at": row["started_at"],
                     "finished_at": row["finished_at"],
@@ -1412,12 +1724,93 @@ class TaskSchedulerStore:
             "longest_waiting_age_sec": waiting_age,
         }
 
+    def record_heartbeat_state(
+        self,
+        *,
+        started_at: str,
+        finished_at: str,
+        status: str,
+        enqueued_count: int = 0,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        clean_status = str(status or "").strip().lower()
+        if clean_status not in {"ok", "error"}:
+            clean_status = "error"
+        clean_started = str(started_at or "").strip()
+        clean_finished = str(finished_at or "").strip()
+        if not clean_started or not clean_finished:
+            return {"ok": False, "error": "started_at and finished_at are required."}
+        clean_error = str(error or "").strip() or None
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO scheduler_runtime_state(
+                    id, last_heartbeat_started_at, last_heartbeat_finished_at,
+                    last_heartbeat_status, last_heartbeat_error, last_heartbeat_enqueued_count, updated_at
+                )
+                VALUES ('main', ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    last_heartbeat_started_at = excluded.last_heartbeat_started_at,
+                    last_heartbeat_finished_at = excluded.last_heartbeat_finished_at,
+                    last_heartbeat_status = excluded.last_heartbeat_status,
+                    last_heartbeat_error = excluded.last_heartbeat_error,
+                    last_heartbeat_enqueued_count = excluded.last_heartbeat_enqueued_count,
+                    updated_at = excluded.updated_at;
+                """,
+                (
+                    clean_started,
+                    clean_finished,
+                    clean_status,
+                    clean_error,
+                    int(enqueued_count) if int(enqueued_count) >= 0 else 0,
+                    clean_finished,
+                ),
+            )
+        return {"ok": True}
+
+    def heartbeat_state(self) -> dict[str, Any]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, last_heartbeat_started_at, last_heartbeat_finished_at,
+                       last_heartbeat_status, last_heartbeat_error, last_heartbeat_enqueued_count, updated_at
+                FROM scheduler_runtime_state
+                WHERE id = 'main';
+                """
+            ).fetchone()
+        if row is None:
+            return {
+                "ok": True,
+                "state": {
+                    "id": "main",
+                    "last_heartbeat_started_at": None,
+                    "last_heartbeat_finished_at": None,
+                    "last_heartbeat_status": None,
+                    "last_heartbeat_error": None,
+                    "last_heartbeat_enqueued_count": 0,
+                    "updated_at": None,
+                },
+            }
+        return {
+            "ok": True,
+            "state": {
+                "id": row["id"],
+                "last_heartbeat_started_at": row["last_heartbeat_started_at"],
+                "last_heartbeat_finished_at": row["last_heartbeat_finished_at"],
+                "last_heartbeat_status": row["last_heartbeat_status"],
+                "last_heartbeat_error": row["last_heartbeat_error"],
+                "last_heartbeat_enqueued_count": int(row["last_heartbeat_enqueued_count"] or 0),
+                "updated_at": row["updated_at"],
+            },
+        }
+
     def list_run_history(self, *, limit: int = 50) -> list[dict[str, Any]]:
         safe_limit = max(1, min(500, int(limit)))
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT run_id, schedule_id, profile_id, status, queued_at, started_at, finished_at, summary, error, payload_json
+                SELECT run_id, schedule_id, profile_id, status, planned_fire_at,
+                       queued_at, started_at, finished_at, summary, error, payload_json
                 FROM defined_task_run_history
                 ORDER BY COALESCE(finished_at, queued_at) DESC
                 LIMIT ?;
@@ -1434,6 +1827,7 @@ class TaskSchedulerStore:
                     "schedule_id": row["schedule_id"],
                     "profile_id": row["profile_id"],
                     "status": row["status"],
+                    "planned_fire_at": row["planned_fire_at"],
                     "queued_at": row["queued_at"],
                     "started_at": row["started_at"],
                     "finished_at": row["finished_at"],

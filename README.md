@@ -14,6 +14,10 @@ Operations guidance for long-running mode lives in [docs/src/zubot/operations.md
 ## Current State
 - Architecture-first project with core context contracts in `context/`.
 - Config-driven runtime setup via `config/config.json` (local, ignored) and `config/example_config.json` (tracked schema).
+  - model resolution uses:
+    - `models.<model_id>` for model definitions
+    - `model_aliases.<alias> -> <model_id>` for runtime tiers (for example `low`/`med`/`high`)
+    - `default_model_alias` for default alias selection
 - Kernel tool scaffolding implemented in `src/zubot/tools/kernel/`:
   - filesystem (policy-enforced read/list/write primitives)
   - location
@@ -36,6 +40,8 @@ Operations guidance for long-running mode lives in [docs/src/zubot/operations.md
   - sub-agent runner scaffold + delegation path
   - control-panel orchestration facade + central service runtime for scheduled/queued task runs
     - heartbeat-driven due-run queueing
+    - cursor-based scheduler state (`next_run_at`, `last_planned_run_at`, misfire policy)
+    - strict no-overlap for the same task profile
     - task executions are queued/claimed runs by fixed concurrency slots
     - serialized SQL queue for central DB access
   - config-driven LLM client (OpenRouter adapter)
@@ -150,6 +156,13 @@ Choose one of these startup modes based on what you want to run.
 - Supports `session_id` scoping and session reset via `/api/session/reset`.
 - Supports explicit session initialization via `/api/session/init`.
 - Supports fetching the latest assembled per-session context snapshot via `/api/session/context`.
+- Supports loading persisted per-session transcript history via `/api/session/history` (UI reload restores recent chat timeline from `chat_messages` only).
+- Supports clearing persisted per-session transcript history via `/api/session/history/clear`.
+- Supports restarting in-memory session context from recent persisted chat via `/api/session/restart_context`.
+- UI behavior: `Reset Session` clears persisted transcript history for that `session_id` and resets in-memory session context.
+- UI controls:
+  - `Reset Context`: reset in-memory session context and clear UI chat view (preserves DB transcript)
+  - `Normal Context`: apply normal startup context policy (rehydrate from recent persisted transcript and show last N messages)
 - Runtime behavior model:
   - task-agent work is scheduled/triggered into central queue (`defined_task_runs`) and then claimed by central service
   - queue controls are task-run centric (`trigger` and `kill run`)
@@ -179,11 +192,13 @@ Choose one of these startup modes based on what you want to run.
 - Daily memory is DB-backed in `memory/central/zubot_core.db`:
   - raw events (`daily_memory_events`)
   - summary snapshots (`daily_memory_summaries`)
+  - explicit transcript rows (`chat_messages`)
   - status + queue metadata (`day_memory_status`, `memory_summary_jobs`)
   - task runtime helper tables (`task_state_kv`, `task_seen_items`, `job_applications`)
 - Daily summaries are queue-driven from full raw-day replay (deduped per day) and processed by background worker.
 - Daily raw memory uses signal-first ingestion (user/main-agent interactions plus task queue/finalization milestones; routine system chatter and tool-call telemetry are excluded).
 - Session JSONL logging is optional (`memory.session_event_logging_enabled`) and disabled by default.
+- Legacy markdown import is opt-in (`memory.legacy_daily_file_migration_enabled`) and disabled by default.
 - LLM-routed queries run through a registry-backed tool-call loop (tool schema -> tool execution -> final response).
 - Tool registry includes task queue orchestration tools:
   - `enqueue_task`, `enqueue_agentic_task`, `kill_task_run`, `list_task_runs`, `list_waiting_runs`, `resume_task_run`, `get_task_agent_checkin`, `query_central_db`

@@ -20,10 +20,10 @@ def configured_openrouter(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         path,
         {
             "default_model_alias": "medium",
+            "model_aliases": {"medium": "gpt5_mini", "med": "gpt5_mini"},
             "model_providers": {"openrouter": {"apikey": "KEY_123"}},
             "models": {
                 "gpt5_mini": {
-                    "alias": "medium",
                     "provider": "openrouter",
                     "endpoint": "openai/gpt-5-mini",
                     "max_output_tokens": 128000,
@@ -66,8 +66,9 @@ def test_call_llm_unsupported_provider(monkeypatch: pytest.MonkeyPatch, tmp_path
         path,
         {
             "default_model_alias": "medium",
+            "model_aliases": {"medium": "m", "med": "m"},
             "model_providers": {"other": {"apikey": "x"}},
-            "models": {"m": {"alias": "medium", "provider": "other", "endpoint": "x"}},
+            "models": {"m": {"provider": "other", "endpoint": "x"}},
         },
     )
     monkeypatch.setenv("ZUBOT_CONFIG_PATH", str(path))

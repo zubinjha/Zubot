@@ -30,14 +30,35 @@ class TaskHeartbeat:
         return datetime.now(tz=UTC)
 
     def enqueue_due_runs(self, *, now: datetime | None = None) -> dict[str, Any]:
-        now_dt = now.astimezone(UTC) if isinstance(now, datetime) else self._utc_now()
-        out = self._store.enqueue_due_runs(now=now_dt)
+        started_dt = now.astimezone(UTC) if isinstance(now, datetime) else self._utc_now()
+        started_iso = started_dt.isoformat()
+        try:
+            out = self._store.enqueue_due_runs(now=started_dt)
+        except Exception as exc:
+            finished_iso = self._utc_now().isoformat()
+            self._store.record_heartbeat_state(
+                started_at=started_iso,
+                finished_at=finished_iso,
+                status="error",
+                enqueued_count=0,
+                error=str(exc),
+            )
+            raise
+
         if not isinstance(out, dict):
-            return HeartbeatTickResult(ok=False, enqueued=0, runs=[]).to_dict()
+            out = HeartbeatTickResult(ok=False, enqueued=0, runs=[]).to_dict()
+
         runs = out.get("runs")
-        return HeartbeatTickResult(
+        result = HeartbeatTickResult(
             ok=bool(out.get("ok")),
             enqueued=int(out.get("enqueued") or 0),
             runs=runs if isinstance(runs, list) else [],
         ).to_dict()
-
+        self._store.record_heartbeat_state(
+            started_at=started_iso,
+            finished_at=self._utc_now().isoformat(),
+            status="ok" if bool(result.get("ok")) else "error",
+            enqueued_count=int(result.get("enqueued") or 0),
+            error=None if bool(result.get("ok")) else str(out.get("error") or "heartbeat enqueue failed"),
+        )
+        return result

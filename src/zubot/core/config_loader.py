@@ -72,21 +72,43 @@ def get_home_location(config: dict[str, Any] | None = None) -> dict[str, Any] | 
 
 
 def get_model_by_alias(alias: str, config: dict[str, Any] | None = None) -> tuple[str, dict[str, Any]]:
-    """Return `(model_id, model_payload)` for a unique alias."""
+    """Return `(model_id, model_payload)` for an alias.
+
+    Preferred config shape:
+    - `model_aliases.<alias> = <model_id>`
+
+    Backward compatibility:
+    - Falls back to legacy `models.<id>.alias` scan when `model_aliases` is
+      missing or the alias is not mapped.
+    """
     payload = config or load_config()
     models = payload.get("models")
     if not isinstance(models, dict):
         raise ValueError("Config models must be a JSON object keyed by model id.")
 
+    clean_alias = str(alias or "").strip()
+    if not clean_alias:
+        raise ValueError("Model alias must be a non-empty string.")
+
+    alias_map = payload.get("model_aliases")
+    if isinstance(alias_map, dict):
+        mapped = alias_map.get(clean_alias)
+        if isinstance(mapped, str) and mapped.strip():
+            model_id = mapped.strip()
+            model_payload = models.get(model_id)
+            if isinstance(model_payload, dict):
+                return model_id, model_payload
+            raise ValueError(f"Alias '{clean_alias}' maps to undefined model id '{model_id}'.")
+
     matches: list[tuple[str, dict[str, Any]]] = []
     for model_id, model in models.items():
-        if isinstance(model, dict) and model.get("alias") == alias:
+        if isinstance(model, dict) and model.get("alias") == clean_alias:
             matches.append((model_id, model))
 
     if not matches:
-        raise ValueError(f"No model found for alias '{alias}'.")
+        raise ValueError(f"No model found for alias '{clean_alias}'.")
     if len(matches) > 1:
-        raise ValueError(f"Alias '{alias}' is not unique across models.")
+        raise ValueError(f"Alias '{clean_alias}' is not unique across models.")
     return matches[0]
 
 

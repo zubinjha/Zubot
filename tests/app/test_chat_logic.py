@@ -4,6 +4,7 @@ from app.chat_logic import (
     get_session_context_snapshot,
     handle_chat_message,
     initialize_session_context,
+    restart_session_context,
     reset_session_context,
 )
 
@@ -36,7 +37,7 @@ def test_handle_chat_message_time_uses_llm_tool_path(monkeypatch):
         "load_context_bundle",
         lambda **kwargs: {"base": {"context/AGENT.md": "x"}, "supplemental": {}},
     )
-    result = handle_chat_message("what time is it?", allow_llm_fallback=True)
+    result = handle_chat_message("what time is it?", allow_llm_fallback=True, session_id="s-time-test")
     assert result["ok"]
     assert result["route"] == "llm.main_agent"
     assert "Current local time" in result["reply"]
@@ -60,6 +61,42 @@ def test_initialize_session_context():
     assert out["ok"] is True
     assert out["initialized"] is True
     assert out["session_id"] == "s-init"
+
+
+def test_initialize_session_context_rehydrates_recent_persisted_messages(monkeypatch):
+    monkeypatch.setattr(chat_logic, "load_recent_daily_memory", lambda **kwargs: {})
+    monkeypatch.setattr(chat_logic, "get_days_pending_summary", lambda **kwargs: [])
+    monkeypatch.setattr(chat_logic, "_session_rehydrate_message_limit", lambda: 100)
+    monkeypatch.setattr(
+        chat_logic,
+        "list_session_chat_messages",
+        lambda **kwargs: [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ],
+    )
+    out = initialize_session_context("rehydrate-init")
+    assert out["ok"] is True
+    assert out["preload"]["rehydrated_message_count"] == 2
+    assert out["preload"]["recent_event_count"] == 2
+
+
+def test_restart_session_context_rehydrates_recent_persisted_messages(monkeypatch):
+    monkeypatch.setattr(chat_logic, "load_recent_daily_memory", lambda **kwargs: {})
+    monkeypatch.setattr(chat_logic, "_session_rehydrate_message_limit", lambda: 100)
+    monkeypatch.setattr(
+        chat_logic,
+        "list_session_chat_messages",
+        lambda **kwargs: [
+            {"role": "user", "content": "what time is it?"},
+            {"role": "assistant", "content": "Current local time: 10:00 AM"},
+        ],
+    )
+    out = restart_session_context("rehydrate-restart", history_limit=100)
+    assert out["ok"] is True
+    assert out["restarted"] is True
+    assert out["hydrated_message_count"] == 2
+    assert out["hydrated_recent_event_count"] == 2
 
 
 def test_initialize_session_context_auto_finalizes_prior_days(monkeypatch):

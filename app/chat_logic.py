@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+from datetime import UTC, datetime
 from time import monotonic
 from dataclasses import dataclass, field
 from typing import Any
@@ -14,6 +15,9 @@ from src.zubot.core.context_loader import load_context_bundle
 from src.zubot.core.daily_summary_pipeline import summarize_day_from_raw
 from src.zubot.core.daily_memory import (
     append_daily_memory_entry,
+    append_chat_message,
+    clear_session_chat_messages,
+    list_session_chat_messages,
     load_recent_daily_memory,
     local_day_str,
 )
@@ -28,7 +32,7 @@ from src.zubot.core.memory_index import (
 from src.zubot.core.memory_summary_worker import get_memory_summary_worker
 from src.zubot.core.session_store import append_session_events
 from src.zubot.core.tool_registry import invoke_tool, list_tools
-from src.zubot.core.config_loader import load_config
+from src.zubot.core.config_loader import get_timezone, load_config
 from src.zubot.core.central_service import get_central_service
 
 MAX_RECENT_EVENTS = 60
@@ -84,6 +88,20 @@ def _session_retention_policy() -> tuple[int, int]:
     return ttl_minutes, max_sessions
 
 
+def _session_rehydrate_message_limit() -> int:
+    try:
+        cfg = load_config()
+    except Exception:
+        return 100
+    memory_cfg = cfg.get("memory")
+    if not isinstance(memory_cfg, dict):
+        return 100
+    value = memory_cfg.get("session_rehydrate_message_limit")
+    if isinstance(value, int) and value > 0:
+        return max(1, min(500, value))
+    return 100
+
+
 def _realtime_summary_turn_threshold() -> int:
     try:
         cfg = load_config()
@@ -137,9 +155,39 @@ def _refresh_daily_context(runtime: SessionRuntime) -> None:
     runtime.preloaded_daily_context = load_recent_daily_memory(days=_autoload_summary_days())
 
 
+def _rehydrate_runtime_from_persisted_chat(
+    *,
+    session_id: str,
+    runtime: SessionRuntime,
+    history_limit: int,
+) -> int:
+    rows = list_session_chat_messages(session_id=session_id, limit=history_limit)
+    runtime.recent_events = []
+    runtime.session_summary = None
+    runtime.facts = {}
+    runtime.last_context_snapshot = None
+
+    for row in rows:
+        role = str(row.get("role") or "").strip().lower()
+        content = str(row.get("content") or "").strip()
+        if not content:
+            continue
+        if role == "user":
+            _append_session_event(runtime, {"event_type": "user_message", "payload": {"text": content}})
+        elif role == "assistant":
+            _append_session_event(runtime, {"event_type": "assistant_message", "payload": {"text": content}})
+    return len(rows)
+
+
 def initialize_session_context(session_id: str) -> dict[str, Any]:
     runtime = _get_session(session_id)
     _refresh_daily_context(runtime)
+    rehydrate_limit = _session_rehydrate_message_limit()
+    hydrated_count = _rehydrate_runtime_from_persisted_chat(
+        session_id=session_id,
+        runtime=runtime,
+        history_limit=rehydrate_limit,
+    )
     today = local_day_str()
     finalized_days: list[str] = []
     for pending in get_days_pending_summary(before_day=today):
@@ -167,6 +215,8 @@ def initialize_session_context(session_id: str) -> dict[str, Any]:
             "has_summary": bool(runtime.session_summary),
             "fact_count": len(runtime.facts),
             "auto_finalized_days": finalized_days,
+            "rehydrated_message_count": hydrated_count,
+            "rehydrate_limit": rehydrate_limit,
         },
     }
 
@@ -196,6 +246,54 @@ def get_session_context_snapshot(session_id: str) -> dict[str, Any]:
         "ok": True,
         "session_id": session_id,
         "snapshot": deepcopy(snapshot),
+    }
+
+
+def get_session_history(session_id: str, *, limit: int = 100) -> dict[str, Any]:
+    clean_session_id = str(session_id or "default").strip() or "default"
+    safe_limit = max(1, min(500, int(limit)))
+    rows = list_session_chat_messages(session_id=clean_session_id, limit=safe_limit)
+    entries: list[dict[str, Any]] = [
+        {
+            "message_id": int(row.get("message_id") or 0),
+            "created_at": row.get("created_at"),
+            "role": str(row.get("role") or "assistant"),
+            "content": str(row.get("content") or ""),
+        }
+        for row in rows
+    ]
+    return {
+        "ok": True,
+        "session_id": clean_session_id,
+        "limit": safe_limit,
+        "timezone": get_timezone() or "UTC",
+        "entries": entries,
+    }
+
+
+def clear_session_history(session_id: str) -> dict[str, Any]:
+    clean_session_id = str(session_id or "default").strip() or "default"
+    return clear_session_chat_messages(session_id=clean_session_id)
+
+
+def restart_session_context(session_id: str, *, history_limit: int | None = None) -> dict[str, Any]:
+    clean_session_id = str(session_id or "default").strip() or "default"
+    runtime = _get_session(clean_session_id)
+    _refresh_daily_context(runtime)
+    safe_limit = _session_rehydrate_message_limit() if history_limit is None else max(1, min(500, int(history_limit)))
+    hydrated_count = _rehydrate_runtime_from_persisted_chat(
+        session_id=clean_session_id,
+        runtime=runtime,
+        history_limit=safe_limit,
+    )
+    return {
+        "ok": True,
+        "session_id": clean_session_id,
+        "restarted": True,
+        "history_limit": safe_limit,
+        "hydrated_message_count": hydrated_count,
+        "hydrated_recent_event_count": len(runtime.recent_events),
+        "note": f"Session context restarted from last {safe_limit} persisted messages.",
     }
 
 
@@ -242,11 +340,28 @@ def _log_daily_turn(
     tool_execution: list[dict[str, Any]] | None = None,
     task_agent_events: list[dict[str, Any]] | None = None,
     system_events: list[str] | None = None,
-) -> None:
+    user_created_at: datetime | None = None,
+    assistant_created_at: datetime | None = None,
+) -> dict[str, Any]:
     _ = _get_session(session_id)
     day = local_day_str()
     trimmed_user = _clean_text(user_text)
     trimmed_reply = _clean_text(reply)
+
+    user_meta = append_chat_message(
+        session_id=session_id,
+        role="user",
+        content=trimmed_user,
+        route=route,
+        created_at=user_created_at,
+    )
+    assistant_meta = append_chat_message(
+        session_id=session_id,
+        role="assistant",
+        content=trimmed_reply,
+        route=route,
+        created_at=assistant_created_at,
+    )
 
     _log_daily_transcript_event(
         session_id=session_id,
@@ -278,6 +393,10 @@ def _log_daily_turn(
     if pending >= _realtime_summary_turn_threshold():
         enqueue_day_summary_job(day=day, reason=f"chat_turn:{route}")
         get_memory_summary_worker().kick()
+    return {
+        "user_created_at": user_meta.get("created_at") if isinstance(user_meta, dict) else None,
+        "assistant_created_at": assistant_meta.get("created_at") if isinstance(assistant_meta, dict) else None,
+    }
 
 
 def _flush_daily_summary(*, session_id: str, reason: str) -> dict[str, Any]:
@@ -689,6 +808,7 @@ def handle_chat_message(
 
     runtime = _get_session(session_id)
     _refresh_daily_context(runtime)
+    user_turn_started_at = datetime.now(UTC)
 
     if allow_llm_fallback:
         context_bundle = load_context_bundle(query=text, max_supplemental_files=2)
@@ -744,7 +864,7 @@ def handle_chat_message(
         if llm_result.get("ok"):
             _append_session_event(runtime, {"event_type": "user_message", "payload": {"text": text}})
             _append_session_event(runtime, {"event_type": "assistant_message", "payload": {"text": reply}})
-            _log_daily_turn(
+            transcript_meta = _log_daily_turn(
                 session_id,
                 route="llm.main_agent",
                 user_text=text,
@@ -757,6 +877,8 @@ def handle_chat_message(
                         f"task_agent={len(forwarded_task_agent_events)}"
                     ),
                 ],
+                user_created_at=user_turn_started_at,
+                assistant_created_at=datetime.now(UTC),
             )
             _persist_session_turn(session_id, user_text=text, reply=reply, route="llm.main_agent")
             return {
@@ -766,6 +888,7 @@ def handle_chat_message(
                 "data": {
                     **llm_result,
                     "tool_execution": executed_tools,
+                    "transcript_meta": transcript_meta,
                     "context_debug": {
                         "base_files_loaded": sorted(context_bundle.get("base", {}).keys()),
                         "supplemental_files_loaded": sorted(context_bundle.get("supplemental", {}).keys()),
@@ -788,11 +911,13 @@ def handle_chat_message(
                 "error": None,
             }
         _append_session_event(runtime, {"event_type": "user_message", "payload": {"text": text}})
-        _log_daily_turn(
+        transcript_meta = _log_daily_turn(
             session_id,
             route="llm.error_fallback",
             user_text=text,
             reply="provider_unavailable",
+            user_created_at=user_turn_started_at,
+            assistant_created_at=datetime.now(UTC),
         )
         _persist_session_turn(
             session_id,
@@ -807,7 +932,10 @@ def handle_chat_message(
                 "Please retry in a moment."
             ),
             "route": "llm.error_fallback",
-            "data": llm_result,
+            "data": {
+                **(llm_result if isinstance(llm_result, dict) else {}),
+                "transcript_meta": transcript_meta,
+            },
             "error": llm_result.get("error"),
         }
 

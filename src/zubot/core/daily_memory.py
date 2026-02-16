@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from .config_loader import get_timezone
+from .config_loader import get_timezone, load_config
 from .memory_index import memory_index_path
 from .path_policy import repo_root
 
@@ -59,14 +59,39 @@ def ensure_daily_memory_schema(*, root: Path | None = None, db_path: Path | None
                 text TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                message_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+                content TEXT NOT NULL,
+                route TEXT,
+                created_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_daily_memory_events_day_time
                 ON daily_memory_events(day, event_time, event_id);
             CREATE INDEX IF NOT EXISTS idx_daily_memory_events_kind_day
                 ON daily_memory_events(kind, day);
+            CREATE INDEX IF NOT EXISTS idx_daily_memory_events_session_event
+                ON daily_memory_events(session_id, event_id);
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_session_message
+                ON chat_messages(session_id, message_id);
             """
         )
         conn.commit()
-    _migrate_legacy_daily_files(root=root, db_path=resolved)
+    if _legacy_daily_file_migration_enabled():
+        _migrate_legacy_daily_files(root=root, db_path=resolved)
+
+
+def _legacy_daily_file_migration_enabled() -> bool:
+    try:
+        cfg = load_config()
+    except Exception:
+        return False
+    memory_cfg = cfg.get("memory")
+    if not isinstance(memory_cfg, dict):
+        return False
+    return bool(memory_cfg.get("legacy_daily_file_migration_enabled", False))
 
 
 def _legacy_daily_root(*, root: Path | None = None) -> Path:
@@ -259,6 +284,153 @@ def list_day_raw_entries(*, day: str, root: Path | None = None) -> list[dict[str
         }
         for row in rows
     ]
+
+
+def list_session_transcript_entries(
+    *,
+    session_id: str,
+    limit: int = 100,
+    root: Path | None = None,
+) -> list[dict[str, Any]]:
+    clean_session_id = str(session_id or "").strip()
+    if not clean_session_id:
+        return []
+    safe_limit = max(1, min(500, int(limit)))
+    resolved = memory_index_path(root=root)
+    ensure_daily_memory_schema(root=root, db_path=resolved)
+    with _connect(root=root, db_path=resolved) as conn:
+        rows = conn.execute(
+            """
+            SELECT event_id, event_time, session_id, kind, text
+            FROM daily_memory_events
+            WHERE session_id = ?
+              AND layer = 'raw'
+              AND kind IN ('user', 'main_agent')
+            ORDER BY event_id DESC
+            LIMIT ?;
+            """,
+            (clean_session_id, safe_limit),
+        ).fetchall()
+    ordered = list(reversed(rows))
+    return [
+        {
+            "event_id": int(row["event_id"]),
+            "event_time": str(row["event_time"]),
+            "session_id": str(row["session_id"]),
+            "kind": str(row["kind"]),
+            "text": str(row["text"]),
+        }
+        for row in ordered
+    ]
+
+
+def append_chat_message(
+    *,
+    session_id: str,
+    role: str,
+    content: str,
+    route: str | None = None,
+    created_at: datetime | None = None,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    clean_session_id = str(session_id or "").strip()
+    clean_role = str(role or "").strip().lower()
+    clean_content = str(content or "").strip()
+    if not clean_session_id:
+        return {"ok": False, "error": "session_id is required."}
+    if clean_role not in {"user", "assistant"}:
+        return {"ok": False, "error": "role must be `user` or `assistant`."}
+    if not clean_content:
+        return {"ok": False, "error": "content is required."}
+    stamp = created_at or _now_local()
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=UTC)
+    created_iso = stamp.astimezone(UTC).isoformat()
+    clean_route = str(route or "").strip() or None
+
+    resolved = memory_index_path(root=root)
+    ensure_daily_memory_schema(root=root, db_path=resolved)
+    with _connect(root=root, db_path=resolved) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO chat_messages(session_id, role, content, route, created_at)
+            VALUES(?, ?, ?, ?, ?);
+            """,
+            (clean_session_id, clean_role, clean_content, clean_route, created_iso),
+        )
+        conn.commit()
+        message_id = int(cur.lastrowid)
+    return {"ok": True, "message_id": message_id, "created_at": created_iso}
+
+
+def list_session_chat_messages(
+    *,
+    session_id: str,
+    limit: int = 100,
+    root: Path | None = None,
+) -> list[dict[str, Any]]:
+    clean_session_id = str(session_id or "").strip()
+    if not clean_session_id:
+        return []
+    safe_limit = max(1, min(500, int(limit)))
+    resolved = memory_index_path(root=root)
+    ensure_daily_memory_schema(root=root, db_path=resolved)
+    with _connect(root=root, db_path=resolved) as conn:
+        rows = conn.execute(
+            """
+            SELECT message_id, session_id, role, content, route, created_at
+            FROM chat_messages
+            WHERE session_id = ?
+            ORDER BY message_id DESC
+            LIMIT ?;
+            """,
+            (clean_session_id, safe_limit),
+        ).fetchall()
+    ordered = list(reversed(rows))
+    return [
+        {
+            "message_id": int(row["message_id"]),
+            "session_id": str(row["session_id"]),
+            "role": str(row["role"]),
+            "content": str(row["content"]),
+            "route": row["route"],
+            "created_at": str(row["created_at"]),
+        }
+        for row in ordered
+    ]
+
+
+def clear_session_chat_messages(
+    *,
+    session_id: str,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    clean_session_id = str(session_id or "").strip()
+    if not clean_session_id:
+        return {"ok": False, "error": "session_id is required."}
+    resolved = memory_index_path(root=root)
+    ensure_daily_memory_schema(root=root, db_path=resolved)
+    with _connect(root=root, db_path=resolved) as conn:
+        deleted_chat = conn.execute(
+            "DELETE FROM chat_messages WHERE session_id = ?;",
+            (clean_session_id,),
+        ).rowcount
+        deleted_raw = conn.execute(
+            """
+            DELETE FROM daily_memory_events
+            WHERE session_id = ?
+              AND layer = 'raw'
+              AND kind IN ('user', 'main_agent');
+            """,
+            (clean_session_id,),
+        ).rowcount
+        conn.commit()
+    return {
+        "ok": True,
+        "session_id": clean_session_id,
+        "deleted_chat_messages": int(deleted_chat or 0),
+        "deleted_legacy_raw_events": int(deleted_raw or 0),
+    }
 
 
 def _render_raw_fallback(*, day_key: str, rows: list[dict[str, Any]], max_lines: int = 80) -> str:

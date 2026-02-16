@@ -35,9 +35,9 @@ def test_get_model_token_limits(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
         json.dumps(
             {
                 "default_model_alias": "medium",
+                "model_aliases": {"medium": "gpt5_mini", "med": "gpt5_mini"},
                 "models": {
                     "gpt5_mini": {
-                        "alias": "medium",
                         "max_context_tokens": 400000,
                         "max_output_tokens": 128000,
                     }

@@ -43,6 +43,8 @@ Responsibilities:
 - safely parse JSON config with cache
 - expose normalized runtime helpers
 - keep schema-driven contracts centralized (for example `job_applications_schema`)
+- resolve models via `model_aliases` mapping (`alias -> model_id`) and `models` table
+- keep backward compatibility with legacy `models.<id>.alias` during migration
 
 Common helpers used by runtime:
 - `load_config()`

@@ -9,6 +9,9 @@ config/*
 !config/example_config.json
 /tasks/
 memory/*
+!memory/central/
+memory/central/*
+!memory/central/zubot_core.sql
 context/*
 !context/README.md
 personal_notes/

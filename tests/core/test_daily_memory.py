@@ -2,10 +2,14 @@ from datetime import UTC, datetime
 
 import src.zubot.core.daily_memory as daily_memory
 from src.zubot.core.daily_memory import (
+    append_chat_message,
     append_daily_memory_entry,
+    clear_session_chat_messages,
     ensure_daily_memory_file,
     ensure_daily_memory_schema,
     list_day_raw_entries,
+    list_session_chat_messages,
+    list_session_transcript_entries,
     load_recent_daily_memory,
     write_daily_summary_snapshot,
 )
@@ -91,6 +95,39 @@ def test_daily_memory_is_db_backed(tmp_path):
     assert int(row[0]) >= 1
 
 
+def test_list_session_transcript_entries_returns_ordered_chat_rows(tmp_path):
+    append_daily_memory_entry(text="u1", kind="user", session_id="s_hist", root=tmp_path, layer="raw")
+    append_daily_memory_entry(text="a1", kind="main_agent", session_id="s_hist", root=tmp_path, layer="raw")
+    append_daily_memory_entry(text="ignore", kind="task_agent_event", session_id="s_hist", root=tmp_path, layer="raw")
+    rows = list_session_transcript_entries(session_id="s_hist", root=tmp_path, limit=10)
+    assert len(rows) == 2
+    assert rows[0]["kind"] == "user"
+    assert rows[0]["text"] == "u1"
+    assert rows[1]["kind"] == "main_agent"
+    assert rows[1]["text"] == "a1"
+
+
+def test_explicit_chat_message_store_roundtrip_and_clear(tmp_path):
+    first = append_chat_message(session_id="s_explicit", role="user", content="hello", root=tmp_path)
+    second = append_chat_message(session_id="s_explicit", role="assistant", content="hi", root=tmp_path)
+    assert first["ok"] is True
+    assert second["ok"] is True
+
+    rows = list_session_chat_messages(session_id="s_explicit", root=tmp_path, limit=10)
+    assert len(rows) == 2
+    assert rows[0]["role"] == "user"
+    assert rows[0]["content"] == "hello"
+    assert rows[1]["role"] == "assistant"
+    assert rows[1]["content"] == "hi"
+
+    cleared = clear_session_chat_messages(session_id="s_explicit", root=tmp_path)
+    assert cleared["ok"] is True
+    assert cleared["deleted_chat_messages"] == 2
+
+    rows_after = list_session_chat_messages(session_id="s_explicit", root=tmp_path, limit=10)
+    assert rows_after == []
+
+
 def test_legacy_daily_files_are_imported_into_db(tmp_path):
     raw_dir = tmp_path / "memory" / "daily" / "raw"
     summary_dir = tmp_path / "memory" / "daily" / "summary"
@@ -105,7 +142,12 @@ def test_legacy_daily_files_are_imported_into_db(tmp_path):
         encoding="utf-8",
     )
 
-    ensure_daily_memory_schema(root=tmp_path)
+    original = daily_memory._legacy_daily_file_migration_enabled  # type: ignore[attr-defined]
+    daily_memory._legacy_daily_file_migration_enabled = lambda: True  # type: ignore[assignment]
+    try:
+        ensure_daily_memory_schema(root=tmp_path)
+    finally:
+        daily_memory._legacy_daily_file_migration_enabled = original  # type: ignore[assignment]
     rows = list_day_raw_entries(day="2026-02-10", root=tmp_path)
     assert len(rows) == 1
     loaded = load_recent_daily_memory(days=10000, root=tmp_path)

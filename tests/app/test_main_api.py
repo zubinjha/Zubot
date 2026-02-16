@@ -31,6 +31,14 @@ class _FakeRuntimeService:
     def reset_session(self, *, session_id: str = "default"):
         return {"ok": True, "reset": True, "session_id": session_id}
 
+    def restart_session_context(self, *, session_id: str = "default", history_limit: int | None = None):
+        return {
+            "ok": True,
+            "restarted": True,
+            "session_id": session_id,
+            "history_limit": history_limit,
+        }
+
     def session_context_snapshot(self, *, session_id: str = "default"):
         return {
             "ok": True,
@@ -41,6 +49,20 @@ class _FakeRuntimeService:
                 "assembled": {"messages": [{"role": "user", "content": "hello"}]},
             },
         }
+
+    def session_history(self, *, session_id: str = "default", limit: int = 100):
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "limit": limit,
+            "entries": [
+                {"event_id": 1, "event_time": "2026-02-16T00:00:00+00:00", "role": "user", "content": "hello"},
+                {"event_id": 2, "event_time": "2026-02-16T00:00:01+00:00", "role": "assistant", "content": "hi"},
+            ],
+        }
+
+    def clear_session_history(self, *, session_id: str = "default"):
+        return {"ok": True, "session_id": session_id, "deleted_chat_messages": 2}
 
     def central_status(self):
         return {
@@ -109,6 +131,7 @@ class _FakeRuntimeService:
         enabled: bool,
         mode: str,
         execution_order: int,
+        misfire_policy: str = "queue_latest",
         run_frequency_minutes: int | None = None,
         timezone: str | None = None,
         run_times: list[str] | None = None,
@@ -121,6 +144,7 @@ class _FakeRuntimeService:
             "enabled": enabled,
             "mode": mode,
             "execution_order": execution_order,
+            "misfire_policy": misfire_policy,
             "run_frequency_minutes": run_frequency_minutes,
             "timezone": timezone,
             "run_times": run_times or [],
@@ -242,6 +266,17 @@ def test_session_reset_endpoint(monkeypatch):
     assert body["reset"] is True
 
 
+def test_session_restart_context_endpoint(monkeypatch):
+    monkeypatch.setattr("app.main.get_runtime_service", lambda: _FakeRuntimeService())
+    res = client.post("/api/session/restart_context", json={"session_id": "api-restart", "history_limit": 42})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ok"] is True
+    assert body["restarted"] is True
+    assert body["session_id"] == "api-restart"
+    assert body["history_limit"] == 42
+
+
 def test_session_context_endpoint(monkeypatch):
     monkeypatch.setattr("app.main.get_runtime_service", lambda: _FakeRuntimeService())
     res = client.post("/api/session/context", json={"session_id": "ctx-1"})
@@ -250,6 +285,19 @@ def test_session_context_endpoint(monkeypatch):
     assert body["ok"] is True
     assert body["session_id"] == "ctx-1"
     assert body["snapshot"]["session_id"] == "ctx-1"
+
+    hist = client.get("/api/session/history?session_id=ctx-1&limit=5")
+    assert hist.status_code == 200
+    hbody = hist.json()
+    assert hbody["ok"] is True
+    assert hbody["session_id"] == "ctx-1"
+    assert len(hbody["entries"]) == 2
+
+    cleared = client.post("/api/session/history/clear", json={"session_id": "ctx-1"})
+    assert cleared.status_code == 200
+    cbody = cleared.json()
+    assert cbody["ok"] is True
+    assert cbody["session_id"] == "ctx-1"
 
 
 def test_central_endpoints(monkeypatch):

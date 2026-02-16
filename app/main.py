@@ -20,6 +20,12 @@ class ChatRequest(BaseModel):
 class ResetRequest(BaseModel):
     session_id: str = "default"
 
+
+class RestartContextRequest(BaseModel):
+    session_id: str = "default"
+    history_limit: int | None = None
+
+
 class InitRequest(BaseModel):
     session_id: str = "default"
 
@@ -91,6 +97,7 @@ class ScheduleUpsertRequest(BaseModel):
     enabled: bool = True
     mode: Literal["frequency", "calendar"] = "frequency"
     execution_order: int = 100
+    misfire_policy: Literal["queue_all", "queue_latest", "skip"] = "queue_latest"
     run_frequency_minutes: int | None = None
     timezone: str | None = "America/New_York"
     run_times: list[str] = Field(default_factory=list)
@@ -131,6 +138,14 @@ def reset_session(req: ResetRequest) -> dict:
     return get_runtime_service().reset_session(session_id=req.session_id)
 
 
+@app.post("/api/session/restart_context")
+def restart_context(req: RestartContextRequest) -> dict:
+    return get_runtime_service().restart_session_context(
+        session_id=req.session_id,
+        history_limit=req.history_limit,
+    )
+
+
 @app.post("/api/session/init")
 def init_session(req: InitRequest) -> dict:
     return get_runtime_service().init_session(session_id=req.session_id)
@@ -139,6 +154,17 @@ def init_session(req: InitRequest) -> dict:
 @app.post("/api/session/context")
 def session_context(req: SessionContextRequest) -> dict:
     return get_runtime_service().session_context_snapshot(session_id=req.session_id)
+
+
+@app.get("/api/session/history")
+def session_history(session_id: str = "default", limit: int = 100) -> dict:
+    safe_limit = max(1, min(500, int(limit)))
+    return get_runtime_service().session_history(session_id=session_id, limit=safe_limit)
+
+
+@app.post("/api/session/history/clear")
+def clear_session_history(req: ResetRequest) -> dict:
+    return get_runtime_service().clear_session_history(session_id=req.session_id)
 
 
 @app.get("/api/central/status")
@@ -211,6 +237,7 @@ def central_upsert_schedule(req: ScheduleUpsertRequest) -> dict:
         enabled=req.enabled,
         mode=req.mode,
         execution_order=req.execution_order,
+        misfire_policy=req.misfire_policy,
         run_frequency_minutes=req.run_frequency_minutes,
         timezone=req.timezone,
         run_times=req.run_times,
@@ -623,6 +650,18 @@ def index() -> HTMLResponse:
       background: var(--bot);
     }
 
+    .msg-time-divider {
+      align-self: center;
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: #f2ede3;
+      color: var(--muted);
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.7rem;
+      line-height: 1.2;
+    }
+
     @keyframes rise {
       from { transform: translateY(4px); opacity: 0; }
       to { transform: translateY(0); opacity: 1; }
@@ -856,8 +895,8 @@ def index() -> HTMLResponse:
           </div>
           <div class="row">
             <button class="primary" onclick="sendMsg()">Send</button>
-            <button class="warn" onclick="resetSession()">Reset Session</button>
-            <button class="ghost" onclick="openContextDialog()">Context JSON</button>
+            <button class="warn" onclick="resetContext()">Reset Context</button>
+            <button onclick="normalContext()">Normal Context</button>
           </div>
           <div id="status" class="status"></div>
         </div>
@@ -900,6 +939,13 @@ def index() -> HTMLResponse:
                 <option value="frequency">frequency</option>
                 <option value="calendar">calendar</option>
               </select>
+              <select id="sched-misfire">
+                <option value="queue_latest">misfire: queue_latest</option>
+                <option value="queue_all">misfire: queue_all</option>
+                <option value="skip">misfire: skip</option>
+              </select>
+            </div>
+            <div class="row">
               <label class="day-item"><input id="sched-enabled" type="checkbox" checked /> enabled</label>
             </div>
             <div class="sched-time-entry frequency" id="sched-frequency-row">
@@ -994,6 +1040,7 @@ def index() -> HTMLResponse:
     // Compatibility fallback: activates only if the richer UI script failed to initialize.
     (function () {
       function el(id) { return document.getElementById(id); }
+      var DEFAULT_SESSION_HISTORY_LIMIT = 100;
       function appendMessage(role, text) {
         var messages = el('messages');
         if (!messages) return;
@@ -1014,6 +1061,38 @@ def index() -> HTMLResponse:
           onDone(xhr.status, body);
         };
         xhr.send(JSON.stringify(payload || {}));
+      }
+      function getJson(url, onDone) {
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', url, true);
+        xhr.onreadystatechange = function () {
+          if (xhr.readyState !== 4) return;
+          var body = {};
+          try { body = JSON.parse(xhr.responseText || '{}'); } catch (_e) {}
+          onDone(xhr.status, body);
+        };
+        xhr.send();
+      }
+      function policyHistoryLimit(rawValue) {
+        var parsed = parseInt(String(rawValue == null ? '' : rawValue), 10);
+        if (!isFinite(parsed) || parsed <= 0) return DEFAULT_SESSION_HISTORY_LIMIT;
+        if (parsed > 500) return 500;
+        return parsed;
+      }
+      function loadSessionHistoryFallback(sessionId, limit, onDone) {
+        var safeLimit = policyHistoryLimit(limit);
+        getJson('/api/session/history?session_id=' + encodeURIComponent(sessionId) + '&limit=' + encodeURIComponent(String(safeLimit)), function (_status, body) {
+          var messages = el('messages');
+          if (messages) messages.innerHTML = '';
+          var entries = body && body.ok && body.entries && body.entries.length ? body.entries : [];
+          for (var i = 0; i < entries.length; i += 1) {
+            var entry = entries[i] || {};
+            var role = entry.role === 'user' ? 'user' : 'bot';
+            var text = entry.content ? String(entry.content) : '';
+            if (text) appendMessage(role, text);
+          }
+          onDone(entries.length, body || {});
+        });
       }
       function getSessionId() {
         var sessionInput = el('session');
@@ -1163,11 +1242,12 @@ def index() -> HTMLResponse:
             setBusyStatus(false, '');
           });
         };
-        window.resetSession = function () {
+        window.resetContext = function () {
           var sessionId = getSessionId();
-          setBusyStatus(true, 'Resetting session...');
+          setBusyStatus(true, 'Resetting context...');
           postJson('/api/session/reset', { session_id: sessionId }, function (_status, body) {
-            appendMessage('bot', body && body.note ? body.note : 'Session reset.');
+            var messages = el('messages');
+            if (messages) messages.innerHTML = '';
             setLastResponsePanel({
               route: 'session.reset',
               reply: body && body.note ? body.note : 'Session reset.',
@@ -1175,9 +1255,32 @@ def index() -> HTMLResponse:
             });
             setRuntimeFromResponse({ route: 'session.reset', data: {} }, sessionId);
             var progressEl = el('progress');
-            if (progressEl) progressEl.textContent = 'Session context reset.';
+            if (progressEl) progressEl.textContent = 'Session context reset (history preserved).';
             setBusyStatus(false, '');
             refreshCentralStatusOnly();
+          });
+        };
+        window.normalContext = function () {
+          var sessionId = getSessionId();
+          setBusyStatus(true, 'Loading normal context...');
+          postJson('/api/session/init', { session_id: sessionId }, function (_status, body) {
+            var preload = body && body.preload ? body.preload : {};
+            var historyLimit = policyHistoryLimit(preload.rehydrate_limit);
+            loadSessionHistoryFallback(sessionId, historyLimit, function (loadedCount) {
+              if ((loadedCount || 0) === 0 && body && body.welcome) {
+                appendMessage('bot', body.welcome);
+              }
+              setLastResponsePanel({
+                route: 'session.init',
+                reply: body && body.welcome ? body.welcome : 'Session initialized.',
+                data: {}
+              });
+              setRuntimeFromResponse({ route: 'session.init', data: {} }, sessionId);
+              var progressEl = el('progress');
+              if (progressEl) progressEl.textContent = 'Session initialized (' + sessionId + ').';
+              setBusyStatus(false, '');
+              refreshCentralStatusOnly();
+            });
           });
         };
         window.openContextDialog = function () {
@@ -1212,6 +1315,7 @@ def index() -> HTMLResponse:
             if (typeof dialogEl.close === 'function') dialogEl.close();
           });
         }
+        window.normalContext();
         refreshCentralStatusOnly();
       }
       function maybeInstallFallback() {
@@ -1246,6 +1350,7 @@ def index() -> HTMLResponse:
     const tasksListEl = document.getElementById('tasks-list');
     const scheduleTaskSelect = document.getElementById('sched-task-id');
     const scheduleModeSelect = document.getElementById('sched-mode');
+    const scheduleMisfireSelect = document.getElementById('sched-misfire');
     const scheduleEnabledCheckbox = document.getElementById('sched-enabled');
     const scheduleCalendarFields = document.getElementById('sched-calendar-fields');
     const scheduleFrequencyRow = document.getElementById('sched-frequency-row');
@@ -1269,8 +1374,12 @@ def index() -> HTMLResponse:
     let currentUiTab = 'chat';
     let cachedTaskProfiles = [];
     let cachedSchedules = [];
+    let sessionTimezone = 'UTC';
+    let lastRenderedMessageMs = null;
+    const MESSAGE_GAP_MS = 2 * 60 * 60 * 1000;
     let scheduleEditingId = null;
     let expandedScheduleIds = new Set();
+    const DEFAULT_SESSION_HISTORY_LIMIT = 100;
 
     function switchTab(tabName) {
       currentUiTab = tabName === 'schedules' ? 'schedules' : 'chat';
@@ -1530,6 +1639,7 @@ def index() -> HTMLResponse:
         scheduleNameInput.value = selected ? `${selected}_schedule` : '';
       }
       if (scheduleModeSelect) scheduleModeSelect.value = 'frequency';
+      if (scheduleMisfireSelect) scheduleMisfireSelect.value = 'queue_latest';
       setFrequencySelectorsFromMinutes(1440);
       clearCalendarRunTimeRows();
       addCalendarRunTimeRow('09:00');
@@ -1688,6 +1798,7 @@ def index() -> HTMLResponse:
       if (scheduleNameInput) scheduleNameInput.value = item.schedule_id || '';
       if (scheduleTaskSelect) scheduleTaskSelect.value = item.task_id || item.profile_id || '';
       if (scheduleModeSelect) scheduleModeSelect.value = item.mode || 'frequency';
+      if (scheduleMisfireSelect) scheduleMisfireSelect.value = item.misfire_policy || 'queue_latest';
       setFrequencySelectorsFromMinutes(item.run_frequency_minutes);
       if (scheduleEnabledCheckbox) scheduleEnabledCheckbox.checked = !!item.enabled;
       document.getElementById('sched-timezone').value = item.timezone || 'America/New_York';
@@ -1736,9 +1847,11 @@ def index() -> HTMLResponse:
         const runTimes = normalizeRunTimes(row.run_times);
         const dayList = Array.isArray(row.days_of_week) ? row.days_of_week.join(', ') : '-';
         const frequencyLabel = frequencyMinutesToHHMM(row.run_frequency_minutes);
+        const policyLine = `<div>misfire policy: ${row.misfire_policy || 'queue_latest'}</div>`;
+        const cursorLines = `<div>next run: ${row.next_run_at || '-'}</div><div>last planned: ${row.last_planned_run_at || '-'}</div>`;
         const detailLines = row.mode === 'frequency'
-          ? `<div>frequency: ${frequencyLabel}</div>`
-          : `${runTimes.map((time) => `<div>time: ${formatCalendarTime(time)}</div>`).join('')}<div>days: ${dayList || '-'}</div><div>timezone: ${row.timezone || 'America/New_York'}</div>`;
+          ? `<div>frequency: ${frequencyLabel}</div>${policyLine}${cursorLines}`
+          : `${runTimes.map((time) => `<div>time: ${formatCalendarTime(time)}</div>`).join('')}<div>days: ${dayList || '-'}</div><div>timezone: ${row.timezone || 'America/New_York'}</div>${policyLine}${cursorLines}`;
         return `
           <div class="sched-row">
             <div class="sched-row-title">
@@ -1832,6 +1945,7 @@ def index() -> HTMLResponse:
         task_id: taskId,
         enabled: !!scheduleEnabledCheckbox.checked,
         mode,
+        misfire_policy: scheduleMisfireSelect ? String(scheduleMisfireSelect.value || 'queue_latest') : 'queue_latest',
         execution_order: 100,
         run_frequency_minutes: mode === 'frequency' ? frequencyValidation.minutes : null,
         timezone: 'America/New_York',
@@ -1861,12 +1975,126 @@ def index() -> HTMLResponse:
       }
     }
 
-    function appendMessage(role, text) {
+    function parseMessageTimeMs(createdAt) {
+      const value = String(createdAt || '').trim();
+      if (!value) return null;
+      const ms = Date.parse(value);
+      return Number.isFinite(ms) ? ms : null;
+    }
+
+    function dateKeyForMs(ms) {
+      try {
+        return new Intl.DateTimeFormat('en-CA', {
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          timeZone: sessionTimezone || 'UTC',
+        }).format(new Date(ms));
+      } catch (_err) {
+        return new Date(ms).toISOString().slice(0, 10);
+      }
+    }
+
+    function formatMessageTimeLabel(createdAt, previousMs = null) {
+      const ms = parseMessageTimeMs(createdAt);
+      if (ms === null) return null;
+      const date = new Date(ms);
+      let timeLabel = null;
+      try {
+        timeLabel = new Intl.DateTimeFormat('en-US', {
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: true,
+          timeZone: sessionTimezone || 'UTC',
+        }).format(date);
+      } catch (_err) {
+        timeLabel = new Intl.DateTimeFormat('en-US', {
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: true,
+        }).format(date);
+      }
+      const buildDateLabel = () => {
+        try {
+          return new Intl.DateTimeFormat('en-US', {
+            month: 'short',
+            day: 'numeric',
+            year: 'numeric',
+            timeZone: sessionTimezone || 'UTC',
+          }).format(date);
+        } catch (_err) {
+          return dateKeyForMs(ms);
+        }
+      };
+
+      if (previousMs === null) {
+        return `${buildDateLabel()} ${timeLabel}`;
+      }
+
+      const prevKey = dateKeyForMs(previousMs);
+      const currKey = dateKeyForMs(ms);
+      if (prevKey === currKey) return timeLabel;
+
+      return `${buildDateLabel()} ${timeLabel}`;
+    }
+
+    function appendMessage(role, text, meta = {}) {
+      const createdAt = (meta && meta.created_at) ? String(meta.created_at) : new Date().toISOString();
+      const safeText = text == null ? '' : String(text);
+      const createdMs = parseMessageTimeMs(createdAt);
+      if (createdMs !== null) {
+        const isFirstVisibleMessage = lastRenderedMessageMs === null;
+        const hasLargeGap = !isFirstVisibleMessage && (createdMs - lastRenderedMessageMs) >= MESSAGE_GAP_MS;
+        if (isFirstVisibleMessage || hasLargeGap) {
+          const stamp = formatMessageTimeLabel(createdAt, lastRenderedMessageMs);
+          if (stamp) {
+            const marker = document.createElement('div');
+            marker.className = 'msg-time-divider';
+            marker.textContent = stamp;
+            messagesEl.appendChild(marker);
+          }
+        }
+      }
       const div = document.createElement('div');
       div.className = `msg ${role}`;
-      div.textContent = text;
+      div.textContent = safeText;
+      div.dataset.createdAt = createdAt;
       messagesEl.appendChild(div);
       messagesEl.scrollTop = messagesEl.scrollHeight;
+      if (createdMs !== null) lastRenderedMessageMs = createdMs;
+    }
+
+    function renderSessionHistory(entries) {
+      messagesEl.innerHTML = '';
+      lastRenderedMessageMs = null;
+      if (!Array.isArray(entries) || !entries.length) {
+        return 0;
+      }
+      entries.forEach((entry) => {
+        const role = entry && entry.role === 'user' ? 'user' : 'bot';
+        const text = entry && entry.content ? String(entry.content) : '';
+        const createdAt = entry && entry.created_at ? String(entry.created_at) : null;
+        if (text) appendMessage(role, text, { created_at: createdAt });
+      });
+      return entries.length;
+    }
+
+    async function loadSessionHistory(sessionId, limit = 100) {
+      try {
+        const res = await fetch(`/api/session/history?session_id=${encodeURIComponent(sessionId)}&limit=${encodeURIComponent(limit)}`);
+        const payload = await res.json();
+        if (!payload || !payload.ok) return 0;
+        sessionTimezone = payload && payload.timezone ? String(payload.timezone) : 'UTC';
+        return renderSessionHistory(payload.entries);
+      } catch (_err) {
+        return 0;
+      }
+    }
+
+    function policyHistoryLimit(rawValue) {
+      const parsed = Number.parseInt(String(rawValue == null ? '' : rawValue), 10);
+      if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_SESSION_HISTORY_LIMIT;
+      return Math.max(1, Math.min(500, parsed));
     }
 
     function setBusyStatus(on, text) {
@@ -2074,7 +2302,7 @@ def index() -> HTMLResponse:
       const session_id = (document.getElementById('session').value || 'default').trim();
       if (!message) return;
 
-      appendMessage('user', message);
+      appendMessage('user', message, { created_at: new Date().toISOString() });
       document.getElementById('msg').value = '';
 
       setBusyStatus(true, 'Working...');
@@ -2087,13 +2315,14 @@ def index() -> HTMLResponse:
           body: JSON.stringify({message, session_id})
         });
         const data = await res.json();
-        appendMessage('bot', data.reply || '(No reply)');
+        const transcriptMeta = data && data.data && data.data.transcript_meta ? data.data.transcript_meta : {};
+        appendMessage('bot', data.reply || '(No reply)', { created_at: transcriptMeta.assistant_created_at || new Date().toISOString() });
         setLastResponsePanel(data);
         setRuntimeFromResponse(data, session_id);
         setProgressFromResponse(data);
         await refreshCentralStatus();
       } catch (err) {
-        appendMessage('bot', 'Request failed.');
+        appendMessage('bot', 'Request failed.', { created_at: new Date().toISOString() });
         progressEl.textContent = 'Request failed.';
         lastResponseEl.textContent = JSON.stringify({
           route: "error",
@@ -2106,33 +2335,9 @@ def index() -> HTMLResponse:
       }
     }
 
-    async function resetSession() {
+    async function normalContext(showWelcome = true) {
       const session_id = (document.getElementById('session').value || 'default').trim();
-      setBusyStatus(true, 'Resetting session...');
-      try {
-        const res = await fetch('/api/session/reset', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({session_id})
-        });
-        const data = await res.json();
-        appendMessage('bot', data.note || 'Session reset.');
-        setLastResponsePanel({
-          route: 'session.reset',
-          reply: data.note || 'Session reset.',
-          data: {},
-        });
-        setRuntimeFromResponse({ route: 'session.reset', data: {} }, session_id);
-        progressEl.textContent = 'Session context reset.';
-        await refreshCentralStatus();
-      } finally {
-        setBusyStatus(false, '');
-      }
-    }
-
-    async function initSession(showWelcome = true) {
-      const session_id = (document.getElementById('session').value || 'default').trim();
-      setBusyStatus(true, 'Initializing session...');
+      setBusyStatus(true, 'Loading normal context...');
       try {
         const res = await fetch('/api/session/init', {
           method: 'POST',
@@ -2140,16 +2345,45 @@ def index() -> HTMLResponse:
           body: JSON.stringify({session_id})
         });
         const data = await res.json();
-        if (showWelcome && data && data.welcome) {
-          appendMessage('bot', data.welcome);
+        const historyLimit = policyHistoryLimit(
+          data && data.preload ? data.preload.rehydrate_limit : DEFAULT_SESSION_HISTORY_LIMIT
+        );
+        const loadedHistoryCount = await loadSessionHistory(session_id, historyLimit);
+        if (showWelcome && data && data.welcome && loadedHistoryCount === 0) {
+          appendMessage('bot', data.welcome, { created_at: new Date().toISOString() });
         }
         setLastResponsePanel({
           route: 'session.init',
-          reply: (data && data.welcome) ? data.welcome : 'Session initialized.',
-          data: { tool_calls: [] }
+          reply: data.welcome || 'Session initialized.',
+          data: {},
         });
         setRuntimeFromResponse({ route: 'session.init', data: { context_debug: {} } }, session_id);
         progressEl.textContent = `Session initialized (${session_id}).`;
+        await refreshCentralStatus();
+      } finally {
+        setBusyStatus(false, '');
+      }
+    }
+
+    async function resetContext() {
+      const session_id = (document.getElementById('session').value || 'default').trim();
+      setBusyStatus(true, 'Resetting context...');
+      try {
+        const res = await fetch('/api/session/reset', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({session_id})
+        });
+        const data = await res.json();
+        messagesEl.innerHTML = '';
+        lastRenderedMessageMs = null;
+        setLastResponsePanel({
+          route: 'session.reset',
+          reply: data.note || 'Session reset.',
+          data: {},
+        });
+        setRuntimeFromResponse({ route: 'session.reset', data: {} }, session_id);
+        progressEl.textContent = 'Session context reset (history preserved).';
         await refreshCentralStatus();
       } finally {
         setBusyStatus(false, '');
@@ -2161,7 +2395,7 @@ def index() -> HTMLResponse:
     });
 
     document.getElementById('session').addEventListener('change', () => {
-      initSession(true);
+      normalContext(true);
     });
 
     window.switchTab = switchTab;
@@ -2170,6 +2404,8 @@ def index() -> HTMLResponse:
     window.refreshScheduleManager = refreshScheduleManager;
     window.saveSchedule = saveSchedule;
     window.addCalendarRunTimeRow = addCalendarRunTimeRow;
+    window.resetContext = resetContext;
+    window.normalContext = normalContext;
     window.openContextDialog = openContextDialog;
 
     if (contextCloseBtnEl && contextDialogEl) {
@@ -2206,7 +2442,7 @@ def index() -> HTMLResponse:
     }
     onScheduleModeChange();
     clearScheduleForm();
-    initSession(true);
+    normalContext(true);
     window.__zubotRichUiInitDone = true;
   </script>
 </body>
