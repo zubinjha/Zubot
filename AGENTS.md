@@ -20,7 +20,7 @@ This file defines how agents should operate inside this repository.
 - Config structure rule: keep `config/config.json` and `config/example_config.json` schema-aligned in the same change set (example file uses placeholders only).
 - Central runtime config contracts live under:
   - `central_service.*`
-  - `pre_defined_tasks.*`
+  - `task_profiles.*` (legacy import-only; runtime source of truth is SQLite `task_profiles` table)
 
 ## Tooling Conventions
 - Kernel tools live in `src/zubot/tools/kernel/`.

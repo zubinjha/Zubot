@@ -271,7 +271,13 @@ class TaskAgentRunner:
             "attempts_configured": 1,
         }
 
-    def describe_run(self, *, profile_id: str, payload: dict[str, Any] | None = None) -> str:
+    def describe_run(
+        self,
+        *,
+        profile_id: str,
+        payload: dict[str, Any] | None = None,
+        profile: dict[str, Any] | None = None,
+    ) -> str:
         payload_dict = payload if isinstance(payload, dict) else {}
         run_kind = str(payload_dict.get("run_kind") or "predefined").strip().lower()
         if run_kind == "agentic":
@@ -282,7 +288,7 @@ class TaskAgentRunner:
                 return f"{task_name}: agentic execution ({preview})"
             return f"{task_name}: agentic execution"
 
-        profile = self._load_task_profiles().get(profile_id)
+        profile = profile if isinstance(profile, dict) else self._load_task_profiles().get(profile_id)
         if not isinstance(profile, dict):
             return f"Task profile `{profile_id}` is not defined."
 
@@ -426,13 +432,14 @@ class TaskAgentRunner:
         profile_id: str,
         payload: dict[str, Any] | None = None,
         cancel_event: Event | None = None,
+        profile: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload_dict = payload if isinstance(payload, dict) else {}
         run_kind = str(payload_dict.get("run_kind") or "predefined").strip().lower()
         if run_kind in {"agentic", "interactive_wrapper"}:
             return self._run_agentic_task(payload=payload_dict, cancel_event=cancel_event)
 
-        profile = self._load_task_profiles().get(profile_id)
+        profile = profile if isinstance(profile, dict) else self._load_task_profiles().get(profile_id)
         if not isinstance(profile, dict):
             return {
                 "ok": False,

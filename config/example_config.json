@@ -146,22 +146,5 @@
                 "timeout_sec": 15
             }
         }
-    },
-    "task_profiles": {
-        "tasks": {
-            "indeed_daily_search": {
-                "name": "Indeed Daily Search Routine",
-                "kind": "script",
-                "entrypoint_path": "src/zubot/tasks/indeed_daily_search/task.py",
-                "resources_path": "src/zubot/tasks/indeed_daily_search",
-                "queue_group": "default",
-                "args": [],
-                "timeout_sec": 1800,
-                "retry_policy": {
-                    "max_attempts": 1,
-                    "backoff_sec": 0.0
-                }
-            }
-        }
     }
 }

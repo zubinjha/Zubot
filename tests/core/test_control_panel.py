@@ -27,6 +27,12 @@ class _FakeCentral:
     def list_defined_tasks(self) -> dict[str, Any]:
         return {"ok": True, "tasks": [{"task_id": "task_a"}]}
 
+    def upsert_task_profile(self, **kwargs) -> dict[str, Any]:
+        return {"ok": True, "task_id": kwargs.get("task_id") or "task_new"}
+
+    def delete_task_profile(self, *, task_id: str) -> dict[str, Any]:
+        return {"ok": True, "task_id": task_id, "deleted": 1}
+
     def upsert_schedule(self, **kwargs) -> dict[str, Any]:
         return {"ok": True, "schedule_id": kwargs.get("schedule_id") or "sched_new"}
 
@@ -71,6 +77,8 @@ def test_control_panel_delegates_to_central(monkeypatch):
     assert panel.start()["running"] is True
     assert panel.stop()["running"] is False
     assert panel.enqueue_task(task_id="task_a")["profile_id"] == "task_a"
+    assert panel.upsert_task_profile(task_id="task_new")["task_id"] == "task_new"
+    assert panel.delete_task_profile(task_id="task_new")["deleted"] == 1
     assert panel.enqueue_agentic_task(task_name="Research", instructions="Research X")["run_id"] == "trun_agentic_1"
     assert panel.kill_run(run_id="run_1")["run_id"] == "run_1"
     assert panel.list_waiting_runs(limit=5)["count"] == 1

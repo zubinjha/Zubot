@@ -83,7 +83,7 @@ def _load_central_settings() -> CentralServiceSettings:
     )
 
 
-def _load_task_profiles() -> dict[str, dict[str, Any]]:
+def _load_task_profiles_from_config() -> dict[str, dict[str, Any]]:
     try:
         cfg = load_config()
     except Exception:
@@ -172,7 +172,39 @@ class CentralService:
         self._run_to_slot: dict[str, str] = {}
         self._task_slots: dict[str, dict[str, Any]] = {}
         self._events: list[dict[str, Any]] = []
+        self._seed_task_profiles_from_config_if_empty()
         self._sync_task_slots(settings.task_runner_concurrency)
+
+    def _seed_task_profiles_from_config_if_empty(self) -> None:
+        if self._store.list_task_profiles():
+            return
+        for task_id, payload in _load_task_profiles_from_config().items():
+            if not isinstance(payload, dict):
+                continue
+            self._store.upsert_task_profile(
+                {
+                    "task_id": task_id,
+                    "name": payload.get("name") or task_id,
+                    "kind": payload.get("kind") or "script",
+                    "entrypoint_path": payload.get("entrypoint_path"),
+                    "module": payload.get("module"),
+                    "resources_path": payload.get("resources_path"),
+                    "queue_group": payload.get("queue_group"),
+                    "timeout_sec": payload.get("timeout_sec"),
+                    "retry_policy": payload.get("retry_policy"),
+                    "enabled": True,
+                    "source": "config",
+                }
+            )
+
+    def _task_profiles_map(self) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
+        for item in self._store.list_task_profiles():
+            task_id = str(item.get("task_id") or "").strip()
+            if not task_id:
+                continue
+            out[task_id] = item
+        return out
 
     @staticmethod
     def _utc_now_iso() -> str:
@@ -433,7 +465,7 @@ class CentralService:
             worker.start()
             worker.kick()
 
-        task_profiles = _load_task_profiles()
+        task_profiles = self._task_profiles_map()
         run_row = self._store.get_run(run_id=run_id)
         task_name = str(task_profiles.get(profile_id, {}).get("name") or profile_id)
         if isinstance(run_row, dict):
@@ -567,6 +599,7 @@ class CentralService:
             if str(self._store.db_path) != str(resolved):
                 # Reload store if db path changed.
                 self._store = TaskSchedulerStore(db_path=settings.scheduler_db_path)
+                self._seed_task_profiles_from_config_if_empty()
                 self._heartbeat = TaskHeartbeat(store=self._store)
                 self._db_queue.stop()
                 self._db_queue = CentralDbQueue(
@@ -613,6 +646,7 @@ class CentralService:
         run_id = str(claimed.get("run_id") or "")
         profile_id = str(claimed.get("profile_id") or "")
         payload = claimed.get("payload") if isinstance(claimed.get("payload"), dict) else {}
+        profile = claimed.get("profile") if isinstance(claimed.get("profile"), dict) else self._store.get_task_profile(task_id=profile_id)
         origin = str(payload.get("origin") or payload.get("trigger") or "manual")
         with self._lock:
             slot_id = self._run_to_slot.get(run_id)
@@ -638,7 +672,12 @@ class CentralService:
         )
 
         try:
-            result = self._runner.run_profile(profile_id=profile_id, payload=payload, cancel_event=cancel_event)
+            result = self._runner_run_profile(
+                profile_id=profile_id,
+                payload=payload,
+                cancel_event=cancel_event,
+                profile=profile,
+            )
             status = str(result.get("status") or "done")
             if status not in {"done", "failed", "blocked", "waiting_for_user"}:
                 status = "failed"
@@ -741,7 +780,7 @@ class CentralService:
 
     def _dispatch_available(self) -> dict[str, Any]:
         started = 0
-        task_profiles = _load_task_profiles()
+        task_profiles = self._task_profiles_map()
         while True:
             with self._lock:
                 if len(self._active_threads) >= self._settings.task_runner_concurrency:
@@ -759,7 +798,8 @@ class CentralService:
             run_id = str(claimed.get("run_id") or "")
             profile_id = str(claimed.get("profile_id") or "")
             payload = claimed.get("payload") if isinstance(claimed.get("payload"), dict) else {}
-            desc = self._runner.describe_run(profile_id=profile_id, payload=payload)
+            profile = task_profiles.get(profile_id) if isinstance(task_profiles.get(profile_id), dict) else None
+            desc = self._runner_describe(profile_id=profile_id, payload=payload, profile=profile)
             payload_name = payload.get("task_name") if isinstance(payload.get("task_name"), str) else None
             task_name = (
                 payload_name.strip()
@@ -768,6 +808,7 @@ class CentralService:
             )
 
             thread = Thread(target=self._execute_claimed_run, args=(claimed,), daemon=True)
+            claimed["profile"] = profile
             with self._lock:
                 self._active_descriptions[run_id] = desc
                 self._cancel_events[run_id] = Event()
@@ -822,11 +863,45 @@ class CentralService:
             "housekeeping": housekeeping,
         }
 
+    def _runner_describe(self, *, profile_id: str, payload: dict[str, Any], profile: dict[str, Any] | None) -> str:
+        try:
+            return str(self._runner.describe_run(profile_id=profile_id, payload=payload, profile=profile))
+        except TypeError:
+            return str(self._runner.describe_run(profile_id=profile_id, payload=payload))
+
+    def _runner_run_profile(
+        self,
+        *,
+        profile_id: str,
+        payload: dict[str, Any],
+        cancel_event: Event | None,
+        profile: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        try:
+            out = self._runner.run_profile(
+                profile_id=profile_id,
+                payload=payload,
+                cancel_event=cancel_event,
+                profile=profile,
+            )
+        except TypeError:
+            out = self._runner.run_profile(
+                profile_id=profile_id,
+                payload=payload,
+                cancel_event=cancel_event,
+            )
+        return out if isinstance(out, dict) else {}
+
     def trigger_profile(self, *, profile_id: str, description: str | None = None) -> dict[str, Any]:
-        out = self._store.enqueue_manual_run(profile_id=profile_id, description=description)
+        clean_profile_id = str(profile_id or "").strip()
+        if not clean_profile_id:
+            return {"ok": False, "error": "profile_id is required."}
+        if self._store.get_task_profile(task_id=clean_profile_id) is None:
+            return {"ok": False, "error": f"Unknown task_id `{clean_profile_id}`."}
+
+        out = self._store.enqueue_manual_run(profile_id=clean_profile_id, description=description)
         if out.get("ok"):
             run_id = str(out.get("run_id") or "").strip()
-            clean_profile_id = str(profile_id or "").strip()
             if run_id and clean_profile_id:
                 detail = "trigger=manual"
                 if isinstance(description, str) and description.strip():
@@ -1112,7 +1187,7 @@ class CentralService:
         }
 
     def list_defined_tasks(self) -> dict[str, Any]:
-        tasks = _load_task_profiles()
+        tasks = self._task_profiles_map()
         out: list[dict[str, Any]] = []
         for task_id, payload in sorted(tasks.items(), key=lambda item: item[0]):
             kind = str(payload.get("kind") or "script")
@@ -1131,6 +1206,40 @@ class CentralService:
             )
         return {"ok": True, "tasks": out}
 
+    def upsert_task_profile(
+        self,
+        *,
+        task_id: str,
+        name: str | None = None,
+        kind: str = "script",
+        entrypoint_path: str | None = None,
+        module: str | None = None,
+        resources_path: str | None = None,
+        queue_group: str | None = None,
+        timeout_sec: int | None = None,
+        retry_policy: dict[str, Any] | None = None,
+        enabled: bool = True,
+        source: str = "ui",
+    ) -> dict[str, Any]:
+        return self._store.upsert_task_profile(
+            {
+                "task_id": task_id,
+                "name": name or task_id,
+                "kind": kind,
+                "entrypoint_path": entrypoint_path,
+                "module": module,
+                "resources_path": resources_path,
+                "queue_group": queue_group,
+                "timeout_sec": timeout_sec,
+                "retry_policy": retry_policy if isinstance(retry_policy, dict) else None,
+                "enabled": enabled,
+                "source": source,
+            }
+        )
+
+    def delete_task_profile(self, *, task_id: str) -> dict[str, Any]:
+        return self._store.delete_task_profile(task_id=task_id)
+
     def upsert_schedule(
         self,
         *,
@@ -1147,7 +1256,7 @@ class CentralService:
         clean_task_id = str(task_id or "").strip()
         if not clean_task_id:
             return {"ok": False, "error": "task_id is required."}
-        tasks = _load_task_profiles()
+        tasks = self._task_profiles_map()
         if clean_task_id not in tasks:
             return {"ok": False, "error": f"Unknown task_id `{clean_task_id}`."}
 
@@ -1193,7 +1302,7 @@ class CentralService:
         return self._store.delete_schedule(schedule_id=schedule_id)
 
     def _check_in_payload(self) -> list[dict[str, Any]]:
-        profiles = _load_task_profiles()
+        profiles = self._task_profiles_map()
         runs = self._store.list_runs(limit=500)
 
         queued_runs = [r for r in runs if r.get("status") == "queued"]
@@ -1230,7 +1339,7 @@ class CentralService:
                 description = self._active_descriptions[current_run_id]
             elif isinstance(current_run, dict):
                 payload = current_run.get("payload") if isinstance(current_run.get("payload"), dict) else {}
-                description = self._runner.describe_run(profile_id=profile_id, payload=payload)
+                description = self._runner_describe(profile_id=profile_id, payload=payload, profile=profile)
                 if state == "waiting_for_user":
                     waiting = payload.get("waiting") if isinstance(payload.get("waiting"), dict) else {}
                     question = waiting.get("question")

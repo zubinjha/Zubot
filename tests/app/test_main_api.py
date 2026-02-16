@@ -68,6 +68,39 @@ class _FakeRuntimeService:
     def central_list_defined_tasks(self):
         return {"ok": True, "tasks": [{"task_id": "task_a", "name": "Task A"}]}
 
+    def central_upsert_task_profile(
+        self,
+        *,
+        task_id: str,
+        name: str | None = None,
+        kind: str = "script",
+        entrypoint_path: str | None = None,
+        module: str | None = None,
+        resources_path: str | None = None,
+        queue_group: str | None = None,
+        timeout_sec: int | None = None,
+        retry_policy: dict | None = None,
+        enabled: bool = True,
+        source: str = "ui",
+    ):
+        return {
+            "ok": True,
+            "task_id": task_id,
+            "name": name or task_id,
+            "kind": kind,
+            "entrypoint_path": entrypoint_path,
+            "module": module,
+            "resources_path": resources_path,
+            "queue_group": queue_group,
+            "timeout_sec": timeout_sec,
+            "retry_policy": retry_policy or {},
+            "enabled": enabled,
+            "source": source,
+        }
+
+    def central_delete_task_profile(self, *, task_id: str):
+        return {"ok": True, "task_id": task_id, "deleted": 1}
+
     def central_upsert_schedule(
         self,
         *,
@@ -245,6 +278,25 @@ def test_central_endpoints(monkeypatch):
     tasks = client.get("/api/central/tasks")
     assert tasks.status_code == 200
     assert tasks.json()["ok"] is True
+
+    upsert_task = client.post(
+        "/api/central/tasks",
+        json={
+            "task_id": "task_new",
+            "name": "Task New",
+            "kind": "script",
+            "entrypoint_path": "src/zubot/tasks/task_new/task.py",
+            "timeout_sec": 120,
+            "enabled": True,
+        },
+    )
+    assert upsert_task.status_code == 200
+    assert upsert_task.json()["ok"] is True
+    assert upsert_task.json()["task_id"] == "task_new"
+
+    delete_task = client.delete("/api/central/tasks/task_new")
+    assert delete_task.status_code == 200
+    assert delete_task.json()["ok"] is True
 
     save_sched = client.post(
         "/api/central/schedules",

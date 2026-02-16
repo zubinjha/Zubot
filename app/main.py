@@ -97,6 +97,19 @@ class ScheduleUpsertRequest(BaseModel):
     days_of_week: list[str] = Field(default_factory=list)
 
 
+class TaskProfileUpsertRequest(BaseModel):
+    task_id: str
+    name: str | None = None
+    kind: Literal["script", "agentic", "interactive_wrapper"] = "script"
+    entrypoint_path: str | None = None
+    module: str | None = None
+    resources_path: str | None = None
+    queue_group: str | None = None
+    timeout_sec: int | None = None
+    retry_policy: dict[str, object] = Field(default_factory=dict)
+    enabled: bool = True
+
+
 @app.on_event("startup")
 def _init_runtime_client() -> None:
     # App is a client surface; central runtime ownership belongs to daemon/runtime service.
@@ -166,6 +179,28 @@ def central_metrics() -> dict:
 @app.get("/api/central/tasks")
 def central_tasks() -> dict:
     return get_runtime_service().central_list_defined_tasks()
+
+
+@app.post("/api/central/tasks")
+def central_upsert_task_profile(req: TaskProfileUpsertRequest) -> dict:
+    return get_runtime_service().central_upsert_task_profile(
+        task_id=req.task_id,
+        name=req.name,
+        kind=req.kind,
+        entrypoint_path=req.entrypoint_path,
+        module=req.module,
+        resources_path=req.resources_path,
+        queue_group=req.queue_group,
+        timeout_sec=req.timeout_sec,
+        retry_policy=req.retry_policy,
+        enabled=req.enabled,
+        source="ui",
+    )
+
+
+@app.delete("/api/central/tasks/{task_id}")
+def central_delete_task_profile(task_id: str) -> dict:
+    return get_runtime_service().central_delete_task_profile(task_id=task_id)
 
 
 @app.post("/api/central/schedules")
@@ -830,6 +865,32 @@ def index() -> HTMLResponse:
       <div id="panel-schedules" class="tab-panel schedules">
         <div class="sched-wrap">
           <div class="sched-form">
+            <h4 style="margin-top:0;">Task Registry</h4>
+            <div class="sched-grid">
+              <input id="task-task-id" placeholder="Task ID (example: indeed_daily_search)" />
+              <input id="task-name" placeholder="Task Name" />
+            </div>
+            <div class="sched-grid">
+              <select id="task-kind">
+                <option value="script">script</option>
+                <option value="agentic">agentic</option>
+                <option value="interactive_wrapper">interactive_wrapper</option>
+              </select>
+              <input id="task-timeout" type="number" min="1" step="1" inputmode="numeric" placeholder="Timeout Seconds" />
+            </div>
+            <div class="sched-grid">
+              <input id="task-entrypoint" placeholder="Entrypoint Path (for script kind)" />
+              <input id="task-resources" placeholder="Resources Path (optional)" />
+            </div>
+            <div class="row">
+              <button class="primary" onclick="saveTaskProfile()">Save Task</button>
+              <button class="warn" onclick="deleteTaskProfileFromForm()">Delete Task</button>
+            </div>
+            <div id="task-form-status" class="sched-status"></div>
+            <div id="tasks-list" class="worker-meta"></div>
+          </div>
+
+          <div class="sched-form">
             <div class="sched-grid">
               <input id="sched-name" placeholder="Schedule Name" />
               <select id="sched-task-id"></select>
@@ -1182,6 +1243,7 @@ def index() -> HTMLResponse:
     const tabChat = document.getElementById('tab-chat');
     const tabSchedules = document.getElementById('tab-schedules');
     const schedulesListEl = document.getElementById('schedules-list');
+    const tasksListEl = document.getElementById('tasks-list');
     const scheduleTaskSelect = document.getElementById('sched-task-id');
     const scheduleModeSelect = document.getElementById('sched-mode');
     const scheduleEnabledCheckbox = document.getElementById('sched-enabled');
@@ -1192,12 +1254,20 @@ def index() -> HTMLResponse:
     const scheduleFrequencyMinutes = document.getElementById('sched-frequency-minutes');
     const scheduleCalendarRows = document.getElementById('sched-calendar-time-rows');
     const scheduleFormStatus = document.getElementById('sched-form-status');
+    const taskFormStatus = document.getElementById('task-form-status');
+    const taskIdInput = document.getElementById('task-task-id');
+    const taskNameInput = document.getElementById('task-name');
+    const taskKindSelect = document.getElementById('task-kind');
+    const taskEntrypointInput = document.getElementById('task-entrypoint');
+    const taskResourcesInput = document.getElementById('task-resources');
+    const taskTimeoutInput = document.getElementById('task-timeout');
     const contextDialogEl = document.getElementById('context-dialog');
     const contextBodyEl = document.getElementById('context-body');
     const contextCloseBtnEl = document.getElementById('context-close-btn');
     const contextDownloadBtnEl = document.getElementById('context-download-btn');
     let latestContextSnapshot = null;
     let currentUiTab = 'chat';
+    let cachedTaskProfiles = [];
     let cachedSchedules = [];
     let scheduleEditingId = null;
     let expandedScheduleIds = new Set();
@@ -1243,6 +1313,14 @@ def index() -> HTMLResponse:
       scheduleFormStatus.classList.remove('error', 'ok');
       if (level === 'error') scheduleFormStatus.classList.add('error');
       if (level === 'ok') scheduleFormStatus.classList.add('ok');
+    }
+
+    function setTaskFormStatus(text, level = 'info') {
+      if (!taskFormStatus) return;
+      taskFormStatus.textContent = text || '';
+      taskFormStatus.classList.remove('error', 'ok');
+      if (level === 'error') taskFormStatus.classList.add('error');
+      if (level === 'ok') taskFormStatus.classList.add('ok');
     }
 
     function bindNumericOnly(inputEl) {
@@ -1462,12 +1540,34 @@ def index() -> HTMLResponse:
       onScheduleModeChange();
     }
 
+    function renderTaskProfilesList(tasks) {
+      if (!tasksListEl) return;
+      if (!Array.isArray(tasks) || !tasks.length) {
+        tasksListEl.textContent = 'No task profiles registered yet.';
+        return;
+      }
+      tasksListEl.textContent = `Registered tasks: ${tasks.map((row) => `${row.task_id} [${row.kind || 'script'}]`).join(', ')}`;
+    }
+
+    function fillTaskFormFromTask(taskId) {
+      const task = cachedTaskProfiles.find((row) => row.task_id === taskId);
+      if (!task) return;
+      if (taskIdInput) taskIdInput.value = task.task_id || '';
+      if (taskNameInput) taskNameInput.value = task.name || '';
+      if (taskKindSelect) taskKindSelect.value = task.kind || 'script';
+      if (taskEntrypointInput) taskEntrypointInput.value = task.entrypoint_path || '';
+      if (taskResourcesInput) taskResourcesInput.value = task.resources_path || '';
+      if (taskTimeoutInput) taskTimeoutInput.value = task.timeout_sec ? String(task.timeout_sec) : '';
+    }
+
     async function loadDefinedTasks() {
       const previousValue = scheduleTaskSelect ? scheduleTaskSelect.value : '';
       const res = await fetch('/api/central/tasks');
       const payload = await res.json();
       const ok = !!(payload && payload.ok);
       const tasks = payload && Array.isArray(payload.tasks) ? payload.tasks : [];
+      cachedTaskProfiles = tasks;
+      renderTaskProfilesList(tasks);
       scheduleTaskSelect.innerHTML = '';
       tasks.forEach((task) => {
         const opt = document.createElement('option');
@@ -1491,6 +1591,93 @@ def index() -> HTMLResponse:
       if (!scheduleEditingId && scheduleNameInput) {
         const selected = scheduleTaskSelect && scheduleTaskSelect.value ? scheduleTaskSelect.value : '';
         scheduleNameInput.value = selected ? `${selected}_schedule` : '';
+      }
+      if (taskIdInput && !taskIdInput.value && tasks.length) {
+        fillTaskFormFromTask(tasks[0].task_id);
+      }
+    }
+
+    async function saveTaskProfile() {
+      const taskId = taskIdInput ? String(taskIdInput.value || '').trim() : '';
+      const name = taskNameInput ? String(taskNameInput.value || '').trim() : '';
+      const kind = taskKindSelect ? String(taskKindSelect.value || 'script').trim() : 'script';
+      const entrypointPath = taskEntrypointInput ? String(taskEntrypointInput.value || '').trim() : '';
+      const resourcesPath = taskResourcesInput ? String(taskResourcesInput.value || '').trim() : '';
+      const timeoutRaw = taskTimeoutInput ? String(taskTimeoutInput.value || '').trim() : '';
+      const timeoutSec = timeoutRaw ? Number.parseInt(timeoutRaw, 10) : null;
+
+      if (!taskId) {
+        setTaskFormStatus('Task ID is required.', 'error');
+        return;
+      }
+      if (kind === 'script' && !entrypointPath) {
+        setTaskFormStatus('Entrypoint path is required for script tasks.', 'error');
+        return;
+      }
+      if (timeoutSec !== null && (!Number.isFinite(timeoutSec) || timeoutSec <= 0)) {
+        setTaskFormStatus('Timeout must be a positive integer.', 'error');
+        return;
+      }
+
+      const body = {
+        task_id: taskId,
+        name: name || taskId,
+        kind,
+        entrypoint_path: entrypointPath || null,
+        resources_path: resourcesPath || null,
+        timeout_sec: timeoutSec,
+        retry_policy: {},
+        enabled: true,
+      };
+      setBusyStatus(true, 'Saving task profile...');
+      try {
+        const res = await fetch('/api/central/tasks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const payload = await res.json();
+        if (payload && payload.ok) {
+          await refreshScheduleManager();
+          if (scheduleTaskSelect) scheduleTaskSelect.value = taskId;
+          fillTaskFormFromTask(taskId);
+          setTaskFormStatus(`Saved ${taskId}.`, 'ok');
+        } else {
+          setTaskFormStatus(payload && payload.error ? payload.error : 'Failed to save task profile.', 'error');
+        }
+      } catch (_err) {
+        setTaskFormStatus('Failed to save task profile.', 'error');
+      } finally {
+        setBusyStatus(false, '');
+      }
+    }
+
+    async function deleteTaskProfileFromForm() {
+      const taskId = taskIdInput ? String(taskIdInput.value || '').trim() : '';
+      if (!taskId) {
+        setTaskFormStatus('Task ID is required for delete.', 'error');
+        return;
+      }
+      if (!window.confirm(`Delete task profile ${taskId}?`)) return;
+      setBusyStatus(true, `Deleting ${taskId}...`);
+      try {
+        const res = await fetch(`/api/central/tasks/${encodeURIComponent(taskId)}`, { method: 'DELETE' });
+        const payload = await res.json();
+        if (payload && payload.ok) {
+          if (taskIdInput) taskIdInput.value = '';
+          if (taskNameInput) taskNameInput.value = '';
+          if (taskEntrypointInput) taskEntrypointInput.value = '';
+          if (taskResourcesInput) taskResourcesInput.value = '';
+          if (taskTimeoutInput) taskTimeoutInput.value = '';
+          await refreshScheduleManager();
+          setTaskFormStatus(`Deleted ${taskId}.`, 'ok');
+        } else {
+          setTaskFormStatus(payload && payload.error ? payload.error : `Failed to delete ${taskId}.`, 'error');
+        }
+      } catch (_err) {
+        setTaskFormStatus(`Failed to delete ${taskId}.`, 'error');
+      } finally {
+        setBusyStatus(false, '');
       }
     }
 

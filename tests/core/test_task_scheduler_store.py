@@ -29,6 +29,36 @@ def test_store_sync_and_list_schedules(tmp_path):
     assert schedules[0]["mode"] == "frequency"
 
 
+def test_task_profile_crud(tmp_path):
+    store = TaskSchedulerStore(db_path=tmp_path / "scheduler.sqlite3")
+    upsert = store.upsert_task_profile(
+        {
+            "task_id": "task_a",
+            "name": "Task A",
+            "kind": "script",
+            "entrypoint_path": "src/zubot/tasks/task_a/task.py",
+            "timeout_sec": 120,
+            "enabled": True,
+            "source": "test",
+        }
+    )
+    assert upsert["ok"] is True
+    assert upsert["task_id"] == "task_a"
+
+    listed = store.list_task_profiles()
+    assert len(listed) == 1
+    assert listed[0]["task_id"] == "task_a"
+    assert listed[0]["name"] == "Task A"
+
+    got = store.get_task_profile(task_id="task_a")
+    assert got is not None
+    assert got["task_id"] == "task_a"
+
+    deleted = store.delete_task_profile(task_id="task_a")
+    assert deleted["ok"] is True
+    assert deleted["deleted"] == 1
+
+
 def test_enqueue_due_runs_and_dedupe(tmp_path):
     store = TaskSchedulerStore(db_path=tmp_path / "scheduler.sqlite3")
     store.sync_schedules(

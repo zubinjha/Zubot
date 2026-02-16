@@ -29,10 +29,13 @@ This file is the fastest way for a new agent to resume productive work.
   - routine runtime/system events
 
 ## 4) Central Scheduler Model
-- Configured task profiles live under:
-  - `task_profiles.tasks`
-- Backward compatibility:
-  - `pre_defined_tasks.tasks` still loads when `task_profiles` is absent
+- Task profiles are DB rows in:
+  - `task_profiles`
+  - `task_profile_run_stats`
+- Backward compatibility bootstrap:
+  - if `task_profiles` is empty at startup, legacy config maps are imported once from:
+    - `task_profiles.tasks`
+    - `pre_defined_tasks.tasks`
 - Scheduled rows live in DB tables:
   - `defined_tasks`
   - `defined_tasks_run_times`
@@ -46,6 +49,8 @@ This file is the fastest way for a new agent to resume productive work.
 
 ## 5) Scheduled Tasks UI
 - Top tabs: Chat / Scheduled Tasks.
+- Task Registry panel:
+  - register/edit/delete task profiles (`task_id`, `name`, `kind`, entrypoint/module, resources, timeout)
 - Scheduled Tasks form:
   - constants: name, config task, mode, enabled
   - frequency mode: numeric hours/minutes inputs

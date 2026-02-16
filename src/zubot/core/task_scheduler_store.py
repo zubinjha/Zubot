@@ -364,6 +364,42 @@ class TaskSchedulerStore:
                 CREATE INDEX IF NOT EXISTS idx_defined_task_run_history_profile_finished_at
                     ON defined_task_run_history(profile_id, finished_at);
 
+                CREATE TABLE IF NOT EXISTS task_profiles (
+                    task_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK (kind IN ('script', 'agentic', 'interactive_wrapper')),
+                    entrypoint_path TEXT,
+                    module TEXT,
+                    resources_path TEXT,
+                    queue_group TEXT,
+                    timeout_sec INTEGER,
+                    retry_policy_json TEXT,
+                    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+                    source TEXT NOT NULL DEFAULT 'config',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS task_profile_run_stats (
+                    task_id TEXT PRIMARY KEY,
+                    last_queued_at TEXT,
+                    last_started_at TEXT,
+                    last_finished_at TEXT,
+                    last_status TEXT,
+                    last_run_id TEXT,
+                    run_count_total INTEGER NOT NULL DEFAULT 0,
+                    run_count_done INTEGER NOT NULL DEFAULT 0,
+                    run_count_failed INTEGER NOT NULL DEFAULT 0,
+                    run_count_blocked INTEGER NOT NULL DEFAULT 0,
+                    run_count_waiting INTEGER NOT NULL DEFAULT 0,
+                    FOREIGN KEY(task_id) REFERENCES task_profiles(task_id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_task_profiles_kind_enabled
+                    ON task_profiles(kind, enabled);
+                CREATE INDEX IF NOT EXISTS idx_task_profiles_queue_group
+                    ON task_profiles(queue_group);
+
                 CREATE TABLE IF NOT EXISTS task_state_kv (
                     task_id TEXT NOT NULL,
                     state_key TEXT NOT NULL,
@@ -497,6 +533,141 @@ class TaskSchedulerStore:
                 """,
                 (schedule_id, day, now),
             )
+
+    @staticmethod
+    def _normalize_task_kind(raw: Any) -> str:
+        kind = str(raw or "script").strip().lower()
+        if kind in {"script", "agentic", "interactive_wrapper"}:
+            return kind
+        return "script"
+
+    def upsert_task_profile(self, profile: dict[str, Any]) -> dict[str, Any]:
+        task_id = str(profile.get("task_id") or "").strip()
+        if not task_id:
+            return {"ok": False, "error": "task_id is required."}
+        name = str(profile.get("name") or task_id).strip() or task_id
+        kind = self._normalize_task_kind(profile.get("kind"))
+        entrypoint_path = str(profile.get("entrypoint_path") or "").strip() or None
+        module = str(profile.get("module") or "").strip() or None
+        resources_path = str(profile.get("resources_path") or "").strip() or None
+        queue_group = str(profile.get("queue_group") or "").strip() or None
+        timeout_sec = profile.get("timeout_sec")
+        timeout_value = int(timeout_sec) if isinstance(timeout_sec, int) and timeout_sec > 0 else None
+        retry_policy = profile.get("retry_policy") if isinstance(profile.get("retry_policy"), dict) else None
+        enabled = 1 if bool(profile.get("enabled", True)) else 0
+        source = str(profile.get("source") or "ui").strip() or "ui"
+        now = _iso(_utc_now())
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO task_profiles(
+                    task_id, name, kind, entrypoint_path, module, resources_path, queue_group,
+                    timeout_sec, retry_policy_json, enabled, source, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    name = excluded.name,
+                    kind = excluded.kind,
+                    entrypoint_path = excluded.entrypoint_path,
+                    module = excluded.module,
+                    resources_path = excluded.resources_path,
+                    queue_group = excluded.queue_group,
+                    timeout_sec = excluded.timeout_sec,
+                    retry_policy_json = excluded.retry_policy_json,
+                    enabled = excluded.enabled,
+                    source = excluded.source,
+                    updated_at = excluded.updated_at;
+                """,
+                (
+                    task_id,
+                    name,
+                    kind,
+                    entrypoint_path,
+                    module,
+                    resources_path,
+                    queue_group,
+                    timeout_value,
+                    json.dumps(retry_policy) if isinstance(retry_policy, dict) else None,
+                    enabled,
+                    source,
+                    now,
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO task_profile_run_stats(task_id)
+                VALUES (?)
+                ON CONFLICT(task_id) DO NOTHING;
+                """,
+                (task_id,),
+            )
+        return {"ok": True, "task_id": task_id}
+
+    def list_task_profiles(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT task_id, name, kind, entrypoint_path, module, resources_path, queue_group,
+                       timeout_sec, retry_policy_json, enabled, source, created_at, updated_at
+                FROM task_profiles
+                ORDER BY task_id ASC;
+                """
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            retry_policy = None
+            raw_retry = row["retry_policy_json"]
+            if isinstance(raw_retry, str) and raw_retry.strip():
+                try:
+                    parsed = json.loads(raw_retry)
+                    retry_policy = parsed if isinstance(parsed, dict) else None
+                except Exception:
+                    retry_policy = None
+            out.append(
+                {
+                    "task_id": str(row["task_id"]),
+                    "name": str(row["name"] or row["task_id"]),
+                    "kind": self._normalize_task_kind(row["kind"]),
+                    "entrypoint_path": row["entrypoint_path"],
+                    "module": row["module"],
+                    "resources_path": row["resources_path"],
+                    "queue_group": row["queue_group"],
+                    "timeout_sec": int(row["timeout_sec"]) if row["timeout_sec"] is not None else None,
+                    "retry_policy": retry_policy,
+                    "enabled": bool(row["enabled"]),
+                    "source": row["source"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                }
+            )
+        return out
+
+    def get_task_profile(self, *, task_id: str) -> dict[str, Any] | None:
+        clean_task_id = str(task_id or "").strip()
+        if not clean_task_id:
+            return None
+        rows = [item for item in self.list_task_profiles() if item.get("task_id") == clean_task_id]
+        if not rows:
+            return None
+        return rows[0]
+
+    def delete_task_profile(self, *, task_id: str) -> dict[str, Any]:
+        clean_task_id = str(task_id or "").strip()
+        if not clean_task_id:
+            return {"ok": False, "error": "task_id is required."}
+        with self._connect() as conn:
+            linked_schedules = conn.execute(
+                "SELECT COUNT(*) AS c FROM defined_tasks WHERE profile_id = ?;",
+                (clean_task_id,),
+            ).fetchone()
+            if int(linked_schedules["c"] or 0) > 0:
+                return {"ok": False, "error": "task profile has linked schedules. Delete schedules first."}
+            res = conn.execute("DELETE FROM task_profiles WHERE task_id = ?;", (clean_task_id,))
+            deleted = int(res.rowcount or 0)
+            conn.execute("DELETE FROM task_profile_run_stats WHERE task_id = ?;", (clean_task_id,))
+        return {"ok": True, "task_id": clean_task_id, "deleted": deleted}
 
     def sync_schedules(self, defined_tasks: list[dict[str, Any]]) -> dict[str, Any]:
         now = _iso(_utc_now())

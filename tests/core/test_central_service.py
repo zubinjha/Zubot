@@ -202,6 +202,19 @@ def test_defined_tasks_and_schedule_crud(configured_central):
     assert tasks["ok"] is True
     assert tasks["tasks"][0]["task_id"] == "profile_a"
 
+    create_profile = service.upsert_task_profile(
+        task_id="profile_b",
+        name="Profile B",
+        kind="script",
+        entrypoint_path="src/zubot/tasks/profile_b/task.py",
+        timeout_sec=60,
+        source="test",
+    )
+    assert create_profile["ok"] is True
+    tasks_after = service.list_defined_tasks()
+    ids_after = {row["task_id"] for row in tasks_after["tasks"]}
+    assert "profile_b" in ids_after
+
     upsert = service.upsert_schedule(
         schedule_id="sched_crud",
         task_id="profile_a",
@@ -222,6 +235,10 @@ def test_defined_tasks_and_schedule_crud(configured_central):
     deleted = service.delete_schedule(schedule_id="sched_crud")
     assert deleted["ok"] is True
     assert deleted["deleted"] == 1
+
+    deleted_profile = service.delete_task_profile(task_id="profile_b")
+    assert deleted_profile["ok"] is True
+    assert deleted_profile["deleted"] == 1
 
 
 def test_central_service_concurrency_respects_setting(configured_central):

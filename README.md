@@ -46,7 +46,7 @@ Operations guidance for long-running mode lives in [docs/src/zubot/operations.md
   - session event persistence + daily memory helpers
   - SQLite-backed daily memory events/summaries + day-status + summary-job queue
   - background memory-summary worker (non-blocking queue drain)
-  - task profile execution support (`task_profiles` config + script/agentic/interactive wrapper kinds)
+  - task profile execution support (`script`/`agentic`/`interactive_wrapper`)
     - waiting-for-user pause/resume lifecycle for interactive runs
     - automatic waiting-run timeout handling
   - provider-level serialized queue support for rate-limited integrations (for example HasData)
@@ -59,17 +59,21 @@ Operations guidance for long-running mode lives in [docs/src/zubot/operations.md
 - Automated tests in `tests/` with `pytest`.
 
 ## Task Profiles
-- Configure executable scheduled tasks in `config/config.json` under:
-  - `task_profiles.tasks`
-- Backward compatibility:
-  - legacy `pre_defined_tasks.tasks` still loads if `task_profiles.tasks` is absent.
+- Runtime task registry is DB-backed in `memory/central/zubot_core.db` table `task_profiles`.
+- Register/edit/delete tasks from daemon UI (`Scheduled Tasks` tab -> `Task Registry`) or API:
+  - `POST /api/central/tasks`
+  - `DELETE /api/central/tasks/{task_id}`
+- Backward compatibility seed:
+  - if DB has zero task profiles at startup, legacy config maps are imported once from:
+    - `task_profiles.tasks`
+    - `pre_defined_tasks.tasks`
 - Script entrypoints should be repository-relative paths (for example `src/zubot/tasks/indeed_daily_search/task.py`).
 - Standardized task package layout is supported under `src/zubot/tasks/<task_id>/`:
   - `task.py`
   - `config.json`
   - optional `prompts/`, `assets/`, `state/`
 - Scheduler rows live in SQLite (`defined_tasks` / `defined_tasks_run_times`) and reference `profile_id == task_id`.
-- Central service resolves `task_id -> task_profiles.tasks.<task_id>` at execution time.
+- Central service resolves `task_id -> task_profiles.task_id` at execution time.
 
 ## Agent Resume Checklist
 For new agents or fresh sessions, use this order:
@@ -154,6 +158,8 @@ Choose one of these startup modes based on what you want to run.
   - `POST /api/central/start`
   - `POST /api/central/stop`
   - `GET /api/central/tasks`
+  - `POST /api/central/tasks`
+  - `DELETE /api/central/tasks/{task_id}`
   - `GET /api/central/schedules`
   - `POST /api/central/schedules`
   - `DELETE /api/central/schedules/{schedule_id}`

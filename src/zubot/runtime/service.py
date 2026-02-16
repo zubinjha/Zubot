@@ -215,6 +215,38 @@ class RuntimeService:
     def central_list_defined_tasks(self) -> dict[str, Any]:
         return get_control_panel().list_defined_tasks()
 
+    def central_upsert_task_profile(
+        self,
+        *,
+        task_id: str,
+        name: str | None = None,
+        kind: str = "script",
+        entrypoint_path: str | None = None,
+        module: str | None = None,
+        resources_path: str | None = None,
+        queue_group: str | None = None,
+        timeout_sec: int | None = None,
+        retry_policy: dict[str, Any] | None = None,
+        enabled: bool = True,
+        source: str = "ui",
+    ) -> dict[str, Any]:
+        return get_control_panel().upsert_task_profile(
+            task_id=task_id,
+            name=name,
+            kind=kind,
+            entrypoint_path=entrypoint_path,
+            module=module,
+            resources_path=resources_path,
+            queue_group=queue_group,
+            timeout_sec=timeout_sec,
+            retry_policy=retry_policy,
+            enabled=enabled,
+            source=source,
+        )
+
+    def central_delete_task_profile(self, *, task_id: str) -> dict[str, Any]:
+        return get_control_panel().delete_task_profile(task_id=task_id)
+
     def central_upsert_schedule(
         self,
         *,

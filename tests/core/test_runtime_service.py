@@ -37,6 +37,12 @@ class _FakeCentral:
     def list_defined_tasks(self) -> dict[str, Any]:
         return {"ok": True, "tasks": [{"task_id": "task_a"}]}
 
+    def upsert_task_profile(self, **kwargs) -> dict[str, Any]:
+        return {"ok": True, "task_id": kwargs.get("task_id") or "task_new"}
+
+    def delete_task_profile(self, *, task_id: str) -> dict[str, Any]:
+        return {"ok": True, "task_id": task_id, "deleted": 1}
+
     def upsert_schedule(self, **kwargs) -> dict[str, Any]:
         return {"ok": True, "schedule_id": kwargs.get("schedule_id") or "sched_new"}
 
@@ -236,6 +242,14 @@ def test_runtime_service_central_schedule_crud(monkeypatch):
     tasks = svc.central_list_defined_tasks()
     assert tasks["ok"] is True
     assert tasks["tasks"][0]["task_id"] == "task_a"
+
+    upsert_task = svc.central_upsert_task_profile(task_id="task_new", name="Task New")
+    assert upsert_task["ok"] is True
+    assert upsert_task["task_id"] == "task_new"
+
+    delete_task = svc.central_delete_task_profile(task_id="task_new")
+    assert delete_task["ok"] is True
+    assert delete_task["deleted"] == 1
 
     upsert = svc.central_upsert_schedule(
         schedule_id=None,

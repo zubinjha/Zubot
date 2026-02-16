@@ -19,7 +19,7 @@ This document describes the v1 central runtime scaffold for scheduled task-agent
   - heartbeat queues due scheduled runs
   - dispatcher claims and executes queued runs in task slots
 - task execution supports:
-  - `script` profile runs (`task_profiles` entrypoints)
+  - `script` profile runs (`task_profiles` table entrypoints)
   - `agentic` runs (background sub-agent tasks)
   - `interactive_wrapper` profile runs (pause/resume user handshake)
 - implemented but disabled by default (`central_service.enabled = false`)
@@ -45,18 +45,22 @@ This document describes the v1 central runtime scaffold for scheduled task-agent
 - `db_queue_default_max_rows`
 - `waiting_for_user_timeout_sec`
 
-`task_profiles`:
-- `tasks` map (`task_id` -> profile)
-- profile fields:
+Task profiles are DB-backed in `task_profiles`:
+- fields:
+  - `task_id`
   - `name`
   - `kind` (`script` | `agentic` | `interactive_wrapper`)
   - `entrypoint_path` or `module`
   - `resources_path`
   - `queue_group`
   - `timeout_sec`
-  - `retry_policy`
-- Backward compatibility:
-  - `pre_defined_tasks.tasks` is still accepted when `task_profiles.tasks` is absent.
+  - `retry_policy_json`
+  - `enabled`
+  - `source`
+- compatibility bootstrap:
+  - if DB has zero rows at startup, legacy config maps are imported once from:
+    - `task_profiles.tasks`
+    - `pre_defined_tasks.tasks`
 
 ## SQLite Store
 
@@ -73,6 +77,10 @@ Tables:
   - queued/running/waiting/terminal run lifecycle records
 - `defined_task_run_history`
   - completion snapshots for historical reporting/pruning
+- `task_profiles`
+  - registered executable tasks (daemon/API managed)
+- `task_profile_run_stats`
+  - per-task latest run timestamps/counters
 - `task_state_kv`
   - atomic task state checkpoints
 - `task_seen_items`
@@ -190,6 +198,8 @@ Forwarded task events (`type = task_agent_event`) include normalized payload fie
 - `POST /api/central/start`
 - `POST /api/central/stop`
 - `GET /api/central/tasks`
+- `POST /api/central/tasks`
+- `DELETE /api/central/tasks/{task_id}`
 - `GET /api/central/schedules`
 - `POST /api/central/schedules`
 - `DELETE /api/central/schedules/{schedule_id}`

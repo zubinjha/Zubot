@@ -46,7 +46,7 @@ This document captures the conceptual architecture of Zubot at the system level.
 
 ### Task-Agent Queue
 - Backed by SQLite (`memory/central/zubot_core.db`).
-- Primary tables: `defined_tasks`, `defined_tasks_run_times`, `defined_task_runs`, `defined_task_run_history`.
+- Primary tables: `task_profiles`, `defined_tasks`, `defined_tasks_run_times`, `defined_task_runs`, `defined_task_run_history`.
 - Task runtime helper tables: `task_state_kv`, `task_seen_items`, `job_applications`.
 - Supports frequency and wall-clock schedule modes.
 - Run payloads support:
