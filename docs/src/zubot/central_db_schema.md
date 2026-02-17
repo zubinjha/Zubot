@@ -144,6 +144,18 @@ Conceptual behavior:
 - `route` TEXT
 - `created_at` TEXT NOT NULL
 
+### `todo_items`
+- `todo_item_id` INTEGER PK AUTOINCREMENT
+- `parent_id` INTEGER NULL FK -> `todo_items(todo_item_id)` (`ON DELETE SET NULL`)
+- `todo_item_name` TEXT NOT NULL
+- `todo_item_description` TEXT NOT NULL
+- `create_date` TEXT NOT NULL
+- `due_date` TEXT NULL
+- `priority_level` INTEGER NOT NULL (`0..10`)
+- `instructions` TEXT NULL
+- `notes` TEXT NULL
+- `status` TEXT NOT NULL (`todo`/`started`/`finished`/`backlogged`)
+
 ## Current Indexes
 
 - `idx_defined_tasks_enabled_order(enabled, execution_order, schedule_id)` on `defined_tasks`
@@ -162,6 +174,9 @@ Conceptual behavior:
 - `idx_daily_memory_events_kind_day(kind, day)`
 - `idx_daily_memory_events_session_event(session_id, event_id)`
 - `idx_chat_messages_session_message(session_id, message_id)`
+- `idx_todo_items_create_date(create_date)`
+- `idx_todo_items_due_date(due_date)`
+- `idx_todo_items_status(status)`
 
 ## Event Taxonomy (Raw Daily Memory)
 

@@ -174,6 +174,22 @@ CREATE TABLE IF NOT EXISTS job_applications (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Nested todo checklist items for personal task tracking.
+-- Supports hierarchical parent/child todo trees via self-referential FK.
+CREATE TABLE IF NOT EXISTS todo_items (
+    todo_item_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    parent_id INTEGER,
+    todo_item_name TEXT NOT NULL,
+    todo_item_description TEXT NOT NULL,
+    create_date TEXT NOT NULL,
+    due_date TEXT,
+    priority_level INTEGER NOT NULL DEFAULT 5 CHECK (priority_level >= 0 AND priority_level <= 10),
+    instructions TEXT,
+    notes TEXT,
+    status TEXT NOT NULL DEFAULT 'todo' CHECK (status IN ('todo', 'started', 'finished', 'backlogged')),
+    FOREIGN KEY (parent_id) REFERENCES todo_items(todo_item_id) ON DELETE SET NULL
+);
+
 -- Per-day memory processing counters/status.
 -- Tracks summarization progress and finalization for each day.
 CREATE TABLE IF NOT EXISTS day_memory_status (
@@ -273,6 +289,15 @@ CREATE INDEX IF NOT EXISTS idx_job_applications_date_found
 
 CREATE INDEX IF NOT EXISTS idx_job_applications_status
     ON job_applications(status);
+
+CREATE INDEX IF NOT EXISTS idx_todo_items_create_date
+    ON todo_items(create_date);
+
+CREATE INDEX IF NOT EXISTS idx_todo_items_due_date
+    ON todo_items(due_date);
+
+CREATE INDEX IF NOT EXISTS idx_todo_items_status
+    ON todo_items(status);
 
 CREATE INDEX IF NOT EXISTS idx_day_memory_finalized
     ON day_memory_status(is_finalized);
