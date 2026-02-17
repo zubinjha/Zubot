@@ -80,6 +80,18 @@ Operational control:
 - seen-item idempotency:
   - `POST /api/central/task-seen/mark`
   - `POST /api/central/task-seen/has`
+- approval-gated control actions:
+  - `POST /api/control/ingest` (parse assistant text blocks into pending actions)
+  - `GET /api/control/pending` (list pending actions)
+  - `POST /api/control/approve` (execute approved action)
+  - `POST /api/control/deny` (reject action)
+
+Control request text contract:
+- assistant message includes one or more blocks:
+  - `[ZUBOT_CONTROL_REQUEST]`
+  - JSON payload with: `action_id`, `action`, `title`, `risk_level`, `payload`, optional `expires_at`
+  - `[/ZUBOT_CONTROL_REQUEST]`
+- supported actions: `enqueue_task`, `enqueue_agentic_task`, `kill_task_run`, `query_central_db`
 
 ## Provider Queue Monitoring (HasData)
 

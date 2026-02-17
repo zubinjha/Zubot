@@ -1,0 +1,3 @@
+{
+  "notes": "Simple trace task. Each run appends a row to state/run_trace.jsonl."
+}

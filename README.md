@@ -194,6 +194,10 @@ Choose one of these startup modes based on what you want to run.
   - `POST /api/central/task-state/get`
   - `POST /api/central/task-seen/mark`
   - `POST /api/central/task-seen/has`
+  - `POST /api/control/ingest`
+  - `GET /api/control/pending`
+  - `POST /api/control/approve`
+  - `POST /api/control/deny`
 - Session reset clears chat working context but preserves persisted daily memory in SQLite.
 - Daily memory is DB-backed in `memory/central/zubot_core.db`:
   - raw events (`daily_memory_events`)
@@ -222,6 +226,10 @@ Choose one of these startup modes based on what you want to run.
   - on-demand "Context JSON" dialog with collapsible full-context snapshot + JSON download
   - auto session initialization on page load/session change
 - App chat uses unified LLM + registry tool loop (no keyword-based direct routing).
+- High-impact control actions can run through approval-gated text protocol:
+  - assistant emits `[ZUBOT_CONTROL_REQUEST] ... [/ZUBOT_CONTROL_REQUEST]`
+  - UI renders allow/disallow controls from parsed request blocks
+  - backend executes only after explicit `approve` API call
 
 ## Handoff Notes
 - Current checkpoint and resume guidance:

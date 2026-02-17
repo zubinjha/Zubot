@@ -20,6 +20,7 @@ This document captures the conceptual architecture of Zubot at the system level.
 - Primary chat-facing main agent.
 - Handles direct user interaction, context assembly, memory-aware response generation.
 - Uses tool contracts to query/control the Control Panel (non-blocking queue operations).
+- For high-impact runtime actions, can emit text-encoded control requests that require explicit UI approval before execution.
 
 ### 3) Heartbeat
 - Dedicated scheduler tick component that only decides what should be queued.
@@ -41,6 +42,10 @@ This document captures the conceptual architecture of Zubot at the system level.
 ### Local App
 - `app/main.py` is a thin client/API surface over runtime service.
 - Provides local interaction UI and API endpoints.
+- Hosts approval-gate endpoints for text-encoded control requests:
+  - ingest request blocks from assistant text
+  - list pending approvals
+  - approve/deny actions
 
 ## Scheduling + Queueing Model
 

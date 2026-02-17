@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from threading import RLock
+from typing import Any
+
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from typing import Literal
 
+from src.zubot.core.control_protocol import extract_control_requests, is_expired
 from src.zubot.runtime.service import get_runtime_service
 
 app = FastAPI(title="Zubot Local Chat")
@@ -116,6 +121,83 @@ class TaskProfileUpsertRequest(BaseModel):
     retry_policy: dict[str, object] = Field(default_factory=dict)
     enabled: bool = True
 
+
+class ControlIngestRequest(BaseModel):
+    session_id: str = "default"
+    assistant_text: str
+    route: str = "llm.main_agent"
+
+
+class ControlApproveRequest(BaseModel):
+    action_id: str
+    approved_by: str = "user"
+
+
+class ControlDenyRequest(BaseModel):
+    action_id: str
+    denied_by: str = "user"
+    reason: str | None = None
+
+
+_CONTROL_ACTIONS: dict[str, dict[str, Any]] = {}
+_CONTROL_ACTIONS_LOCK = RLock()
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(tz=UTC).isoformat()
+
+
+def _control_execute(action: dict[str, Any], *, actor: str = "user") -> dict[str, Any]:
+    runtime = get_runtime_service()
+    action_name = str(action.get("action") or "").strip()
+    payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+
+    if action_name == "enqueue_task":
+        task_id = str(payload.get("task_id") or "").strip()
+        if not task_id:
+            return {"ok": False, "error": "payload.task_id is required for enqueue_task"}
+        description_raw = payload.get("description")
+        description = str(description_raw).strip() if isinstance(description_raw, str) and description_raw.strip() else None
+        out = runtime.central_trigger_profile(profile_id=task_id, description=description)
+        return {"ok": bool(out.get("ok")), "result": out}
+
+    if action_name == "enqueue_agentic_task":
+        instructions = str(payload.get("instructions") or "").strip()
+        if not instructions:
+            return {"ok": False, "error": "payload.instructions is required for enqueue_agentic_task"}
+        out = runtime.central_enqueue_agentic_task(
+            task_name=str(payload.get("task_name") or "Background Research Task").strip() or "Background Research Task",
+            instructions=instructions,
+            requested_by=str(payload.get("requested_by") or f"approval:{actor}").strip() or f"approval:{actor}",
+            model_tier=str(payload.get("model_tier") or "medium").strip() or "medium",
+            tool_access=payload.get("tool_access") if isinstance(payload.get("tool_access"), list) else [],
+            skill_access=payload.get("skill_access") if isinstance(payload.get("skill_access"), list) else [],
+            timeout_sec=int(payload.get("timeout_sec")) if isinstance(payload.get("timeout_sec"), int) else 180,
+            metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+        )
+        return {"ok": bool(out.get("ok")), "result": out}
+
+    if action_name == "kill_task_run":
+        run_id = str(payload.get("run_id") or "").strip()
+        if not run_id:
+            return {"ok": False, "error": "payload.run_id is required for kill_task_run"}
+        out = runtime.central_kill_run(run_id=run_id, requested_by=f"approval:{actor}")
+        return {"ok": bool(out.get("ok")), "result": out}
+
+    if action_name == "query_central_db":
+        sql = str(payload.get("sql") or "").strip()
+        if not sql:
+            return {"ok": False, "error": "payload.sql is required for query_central_db"}
+        out = runtime.central_execute_sql(
+            sql=sql,
+            params=payload.get("params") if isinstance(payload.get("params"), (list, dict)) else None,
+            read_only=bool(payload.get("read_only", True)),
+            timeout_sec=float(payload.get("timeout_sec")) if isinstance(payload.get("timeout_sec"), (int, float)) else 5.0,
+            max_rows=int(payload.get("max_rows")) if isinstance(payload.get("max_rows"), int) else None,
+        )
+        return {"ok": bool(out.get("ok")), "result": out}
+
+    return {"ok": False, "error": f"Unsupported action: {action_name}"}
 
 @app.on_event("startup")
 def _init_runtime_client() -> None:
@@ -328,6 +410,107 @@ def central_has_task_item_seen(req: TaskSeenHasRequest) -> dict:
         provider=req.provider,
         item_key=req.item_key,
     )
+
+
+@app.post("/api/control/ingest")
+def control_ingest(req: ControlIngestRequest) -> dict:
+    clean_session_id = str(req.session_id or "default").strip() or "default"
+    clean_route = str(req.route or "llm.main_agent").strip() or "llm.main_agent"
+    parsed = extract_control_requests(req.assistant_text, default_route=clean_route)
+    registered: list[dict[str, Any]] = []
+    with _CONTROL_ACTIONS_LOCK:
+        for request in parsed:
+            action_id = str(request.get("action_id") or "").strip()
+            if not action_id:
+                continue
+            current = _CONTROL_ACTIONS.get(action_id)
+            now_iso = _utc_now_iso()
+            if isinstance(current, dict):
+                registered.append(current)
+                continue
+            row = {
+                **request,
+                "action_id": action_id,
+                "session_id": clean_session_id,
+                "status": "pending",
+                "created_at": now_iso,
+                "updated_at": now_iso,
+            }
+            _CONTROL_ACTIONS[action_id] = row
+            registered.append(row)
+    return {"ok": True, "registered": registered, "count": len(registered)}
+
+
+@app.get("/api/control/pending")
+def control_pending(session_id: str | None = None) -> dict:
+    clean_session = str(session_id or "").strip()
+    rows: list[dict[str, Any]] = []
+    with _CONTROL_ACTIONS_LOCK:
+        for row in _CONTROL_ACTIONS.values():
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("status") or "") != "pending":
+                continue
+            if clean_session and str(row.get("session_id") or "") != clean_session:
+                continue
+            if is_expired(row.get("expires_at")):
+                row["status"] = "expired"
+                row["updated_at"] = _utc_now_iso()
+                continue
+            rows.append(dict(row))
+    rows.sort(key=lambda item: str(item.get("created_at") or ""))
+    return {"ok": True, "pending": rows, "count": len(rows)}
+
+
+@app.post("/api/control/approve")
+def control_approve(req: ControlApproveRequest) -> dict:
+    action_id = str(req.action_id or "").strip()
+    if not action_id:
+        return {"ok": False, "error": "action_id is required"}
+    with _CONTROL_ACTIONS_LOCK:
+        row = _CONTROL_ACTIONS.get(action_id)
+        if not isinstance(row, dict):
+            return {"ok": False, "error": "action_not_found", "action_id": action_id}
+        if str(row.get("status") or "") != "pending":
+            return {"ok": False, "error": "action_not_pending", "action_id": action_id, "status": row.get("status")}
+        if is_expired(row.get("expires_at")):
+            row["status"] = "expired"
+            row["updated_at"] = _utc_now_iso()
+            return {"ok": False, "error": "action_expired", "action_id": action_id}
+        row["status"] = "approving"
+        row["updated_at"] = _utc_now_iso()
+        action = dict(row)
+
+    executed = _control_execute(action, actor=str(req.approved_by or "user").strip() or "user")
+    with _CONTROL_ACTIONS_LOCK:
+        row = _CONTROL_ACTIONS.get(action_id) or {}
+        row["status"] = "approved" if bool(executed.get("ok")) else "failed"
+        row["updated_at"] = _utc_now_iso()
+        row["decision_by"] = str(req.approved_by or "user").strip() or "user"
+        row["execution"] = executed
+        _CONTROL_ACTIONS[action_id] = row
+        final_row = dict(row)
+    return {"ok": bool(executed.get("ok")), "action": final_row, "execution": executed}
+
+
+@app.post("/api/control/deny")
+def control_deny(req: ControlDenyRequest) -> dict:
+    action_id = str(req.action_id or "").strip()
+    if not action_id:
+        return {"ok": False, "error": "action_id is required"}
+    with _CONTROL_ACTIONS_LOCK:
+        row = _CONTROL_ACTIONS.get(action_id)
+        if not isinstance(row, dict):
+            return {"ok": False, "error": "action_not_found", "action_id": action_id}
+        if str(row.get("status") or "") != "pending":
+            return {"ok": False, "error": "action_not_pending", "action_id": action_id, "status": row.get("status")}
+        row["status"] = "denied"
+        row["updated_at"] = _utc_now_iso()
+        row["decision_by"] = str(req.denied_by or "user").strip() or "user"
+        row["deny_reason"] = str(req.reason or "").strip() or None
+        _CONTROL_ACTIONS[action_id] = row
+        final_row = dict(row)
+    return {"ok": True, "action": final_row}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -774,6 +957,33 @@ def index() -> HTMLResponse:
       word-break: break-word;
     }
 
+    .control-item {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 8px;
+      margin-bottom: 8px;
+      background: #fffdfa;
+      display: grid;
+      gap: 6px;
+    }
+
+    .control-title {
+      font-weight: 600;
+      color: var(--ink);
+      font-family: "Space Grotesk", sans-serif;
+    }
+
+    .control-meta {
+      font-size: 0.72rem;
+      color: var(--muted);
+      word-break: break-word;
+    }
+
+    .control-actions {
+      display: flex;
+      gap: 6px;
+    }
+
     .context-dialog {
       border: 1px solid var(--line);
       border-radius: 14px;
@@ -1007,6 +1217,10 @@ def index() -> HTMLResponse:
       <div class="card">
         <h3>Progress</h3>
         <div id="progress" class="body">Idle</div>
+      </div>
+      <div class="card">
+        <h3>Approvals</h3>
+        <div id="control-approvals" class="body">No pending approvals.</div>
       </div>
       <div class="card">
         <h3>Task Slots</h3>
@@ -1341,6 +1555,7 @@ def index() -> HTMLResponse:
     const sessionPill = document.getElementById('session-pill');
     const msgCountPill = document.getElementById('msgcount-pill');
     const centralStatusEl = document.getElementById('central-status');
+    const controlApprovalsEl = document.getElementById('control-approvals');
     const appRoot = document.getElementById('app-root');
     const panelChat = document.getElementById('panel-chat');
     const panelSchedules = document.getElementById('panel-schedules');
@@ -2282,6 +2497,127 @@ def index() -> HTMLResponse:
       centralStatusEl.textContent = 'Central status unavailable.';
     }
 
+    function summarizeControlPayload(action) {
+      const payload = action && action.payload && typeof action.payload === 'object' ? action.payload : {};
+      const keys = Object.keys(payload);
+      if (!keys.length) return '{}';
+      const preview = {};
+      keys.slice(0, 4).forEach((key) => {
+        preview[key] = payload[key];
+      });
+      return JSON.stringify(preview);
+    }
+
+    function renderControlApprovals(rows) {
+      if (!controlApprovalsEl) return;
+      if (!Array.isArray(rows) || !rows.length) {
+        controlApprovalsEl.textContent = 'No pending approvals.';
+        return;
+      }
+      controlApprovalsEl.innerHTML = rows.map((row) => {
+        const actionId = row && row.action_id ? String(row.action_id) : '';
+        const title = row && row.title ? String(row.title) : (row && row.action ? String(row.action) : 'Action');
+        const action = row && row.action ? String(row.action) : '-';
+        const risk = row && row.risk_level ? String(row.risk_level) : 'medium';
+        const route = row && row.requested_by_route ? String(row.requested_by_route) : '-';
+        const payload = summarizeControlPayload(row);
+        return `
+          <div class="control-item">
+            <div class="control-title">${escapeHtml(title)}</div>
+            <div class="control-meta">action=${escapeHtml(action)} risk=${escapeHtml(risk)} route=${escapeHtml(route)}</div>
+            <div class="control-meta">payload=${escapeHtml(payload)}</div>
+            <div class="control-actions">
+              <button class="primary btn-mini" data-control-approve="${escapeHtml(actionId)}">Allow</button>
+              <button class="warn btn-mini" data-control-deny="${escapeHtml(actionId)}">Disallow</button>
+            </div>
+          </div>
+        `;
+      }).join('');
+      controlApprovalsEl.querySelectorAll('[data-control-approve]').forEach((btn) => {
+        btn.addEventListener('click', async (evt) => {
+          const actionId = evt.currentTarget.getAttribute('data-control-approve');
+          if (!actionId) return;
+          await approveControlAction(actionId);
+        });
+      });
+      controlApprovalsEl.querySelectorAll('[data-control-deny]').forEach((btn) => {
+        btn.addEventListener('click', async (evt) => {
+          const actionId = evt.currentTarget.getAttribute('data-control-deny');
+          if (!actionId) return;
+          await denyControlAction(actionId);
+        });
+      });
+    }
+
+    async function refreshControlPending() {
+      const sessionId = getSessionId();
+      try {
+        const res = await fetch(`/api/control/pending?session_id=${encodeURIComponent(sessionId)}`);
+        const payload = await res.json();
+        const pending = payload && Array.isArray(payload.pending) ? payload.pending : [];
+        renderControlApprovals(pending);
+      } catch (_err) {
+        if (controlApprovalsEl) controlApprovalsEl.textContent = 'Approvals unavailable.';
+      }
+    }
+
+    async function ingestControlRequestsFromReply(replyText, route, sessionId) {
+      if (!replyText || !String(replyText).trim()) return;
+      try {
+        await fetch('/api/control/ingest', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            session_id: sessionId,
+            assistant_text: String(replyText),
+            route: route || 'llm.main_agent',
+          }),
+        });
+      } catch (_err) {
+        return;
+      }
+      await refreshControlPending();
+    }
+
+    async function approveControlAction(actionId) {
+      try {
+        const res = await fetch('/api/control/approve', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ action_id: actionId, approved_by: 'ui_user' }),
+        });
+        const payload = await res.json();
+        if (payload && payload.ok) {
+          appendMessage('bot', `Approved action ${actionId} and executed it.`, { created_at: new Date().toISOString() });
+        } else {
+          appendMessage('bot', `Approval failed for ${actionId}: ${(payload && payload.error) ? payload.error : 'unknown error'}`, { created_at: new Date().toISOString() });
+        }
+      } catch (_err) {
+        appendMessage('bot', `Approval failed for ${actionId}.`, { created_at: new Date().toISOString() });
+      }
+      await refreshControlPending();
+      await refreshCentralStatus();
+    }
+
+    async function denyControlAction(actionId) {
+      try {
+        const res = await fetch('/api/control/deny', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ action_id: actionId, denied_by: 'ui_user', reason: 'user_disallowed' }),
+        });
+        const payload = await res.json();
+        if (payload && payload.ok) {
+          appendMessage('bot', `Denied action ${actionId}.`, { created_at: new Date().toISOString() });
+        } else {
+          appendMessage('bot', `Failed to deny ${actionId}: ${(payload && payload.error) ? payload.error : 'unknown error'}`, { created_at: new Date().toISOString() });
+        }
+      } catch (_err) {
+        appendMessage('bot', `Failed to deny ${actionId}.`, { created_at: new Date().toISOString() });
+      }
+      await refreshControlPending();
+    }
+
     function startProgressTicker() {
       const phases = [
         'Thinking...',
@@ -2317,6 +2653,7 @@ def index() -> HTMLResponse:
         const data = await res.json();
         const transcriptMeta = data && data.data && data.data.transcript_meta ? data.data.transcript_meta : {};
         appendMessage('bot', data.reply || '(No reply)', { created_at: transcriptMeta.assistant_created_at || new Date().toISOString() });
+        await ingestControlRequestsFromReply(data && data.reply ? data.reply : '', data && data.route ? data.route : 'llm.main_agent', session_id);
         setLastResponsePanel(data);
         setRuntimeFromResponse(data, session_id);
         setProgressFromResponse(data);
@@ -2352,6 +2689,7 @@ def index() -> HTMLResponse:
         if (showWelcome && data && data.welcome && loadedHistoryCount === 0) {
           appendMessage('bot', data.welcome, { created_at: new Date().toISOString() });
         }
+        await refreshControlPending();
         setLastResponsePanel({
           route: 'session.init',
           reply: data.welcome || 'Session initialized.',
@@ -2382,6 +2720,7 @@ def index() -> HTMLResponse:
           reply: data.note || 'Session reset.',
           data: {},
         });
+        await refreshControlPending();
         setRuntimeFromResponse({ route: 'session.reset', data: {} }, session_id);
         progressEl.textContent = 'Session context reset (history preserved).';
         await refreshCentralStatus();
@@ -2430,6 +2769,7 @@ def index() -> HTMLResponse:
 
     setInterval(() => {
       refreshCentralStatus();
+      refreshControlPending();
     }, 1200);
     initSchedulePickers();
     if (scheduleTaskSelect) {
@@ -2443,6 +2783,7 @@ def index() -> HTMLResponse:
     onScheduleModeChange();
     clearScheduleForm();
     normalContext(true);
+    refreshControlPending();
     window.__zubotRichUiInitDone = true;
   </script>
 </body>

@@ -447,3 +447,65 @@ def test_startup_hook_initializes_runtime_client_mode(monkeypatch):
     assert len(calls) == 1
     assert calls[0]["start_central_if_enabled"] is False
     assert calls[0]["source"] == "app"
+
+
+def test_control_approval_flow(monkeypatch):
+    monkeypatch.setattr("app.main.get_runtime_service", lambda: _FakeRuntimeService())
+    action_text = (
+        "Need approval to run task.\n"
+        "[ZUBOT_CONTROL_REQUEST]\n"
+        '{"action_id":"act_approve_1","action":"enqueue_task","title":"Run task","risk_level":"high","payload":{"task_id":"task_a"}}\n'
+        "[/ZUBOT_CONTROL_REQUEST]"
+    )
+    ingested = client.post(
+        "/api/control/ingest",
+        json={"session_id": "default", "assistant_text": action_text, "route": "llm.main_agent"},
+    )
+    assert ingested.status_code == 200
+    ibody = ingested.json()
+    assert ibody["ok"] is True
+    assert ibody["count"] == 1
+
+    pending = client.get("/api/control/pending?session_id=default")
+    assert pending.status_code == 200
+    pbody = pending.json()
+    assert pbody["ok"] is True
+    assert pbody["count"] == 1
+    assert pbody["pending"][0]["action_id"] == "act_approve_1"
+
+    approved = client.post("/api/control/approve", json={"action_id": "act_approve_1", "approved_by": "tester"})
+    assert approved.status_code == 200
+    abody = approved.json()
+    assert abody["ok"] is True
+    assert abody["action"]["status"] == "approved"
+    assert abody["execution"]["result"]["ok"] is True
+
+    pending_after = client.get("/api/control/pending?session_id=default")
+    assert pending_after.status_code == 200
+    assert pending_after.json()["count"] == 0
+
+
+def test_control_deny_flow(monkeypatch):
+    monkeypatch.setattr("app.main.get_runtime_service", lambda: _FakeRuntimeService())
+    action_text = (
+        "Need approval to stop run.\n"
+        "[ZUBOT_CONTROL_REQUEST]\n"
+        '{"action_id":"act_deny_1","action":"kill_task_run","title":"Kill stuck run","risk_level":"high","payload":{"run_id":"run_x"}}\n'
+        "[/ZUBOT_CONTROL_REQUEST]"
+    )
+    ingested = client.post(
+        "/api/control/ingest",
+        json={"session_id": "default", "assistant_text": action_text, "route": "llm.main_agent"},
+    )
+    assert ingested.status_code == 200
+    assert ingested.json()["ok"] is True
+
+    denied = client.post("/api/control/deny", json={"action_id": "act_deny_1", "denied_by": "tester", "reason": "not_now"})
+    assert denied.status_code == 200
+    dbody = denied.json()
+    assert dbody["ok"] is True
+    assert dbody["action"]["status"] == "denied"
+
+    pending = client.get("/api/control/pending?session_id=default")
+    assert pending.status_code == 200
+    assert pending.json()["count"] == 0

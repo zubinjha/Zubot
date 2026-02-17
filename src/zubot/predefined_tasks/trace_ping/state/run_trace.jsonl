@@ -1,0 +1,2 @@
+{"timestamp_utc": "2026-02-17T07:52:53.363217+00:00", "task_id": "trace_ping", "name": "Trace Ping", "trigger": "manual", "origin": "manual", "description": "smoke"}
+{"timestamp_utc": "2026-02-17T07:53:53.004414+00:00", "task_id": "trace_ping", "name": "Trace Ping", "trigger": "manual", "origin": "manual", "description": "Queued by user request: 'Please queue task trace_ping now.'"}
