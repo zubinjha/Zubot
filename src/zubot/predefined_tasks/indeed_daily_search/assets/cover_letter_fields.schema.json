@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "zubot/indeed_daily_search/cover_letter_fields.schema.json",
+  "title": "Cover Letter Placeholder Fields",
+  "description": "Fields used to fill cover_letter_template.docx placeholders.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "date",
+    "recipient_name_title",
+    "company_name",
+    "salutation_target",
+    "specialty_area",
+    "key_tools_list",
+    "project_example_summary",
+    "role_title",
+    "mission_hook",
+    "impact_phrase",
+    "company_name_possessive"
+  ],
+  "properties": {
+    "date": {
+      "type": "string",
+      "description": "Display date for letter header (for example: February 17, 2026).",
+      "minLength": 3,
+      "maxLength": 80
+    },
+    "recipient_name_title": {
+      "type": "string",
+      "description": "Recipient line, e.g. 'Jane Doe, Hiring Manager' or 'Hiring Manager'.",
+      "minLength": 2,
+      "maxLength": 160
+    },
+    "company_name": {
+      "type": "string",
+      "description": "Company name as shown in address/body lines.",
+      "minLength": 2,
+      "maxLength": 120
+    },
+    "salutation_target": {
+      "type": "string",
+      "description": "Salutation target, e.g. 'Jane Doe' or 'Hiring Manager at Acme'.",
+      "minLength": 2,
+      "maxLength": 160
+    },
+    "specialty_area": {
+      "type": "string",
+      "description": "Specialty/interest phrase inserted into paragraph 1.",
+      "minLength": 2,
+      "maxLength": 220
+    },
+    "key_tools_list": {
+      "type": "string",
+      "description": "Short tools/tech list phrase for paragraph 1.",
+      "minLength": 2,
+      "maxLength": 260
+    },
+    "project_example_summary": {
+      "type": "string",
+      "description": "Brief project summary phrase for paragraph 2.",
+      "minLength": 2,
+      "maxLength": 400
+    },
+    "role_title": {
+      "type": "string",
+      "description": "Role title phrase in paragraph 3.",
+      "minLength": 2,
+      "maxLength": 120
+    },
+    "mission_hook": {
+      "type": "string",
+      "description": "Short phrase about company mission/industry/products.",
+      "minLength": 2,
+      "maxLength": 260
+    },
+    "impact_phrase": {
+      "type": "string",
+      "description": "Impact phrase after 'developing impactful code to ...'.",
+      "minLength": 2,
+      "maxLength": 320
+    },
+    "company_name_possessive": {
+      "type": "string",
+      "description": "Possessive company form, e.g. 'Acme's'.",
+      "minLength": 2,
+      "maxLength": 120
+    }
+  }
+}

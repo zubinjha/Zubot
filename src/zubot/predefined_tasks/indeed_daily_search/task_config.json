@@ -1,6 +1,16 @@
 {
   "name": "Indeed Daily Search Routine",
-  "notes": "Task-local config scaffold. Script logic remains in entrypoint_path.",
-  "job_sources": ["indeed"],
-  "output_table": "task_seen_items"
+  "notes": "Search inputs only (HasData Indeed listing supports keyword + location).",
+  "search_profiles": [
+    {
+      "profile_id": "software_engineer_columbus_oh",
+      "keyword": "software engineer",
+      "location": "Columbus, OH"
+    },
+    {
+      "profile_id": "software_engineer_cleveland_oh",
+      "keyword": "software engineer",
+      "location": "Cleveland, OH"
+    }
+  ]
 }
