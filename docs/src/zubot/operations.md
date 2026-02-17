@@ -93,6 +93,15 @@ Control request text contract:
   - `[/ZUBOT_CONTROL_REQUEST]`
 - supported actions: `enqueue_task`, `enqueue_agentic_task`, `kill_task_run`, `query_central_db`
 
+Predefined task note:
+- `indeed_daily_search` writes task-local artifacts under:
+  - `src/zubot/predefined_tasks/indeed_daily_search/state/cover_letters/`
+- It normalizes spreadsheet fields through an LLM extraction step.
+  - On extraction failure, field defaults are deterministic: `Not Found`.
+- It also uses central DB helper tables:
+  - `task_seen_items` for seen-id dedupe
+  - `job_discovery` for run-level triage results
+
 ## Provider Queue Monitoring (HasData)
 
 HasData-backed tools are serialized through provider queue group `hasdata`.

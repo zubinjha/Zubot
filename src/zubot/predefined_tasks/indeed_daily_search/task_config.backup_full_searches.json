@@ -1,0 +1,108 @@
+{
+  "name": "Indeed Daily Search Routine",
+  "notes": "Config-driven Indeed search + decision + cover-letter + sheet upload pipeline.",
+  "seen_ids_limit": 200,
+  "seen_provider": "indeed",
+  "extraction_model_alias": "medium",
+  "decision_model_alias": "medium",
+  "cover_letter_model_alias": "high",
+  "invalid_schema_retry_limit": 1,
+  "project_context_top_n": 3,
+  "project_context_max_chars": 2600,
+  "cover_letter_destination_path": "Job Applications/Cover Letters",
+  "cover_letter_file_mode": "versioned",
+  "sheet_retry_attempts": 2,
+  "sheet_retry_backoff_sec": 1.0,
+  "search_profiles": [
+    {
+      "profile_id": "software_engineer_columbus_oh",
+      "keyword": "Software Engineer",
+      "location": "Columbus, OH"
+    },
+    {
+      "profile_id": "software_engineer_cleveland_oh",
+      "keyword": "Software Engineer",
+      "location": "Cleveland, OH"
+    },
+    {
+      "profile_id": "software_engineer_phoenix_az",
+      "keyword": "Software Engineer",
+      "location": "Phoenix, AZ"
+    },
+    {
+      "profile_id": "software_engineer_scottsdale_az",
+      "keyword": "Software Engineer",
+      "location": "Scottsdale, AZ"
+    },
+    {
+      "profile_id": "software_engineer_boulder_co",
+      "keyword": "Software Engineer",
+      "location": "Boulder, CO"
+    },
+    {
+      "profile_id": "software_engineer_denver_co",
+      "keyword": "Software Engineer",
+      "location": "Denver, CO"
+    },
+    {
+      "profile_id": "data_analytics_columbus_oh",
+      "keyword": "Data Analytics",
+      "location": "Columbus, OH"
+    },
+    {
+      "profile_id": "data_analytics_cleveland_oh",
+      "keyword": "Data Analytics",
+      "location": "Cleveland, OH"
+    },
+    {
+      "profile_id": "data_analytics_phoenix_az",
+      "keyword": "Data Analytics",
+      "location": "Phoenix, AZ"
+    },
+    {
+      "profile_id": "data_analytics_scottsdale_az",
+      "keyword": "Data Analytics",
+      "location": "Scottsdale, AZ"
+    },
+    {
+      "profile_id": "data_analytics_boulder_co",
+      "keyword": "Data Analytics",
+      "location": "Boulder, CO"
+    },
+    {
+      "profile_id": "data_analytics_denver_co",
+      "keyword": "Data Analytics",
+      "location": "Denver, CO"
+    },
+    {
+      "profile_id": "ai_engineer_columbus_oh",
+      "keyword": "AI Engineer",
+      "location": "Columbus, OH"
+    },
+    {
+      "profile_id": "ai_engineer_cleveland_oh",
+      "keyword": "AI Engineer",
+      "location": "Cleveland, OH"
+    },
+    {
+      "profile_id": "ai_engineer_phoenix_az",
+      "keyword": "AI Engineer",
+      "location": "Phoenix, AZ"
+    },
+    {
+      "profile_id": "ai_engineer_scottsdale_az",
+      "keyword": "AI Engineer",
+      "location": "Scottsdale, AZ"
+    },
+    {
+      "profile_id": "ai_engineer_boulder_co",
+      "keyword": "AI Engineer",
+      "location": "Boulder, CO"
+    },
+    {
+      "profile_id": "ai_engineer_denver_co",
+      "keyword": "AI Engineer",
+      "location": "Denver, CO"
+    }
+  ]
+}

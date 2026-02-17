@@ -78,6 +78,13 @@ Operations guidance for long-running mode lives in [docs/src/zubot/operations.md
   - `task.py`
   - `task_config.json`
   - optional `prompts/`, `assets/`, `state/`
+- `indeed_daily_search` now includes an end-to-end pipeline:
+  - search + seen-id dedupe (`task_seen_items`)
+  - LLM field extraction for sheet columns (`company`, `job_title`, `location`, `pay_range`, `job_link`) with deterministic `Not Found` fallback on model failure
+  - decision triage (`Recommend Apply` / `Recommend Maybe` / `Skip`)
+  - resume/profile/project-aware context assembly (project index + top matched project files per job)
+  - styled cover-letter DOCX generation + Drive upload
+  - spreadsheet row append for non-skip recommendations
 - Reference template lives at `src/zubot/predefined_tasks/example_task_layout/`.
 - Scheduler rows live in SQLite (`defined_tasks` / `defined_tasks_run_times`) and reference `profile_id == task_id`.
 - Central service resolves `task_id -> task_profiles.task_id` at execution time.

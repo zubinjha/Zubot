@@ -66,6 +66,9 @@ This document captures the conceptual architecture of Zubot at the system level.
   - predefined script runs
   - agentic background runs
   - interactive wrapper runs that can pause/resume for user input
+ - Example implemented predefined pipeline:
+   - `indeed_daily_search` performs config-driven query fan-out, task-level seen-id dedupe, LLM sheet-field extraction, LLM triage decisions, cover-letter artifact generation, and spreadsheet row append for non-skip outcomes.
+   - Candidate context for this pipeline is assembled from profile/resume docs plus top matched project docs per job.
 
 ### Memory Summary Queue
 - Backed by SQLite (`memory_summary_jobs`).
