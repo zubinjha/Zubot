@@ -324,7 +324,10 @@ def append_job_app_row(*, row: dict[str, Any]) -> dict[str, Any]:
 
     status = str(normalized_row.get("Status") or "").strip() or DEFAULT_STATUS
     if status not in ALLOWED_STATUS_VALUES:
-        return _error_payload(source, "row.Status must be one of: Found, Applied, Interviewing, Offer, Rejected, Closed.")
+        return _error_payload(
+            source,
+            "row.Status must be one of: Recommend Apply, Recommend Maybe, Applied, Interviewing, Offer, Rejected, Closed.",
+        )
     normalized_row["Status"] = status
 
     settings = _google_drive_settings()

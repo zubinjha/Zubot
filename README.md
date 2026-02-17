@@ -140,9 +140,8 @@ Choose one of these startup modes based on what you want to run.
     - `context/SOUL.md`
     - `context/USER.md`
     - `context/more-about-human/README.md`
-  - Query-scored supplemental auto-load:
-    - `context/more-about-human/*.md`
-    - `context/more-about-human/projects/*.md`
+  - Supplemental project/profile files are not query-autoloaded by default.
+  - Project-specific details should be grounded via explicit file reads/tool calls.
   - Daily memory auto-load:
     - recent daily memory via `memory.autoload_summary_days` (default `2`)
 - Task agents (scheduled/manual profile runs):

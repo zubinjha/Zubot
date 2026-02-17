@@ -77,7 +77,14 @@ This document defines the initial tools scaffold in `src/zubot/tools/`.
     - list filtering applies inclusive bounds to `Date Found`
   - Append behavior:
     - validates required row fields
-    - validates `Status` against allowed values
+    - validates `Status` against allowed values:
+      - `Recommend Apply`
+      - `Recommend Maybe`
+      - `Applied`
+      - `Interviewing`
+      - `Offer`
+      - `Rejected`
+      - `Closed`
     - enforces JobKey dedupe by checking existing `JobKey` values before append
     - writes to the earliest available row where both `JobKey` and `Job Title` are empty
   - Delete behavior:

@@ -481,7 +481,7 @@ class TaskSchedulerStore:
                     location TEXT NOT NULL,
                     date_found TEXT NOT NULL,
                     date_applied TEXT,
-                    status TEXT NOT NULL CHECK (status IN ('Found', 'Applied', 'Interviewing', 'Offer', 'Rejected', 'Closed')),
+                    status TEXT NOT NULL CHECK (status IN ('Recommend Apply', 'Recommend Maybe', 'Applied', 'Interviewing', 'Offer', 'Rejected', 'Closed')),
                     pay_range TEXT,
                     job_link TEXT NOT NULL,
                     source TEXT NOT NULL,
@@ -494,6 +494,20 @@ class TaskSchedulerStore:
                     ON job_applications(date_found);
                 CREATE INDEX IF NOT EXISTS idx_job_applications_status
                     ON job_applications(status);
+
+                CREATE TABLE IF NOT EXISTS job_discovery (
+                    task_id TEXT NOT NULL,
+                    job_key TEXT NOT NULL,
+                    found_at TEXT NOT NULL,
+                    decision TEXT NOT NULL CHECK (decision IN ('Recommend Apply', 'Recommend Maybe', 'Skip')),
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY(task_id, job_key),
+                    FOREIGN KEY(task_id) REFERENCES task_profiles(task_id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_job_discovery_found_at
+                    ON job_discovery(found_at);
+                CREATE INDEX IF NOT EXISTS idx_job_discovery_decision
+                    ON job_discovery(decision);
                 """
             )
             run_table_sql = conn.execute(
@@ -547,6 +561,62 @@ class TaskSchedulerStore:
                 conn.execute("ALTER TABLE defined_tasks ADD COLUMN next_run_at TEXT;")
             if "last_planned_run_at" not in task_columns:
                 conn.execute("ALTER TABLE defined_tasks ADD COLUMN last_planned_run_at TEXT;")
+
+            job_app_table_sql = conn.execute(
+                """
+                SELECT sql
+                FROM sqlite_master
+                WHERE type = 'table' AND name = 'job_applications';
+                """
+            ).fetchone()
+            job_app_table_sql_text = str(job_app_table_sql["sql"] or "") if job_app_table_sql else ""
+            if "Recommend Apply" not in job_app_table_sql_text:
+                conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS job_applications_new (
+                        job_key TEXT PRIMARY KEY,
+                        company TEXT NOT NULL,
+                        job_title TEXT NOT NULL,
+                        location TEXT NOT NULL,
+                        date_found TEXT NOT NULL,
+                        date_applied TEXT,
+                        status TEXT NOT NULL CHECK (status IN ('Recommend Apply', 'Recommend Maybe', 'Applied', 'Interviewing', 'Offer', 'Rejected', 'Closed')),
+                        pay_range TEXT,
+                        job_link TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        cover_letter TEXT,
+                        notes TEXT,
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    );
+                    INSERT INTO job_applications_new(job_key, company, job_title, location, date_found, date_applied, status, pay_range, job_link, source, cover_letter, notes, created_at, updated_at)
+                    SELECT
+                        job_key,
+                        company,
+                        job_title,
+                        location,
+                        date_found,
+                        date_applied,
+                        CASE
+                            WHEN status = 'Found' THEN 'Recommend Apply'
+                            ELSE status
+                        END,
+                        pay_range,
+                        job_link,
+                        source,
+                        cover_letter,
+                        notes,
+                        created_at,
+                        updated_at
+                    FROM job_applications;
+                    DROP TABLE job_applications;
+                    ALTER TABLE job_applications_new RENAME TO job_applications;
+                    CREATE INDEX IF NOT EXISTS idx_job_applications_date_found
+                        ON job_applications(date_found);
+                    CREATE INDEX IF NOT EXISTS idx_job_applications_status
+                        ON job_applications(status);
+                    """
+                )
 
             run_columns = {
                 str(col["name"])

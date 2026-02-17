@@ -107,7 +107,8 @@ Primary modules:
 
 Responsibilities:
 - load baseline identity/system context (`KERNEL/AGENT/SOUL/USER`)
-- score and include supplemental context files
+- keep supplemental autoload disabled by default for main-agent chat turns
+- rely on explicit file/tool reads for project-specific grounding
 - build model-ready message list with summary/fact carryover
 - apply deterministic budget-aware context selection
 

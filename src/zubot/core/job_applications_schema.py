@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-DEFAULT_STATUS = "Found"
-ALLOWED_STATUS_VALUES = ("Found", "Applied", "Interviewing", "Offer", "Rejected", "Closed")
+DEFAULT_STATUS = "Recommend Apply"
+ALLOWED_STATUS_VALUES = ("Recommend Apply", "Recommend Maybe", "Applied", "Interviewing", "Offer", "Rejected", "Closed")
 
 SHEET_COLUMNS = (
     "JobKey",

@@ -50,3 +50,21 @@ def test_load_context_bundle(tmp_path: Path):
     assert "context/KERNEL.md" in bundle["base"]
     assert "context/AGENT.md" in bundle["base"]
     assert "context/more-about-human/README.md" in bundle["base"]
+    assert bundle["supplemental"] == {}
+
+
+def test_load_context_bundle_opt_in_query_supplemental(tmp_path: Path):
+    _write(tmp_path / "context/KERNEL.md", "kernel")
+    _write(tmp_path / "context/AGENT.md", "agent")
+    _write(tmp_path / "context/SOUL.md", "soul")
+    _write(tmp_path / "context/USER.md", "user")
+    _write(tmp_path / "context/more-about-human/README.md", "more about human index")
+    _write(tmp_path / "context/more-about-human/projects/newsletter-builder.md", "newsletter project details")
+
+    bundle = load_context_bundle(
+        query="newsletter project",
+        root=tmp_path,
+        max_supplemental_files=2,
+        enable_query_supplemental=True,
+    )
+    assert any(path.endswith("newsletter-builder.md") for path in bundle["supplemental"].keys())

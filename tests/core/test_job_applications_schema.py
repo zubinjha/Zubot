@@ -45,7 +45,7 @@ def test_db_row_to_sheet_row_exact_mapping():
         "location": "Columbus, OH",
         "date_found": "2026-01-01",
         "date_applied": "",
-        "status": "Found",
+        "status": "Recommend Apply",
         "pay_range": "",
         "job_link": "https://example.com/job/9",
         "source": "LinkedIn",

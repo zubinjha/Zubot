@@ -144,6 +144,30 @@ Conceptual behavior:
 - `route` TEXT
 - `created_at` TEXT NOT NULL
 
+### `job_applications`
+- `job_key` TEXT PK
+- `company` TEXT NOT NULL
+- `job_title` TEXT NOT NULL
+- `location` TEXT NOT NULL
+- `date_found` TEXT NOT NULL
+- `date_applied` TEXT
+- `status` TEXT NOT NULL (`Recommend Apply`/`Recommend Maybe`/`Applied`/`Interviewing`/`Offer`/`Rejected`/`Closed`)
+- `pay_range` TEXT
+- `job_link` TEXT NOT NULL
+- `source` TEXT NOT NULL
+- `cover_letter` TEXT
+- `notes` TEXT
+- `created_at` TEXT NOT NULL
+- `updated_at` TEXT NOT NULL
+
+### `job_discovery`
+- `task_id` TEXT NOT NULL FK -> `task_profiles(task_id)` (`ON DELETE CASCADE`)
+- `job_key` TEXT NOT NULL
+- `found_at` TEXT NOT NULL
+- `decision` TEXT NOT NULL (`Recommend Apply`/`Recommend Maybe`/`Skip`)
+- `created_at` TEXT NOT NULL
+- PK: (`task_id`, `job_key`)
+
 ### `todo_items`
 - `todo_item_id` INTEGER PK AUTOINCREMENT
 - `parent_id` INTEGER NULL FK -> `todo_items(todo_item_id)` (`ON DELETE SET NULL`)
@@ -174,6 +198,8 @@ Conceptual behavior:
 - `idx_daily_memory_events_kind_day(kind, day)`
 - `idx_daily_memory_events_session_event(session_id, event_id)`
 - `idx_chat_messages_session_message(session_id, message_id)`
+- `idx_job_discovery_found_at(found_at)`
+- `idx_job_discovery_decision(decision)`
 - `idx_todo_items_create_date(create_date)`
 - `idx_todo_items_due_date(due_date)`
 - `idx_todo_items_status(status)`

@@ -12,28 +12,36 @@ Inputs you will receive:
 Output requirements:
 - return valid JSON only
 - keys must exactly match the schema fields
-- keep style concise and professional
+- keep style concise, professional, and naturally aligned with the user's voice
 - avoid hallucinated personal facts
 - do not include markdown fences
+- do not use em dashes
+- avoid dash-heavy clause chaining
 
 Required keys:
 - `date`
 - `recipient_name_title`
 - `company_name`
 - `salutation_target`
-- `specialty_area`
-- `key_tools_list`
-- `project_example_summary`
+- `opening_focus_area`
+- `stack_list`
+- `project_summary`
+- `project_ownership_list`
 - `role_title`
-- `mission_hook`
-- `impact_phrase`
-- `company_name_possessive`
+- `company_why`
+- `role_scope_alignment`
+- `growth_focus_area`
+- `immediate_value_areas`
+- `closing_value_line`
+- `team_name`
 
 Guidance:
 - `date`: format like `February 17, 2026`
 - `recipient_name_title`: if no named person, use `Hiring Manager`
 - `salutation_target`: use a natural salutation target, e.g. `Hiring Manager at <Company>`
-- `company_name_possessive`: possessive form, e.g. `Acme's`
+- `project_summary`: include role-relevant evidence (API systems, CI/CD, data pipelines, reliability) when true
+- `company_why`: tie directly to role/company specifics from the job description
+- `immediate_value_areas`: emphasize practical, near-term contribution areas
 
 Validation:
 - every key present

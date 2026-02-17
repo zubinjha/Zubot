@@ -75,9 +75,9 @@ def test_list_job_app_rows_inclusive_date_filter_and_mapping(configured_google_d
                     "Cover Letter",
                     "Notes",
                 ],
-                ["k1", "A", "Role A", "Remote", "02/10/2026", "", "Found", "", "u1", "Indeed"],
+                ["k1", "A", "Role A", "Remote", "02/10/2026", "", "Recommend Apply", "", "u1", "Indeed"],
                 ["k2", "B", "Role B", "Remote", "2026-02-11", "", "Applied", "", "u2", "LinkedIn"],
-                ["k3", "C", "Role C", "Remote", "not-a-date", "", "Found", "", "u3", "Site"],
+                ["k3", "C", "Role C", "Remote", "not-a-date", "", "Recommend Apply", "", "u3", "Site"],
                 ["k4", "D", "Role D"],
             ]
         }
@@ -162,7 +162,7 @@ def test_append_job_app_row_duplicate_job_key(configured_google_drive, monkeypat
             "Job Title": "Engineer",
             "Location": "Remote",
             "Date Found": "02/10/2026",
-            "Status": "Found",
+            "Status": "Recommend Apply",
             "Job Link": "https://example.com/job",
             "Source": "Indeed",
         }
@@ -203,7 +203,7 @@ def test_append_job_app_row_success(configured_google_drive, monkeypatch: pytest
             "Location": "Remote",
             "Date Found": "02/10/2026",
             "Date Applied": "2026-02-11",
-            "Status": "Found",
+            "Status": "Recommend Apply",
             "Pay Range": "120k-150k",
             "Job Link": "https://example.com/job",
             "Source": "Indeed",
@@ -245,7 +245,7 @@ def test_append_job_app_row_api_error(configured_google_drive, monkeypatch: pyte
             "Job Title": "Engineer",
             "Location": "Remote",
             "Date Found": "2026-02-10",
-            "Status": "Found",
+            "Status": "Recommend Apply",
             "Job Link": "https://example.com/job",
             "Source": "Indeed",
         }

@@ -98,14 +98,17 @@ def load_context_bundle(
     query: str,
     root: Path | None = None,
     max_supplemental_files: int = 3,
+    enable_query_supplemental: bool = False,
 ) -> dict[str, Any]:
     root_path = root or repo_root()
     base = load_base_context(root=root_path)
-    supplemental_paths = select_supplemental_context_files(
-        query,
-        root=root_path,
-        max_files=max_supplemental_files,
-    )
+    supplemental_paths: list[str] = []
+    if enable_query_supplemental:
+        supplemental_paths = select_supplemental_context_files(
+            query,
+            root=root_path,
+            max_files=max_supplemental_files,
+        )
     supplemental: dict[str, str] = {}
     for rel in supplemental_paths:
         text = _read_text(root_path / rel)

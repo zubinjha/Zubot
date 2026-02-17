@@ -11,9 +11,10 @@ This folder is the task-local resource/config package for `indeed_daily_search`.
 Business logic script implementation is intentionally unchanged for now.
 
 ## Cover Letter Template Assets
-- `assets/cover_letter_template.docx`: style/layout source of truth for cover letters.
+- `assets/cover_letter_template.docx`: active style/layout source of truth (updated from AE draft).
 - `assets/cover_letter_fields.schema.json`: structured input contract for variable fields.
-- `assets/cover_letter_template_placeholders.md`: placeholder and editing rules.
+- `assets/cover_letter_fields.example.json`: sample payload matching current schema.
+- `assets/cover_letter_template_placeholders.md`: placeholder mapping + style guardrails.
 - `prompts/cover_letter_values_prompt.md`: LLM prompt contract for generating placeholder values.
 
 ## Task Config Keys

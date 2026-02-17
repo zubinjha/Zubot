@@ -164,7 +164,7 @@ CREATE TABLE IF NOT EXISTS job_applications (
     location TEXT NOT NULL,
     date_found TEXT NOT NULL,
     date_applied TEXT,
-    status TEXT NOT NULL CHECK (status IN ('Found', 'Applied', 'Interviewing', 'Offer', 'Rejected', 'Closed')),
+    status TEXT NOT NULL CHECK (status IN ('Recommend Apply', 'Recommend Maybe', 'Applied', 'Interviewing', 'Offer', 'Rejected', 'Closed')),
     pay_range TEXT,
     job_link TEXT NOT NULL,
     source TEXT NOT NULL,
@@ -172,6 +172,18 @@ CREATE TABLE IF NOT EXISTS job_applications (
     notes TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Lean task-scoped job discovery triage records.
+-- Stores minimal first-pass decision outcomes before full application tracking.
+CREATE TABLE IF NOT EXISTS job_discovery (
+    task_id TEXT NOT NULL,
+    job_key TEXT NOT NULL,
+    found_at TEXT NOT NULL,
+    decision TEXT NOT NULL CHECK (decision IN ('Recommend Apply', 'Recommend Maybe', 'Skip')),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (task_id, job_key),
+    FOREIGN KEY (task_id) REFERENCES task_profiles(task_id) ON DELETE CASCADE
 );
 
 -- Nested todo checklist items for personal task tracking.
@@ -289,6 +301,12 @@ CREATE INDEX IF NOT EXISTS idx_job_applications_date_found
 
 CREATE INDEX IF NOT EXISTS idx_job_applications_status
     ON job_applications(status);
+
+CREATE INDEX IF NOT EXISTS idx_job_discovery_found_at
+    ON job_discovery(found_at);
+
+CREATE INDEX IF NOT EXISTS idx_job_discovery_decision
+    ON job_discovery(decision);
 
 CREATE INDEX IF NOT EXISTS idx_todo_items_create_date
     ON todo_items(create_date);

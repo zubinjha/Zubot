@@ -811,7 +811,11 @@ def handle_chat_message(
     user_turn_started_at = datetime.now(UTC)
 
     if allow_llm_fallback:
-        context_bundle = load_context_bundle(query=text, max_supplemental_files=2)
+        context_bundle = load_context_bundle(
+            query=text,
+            max_supplemental_files=2,
+            enable_query_supplemental=False,
+        )
         time_location_context, time_location_debug = _build_time_location_context()
         context_bundle.setdefault("supplemental", {})
         context_bundle["supplemental"] = {

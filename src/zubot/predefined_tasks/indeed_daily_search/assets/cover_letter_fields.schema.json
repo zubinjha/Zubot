@@ -10,13 +10,17 @@
     "recipient_name_title",
     "company_name",
     "salutation_target",
-    "specialty_area",
-    "key_tools_list",
-    "project_example_summary",
+    "opening_focus_area",
+    "stack_list",
+    "project_summary",
+    "project_ownership_list",
     "role_title",
-    "mission_hook",
-    "impact_phrase",
-    "company_name_possessive"
+    "company_why",
+    "role_scope_alignment",
+    "growth_focus_area",
+    "immediate_value_areas",
+    "closing_value_line",
+    "team_name"
   ],
   "properties": {
     "date": {
@@ -43,23 +47,29 @@
       "minLength": 2,
       "maxLength": 160
     },
-    "specialty_area": {
+    "opening_focus_area": {
       "type": "string",
-      "description": "Specialty/interest phrase inserted into paragraph 1.",
+      "description": "Phrase after 'focused on', matching role/domain emphasis.",
       "minLength": 2,
       "maxLength": 220
     },
-    "key_tools_list": {
+    "stack_list": {
       "type": "string",
-      "description": "Short tools/tech list phrase for paragraph 1.",
+      "description": "Compact tech stack phrase for paragraph 1.",
       "minLength": 2,
       "maxLength": 260
     },
-    "project_example_summary": {
+    "project_summary": {
       "type": "string",
-      "description": "Brief project summary phrase for paragraph 2.",
+      "description": "Project sentence that proves fit (API/systems/CI/CD as relevant).",
       "minLength": 2,
       "maxLength": 400
+    },
+    "project_ownership_list": {
+      "type": "string",
+      "description": "Ownership scope list phrase (e.g. schema design, backend logic, deployment, iteration).",
+      "minLength": 2,
+      "maxLength": 320
     },
     "role_title": {
       "type": "string",
@@ -67,21 +77,39 @@
       "minLength": 2,
       "maxLength": 120
     },
-    "mission_hook": {
+    "company_why": {
       "type": "string",
-      "description": "Short phrase about company mission/industry/products.",
+      "description": "Why the company/role is compelling based on job posting.",
       "minLength": 2,
       "maxLength": 260
     },
-    "impact_phrase": {
+    "role_scope_alignment": {
       "type": "string",
-      "description": "Impact phrase after 'developing impactful code to ...'.",
+      "description": "Role scope clause (enterprise systems, collaboration, CI/CD/reliability, APIs, etc.).",
       "minLength": 2,
       "maxLength": 320
     },
-    "company_name_possessive": {
+    "growth_focus_area": {
       "type": "string",
-      "description": "Possessive company form, e.g. 'Acme's'.",
+      "description": "Skill area to deepen (for example backend Java/Spring, distributed systems, data platforms).",
+      "minLength": 2,
+      "maxLength": 200
+    },
+    "immediate_value_areas": {
+      "type": "string",
+      "description": "Where immediate contribution is strongest (full-stack, APIs, databases, CI/CD, reliability).",
+      "minLength": 2,
+      "maxLength": 260
+    },
+    "closing_value_line": {
+      "type": "string",
+      "description": "Closing value proposition sentence fragment.",
+      "minLength": 2,
+      "maxLength": 260
+    },
+    "team_name": {
+      "type": "string",
+      "description": "Team/company reference used in closing sentence.",
       "minLength": 2,
       "maxLength": 120
     }
