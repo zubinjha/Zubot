@@ -81,7 +81,7 @@ def test_helpers_resolve_default_model_and_location():
             "tasks": {
                 "profile_a": {
                     "name": "Profile A",
-                    "entrypoint_path": "src/zubot/predefined_tasks/indeed_daily_search.py",
+                    "entrypoint_path": "src/zubot/predefined_tasks/indeed_daily_search/task.py",
                     "args": [],
                     "timeout_sec": 120,
                 }

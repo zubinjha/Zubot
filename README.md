@@ -73,11 +73,12 @@ Operations guidance for long-running mode lives in [docs/src/zubot/operations.md
   - if DB has zero task profiles at startup, legacy config maps are imported once from:
     - `task_profiles.tasks`
     - `pre_defined_tasks.tasks`
-- Script entrypoints should be repository-relative paths (for example `src/zubot/tasks/indeed_daily_search/task.py`).
-- Standardized task package layout is supported under `src/zubot/tasks/<task_id>/`:
+- Script entrypoints should be repository-relative paths (for example `src/zubot/predefined_tasks/indeed_daily_search/task.py`).
+- Standardized task package layout is supported under `src/zubot/predefined_tasks/<task_id>/`:
   - `task.py`
-  - `config.json`
+  - `task_config.json`
   - optional `prompts/`, `assets/`, `state/`
+- Reference template lives at `src/zubot/predefined_tasks/example_task_layout/`.
 - Scheduler rows live in SQLite (`defined_tasks` / `defined_tasks_run_times`) and reference `profile_id == task_id`.
 - Central service resolves `task_id -> task_profiles.task_id` at execution time.
 
@@ -104,6 +105,12 @@ For new agents or fresh sessions, use this order:
 - This starts runtime ownership (user-facing agent + task-agent queue manager) and local app server in one process.
 - Optional headless runtime mode (no app server):
   - `python -m src.zubot.daemon.main --no-app`
+
+Quick run command:
+```bash
+source .venv/bin/activate
+python -m src.zubot.daemon.main
+```
 
 ## Usage
 Choose one of these startup modes based on what you want to run.

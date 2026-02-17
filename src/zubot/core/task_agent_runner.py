@@ -60,7 +60,7 @@ class TaskAgentRunner:
         if isinstance(candidate_raw, str) and candidate_raw.strip():
             candidate = Path(candidate_raw.strip())
         else:
-            candidate = Path("src") / "zubot" / "tasks" / task_id
+            candidate = Path("src") / "zubot" / "predefined_tasks" / task_id
 
         if candidate.is_absolute():
             raise ValueError("Task resources_path must be repository-relative.")
@@ -71,14 +71,16 @@ class TaskAgentRunner:
 
     @staticmethod
     def _load_task_local_config(resources_dir: Path) -> dict[str, Any]:
-        config_path = resources_dir / "config.json"
-        if not config_path.exists() or not config_path.is_file():
-            return {}
-        try:
-            payload = json.loads(config_path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-        return payload if isinstance(payload, dict) else {}
+        for filename in ("task_config.json", "config.json"):
+            config_path = resources_dir / filename
+            if not config_path.exists() or not config_path.is_file():
+                continue
+            try:
+                payload = json.loads(config_path.read_text(encoding="utf-8"))
+            except Exception:
+                return {}
+            return payload if isinstance(payload, dict) else {}
+        return {}
 
     @staticmethod
     def _run_predefined_task(

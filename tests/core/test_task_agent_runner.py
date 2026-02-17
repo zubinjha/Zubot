@@ -18,7 +18,7 @@ def cfg_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
                     "tasks": {
                         "script_task": {
                             "name": "Script Task",
-                            "entrypoint_path": "src/zubot/predefined_tasks/indeed_daily_search.py",
+                            "entrypoint_path": "src/zubot/predefined_tasks/indeed_daily_search/task.py",
                             "args": ["--dry-run"],
                             "timeout_sec": 120,
                         }
@@ -47,7 +47,7 @@ def test_describe_run_for_missing_task(runner_with_tasks: TaskAgentRunner):
 def test_describe_run_for_predefined_task(runner_with_tasks: TaskAgentRunner):
     out = runner_with_tasks.describe_run(profile_id="script_task")
     assert "Script Task:" in out
-    assert "src/zubot/predefined_tasks/indeed_daily_search.py" in out
+    assert "src/zubot/predefined_tasks/indeed_daily_search/task.py" in out
 
 
 def test_run_profile_missing_task_returns_failed(runner_with_tasks: TaskAgentRunner):
@@ -202,7 +202,7 @@ def test_run_profile_script_injects_task_local_config(monkeypatch: pytest.Monkey
 
     resources_dir = tmp_path / "tasks" / "script_task"
     resources_dir.mkdir(parents=True, exist_ok=True)
-    (resources_dir / "config.json").write_text(json.dumps({"cursor": 3}), encoding="utf-8")
+    (resources_dir / "task_config.json").write_text(json.dumps({"cursor": 3}), encoding="utf-8")
 
     cfg_path = tmp_path / "config.json"
     cfg_path.write_text(
