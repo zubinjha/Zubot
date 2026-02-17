@@ -7,6 +7,7 @@ Current layout:
 - `tests/core/`: runtime, scheduler, memory, and config contracts
 - `tests/tools/`: tool module contract/unit tests
   - includes task pipeline tests such as `tests/core/test_indeed_daily_search_pipeline.py`
+  - includes task CLI tests such as `tests/core/test_task_cli.py`
 
 Execution:
 - `source .venv/bin/activate`

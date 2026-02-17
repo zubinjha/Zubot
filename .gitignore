@@ -16,4 +16,5 @@ context/*
 !context/README.md
 personal_notes/
 dev_docs/
+devtools/
 outputs/

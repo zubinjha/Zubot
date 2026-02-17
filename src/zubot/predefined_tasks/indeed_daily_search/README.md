@@ -19,15 +19,19 @@ This folder is the task-local resource/config package for `indeed_daily_search`.
 5. Fetch detail payload for each new job.
 6. Run field-extraction LLM to normalize spreadsheet fields:
    - `company`, `job_title`, `location`, `pay_range`, `job_link`
-   - on model failure or invalid JSON, deterministic fallback is `Not Found` for each field
+   - on model failure or invalid JSON, deterministic fallback starts as `Not Found` for each field
+   - `job_link` is then force-filled from the known listing URL when available (prevents blank/`Not Found` links for valid listings)
 7. Run decision LLM (`Recommend Apply` / `Recommend Maybe` / `Skip`) with strict JSON validation.
 8. For non-skip decisions:
    - generate cover-letter body via LLM with strict JSON validation
+   - if cover-letter JSON generation fails, task uses deterministic fallback paragraphs so file generation can proceed
    - render styled DOCX (Times New Roman spec from `assets/cover_letter_style_spec.md`)
    - upload DOCX to Google Drive
+   - if upload response omits `web_view_link`, task falls back to a `drive_file_id`-based viewer link
    - append row to job applications spreadsheet (`append_job_app_row`)
 9. Persist triage outcome in `job_discovery` table.
 10. Persist concise run debug payload in `task_state_kv` under `state_key=last_run_snapshot`.
+11. Persist live progress snapshots in `task_state_kv` under `state_key=live_progress` during run execution.
 
 ## Candidate Context Ingestion
 - Base context is loaded from `candidate_context_files` (or defaults) and includes:
@@ -46,6 +50,29 @@ This folder is the task-local resource/config package for `indeed_daily_search`.
 - Cover letter artifact naming is controlled by `cover_letter_file_mode`:
   - `versioned` (default): append timestamp suffix
   - `overwrite`: deterministic filename by job key
+
+## Live Progress Contract
+- During active runs, progress state is continuously upserted at:
+  - `task_state_kv(task_id='indeed_daily_search', state_key='live_progress')`
+- Includes:
+  - `stage` (`starting` | `search` | `process` | `done`)
+  - `query_index/query_total`
+  - `job_index/job_total`
+  - `search_fraction`
+  - `search_percent`
+  - `overall_percent`
+  - `total_percent`
+  - `status_line`
+- Search phase formula follows equal-weight query buckets and equal-weight jobs within each query:
+  - `search_fraction = (query_index-1)/query_total + (1/query_total)*(job_index/job_total)`
+- `total_percent` is monotonic and phase-weighted (search + processing), and does not drop between stages.
+
+## Row Write Resilience
+- For `Recommend Apply` / `Recommend Maybe`, spreadsheet row append is blocked if final `Job Link` resolves to `Not Found`.
+- For cover letters:
+  - generation failures trigger deterministic paragraph fallback
+  - upload failures still allow row append with a `cover_letter_error=...` note marker
+  - fallback generation adds `cover_letter_fallback=...` note marker
 
 ## Task Config Keys
 - `search_profiles[]`: list of `{profile_id, keyword, location}` search definitions used for HasData listing calls.

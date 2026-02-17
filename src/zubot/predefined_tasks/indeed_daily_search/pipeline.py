@@ -10,7 +10,7 @@ from pathlib import Path
 import re
 import sqlite3
 from time import sleep
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
 from src.zubot.core.config_loader import get_central_service_config, load_config
@@ -37,6 +37,7 @@ DEFAULT_SHEET_RETRY_ATTEMPTS = 2
 DEFAULT_SHEET_RETRY_BACKOFF_SEC = 1.0
 DEFAULT_PROJECT_CONTEXT_TOP_N = 3
 DEFAULT_PROJECT_CONTEXT_MAX_CHARS = 2600
+SEARCH_PHASE_WEIGHT = 0.6
 
 DEFAULT_CANDIDATE_CONTEXT_FILES = [
     "context/USER.md",
@@ -165,6 +166,10 @@ def _context_key_from_path(path: Path, prefix: str = "context") -> str:
 def _normalize_not_found(value: Any) -> str:
     text = _coerce_text(value)
     return text if text else NOT_FOUND_VALUE
+
+
+def _is_not_found(value: Any) -> bool:
+    return _normalize_not_found(value).strip().lower() == NOT_FOUND_VALUE.lower()
 
 
 @dataclass(frozen=True)
@@ -402,6 +407,84 @@ def _upsert_task_state_snapshot(
         )
 
 
+def _search_fraction(
+    *,
+    query_index: int,
+    query_total: int,
+    job_index: int,
+    job_total: int,
+    query_complete_no_jobs: bool = False,
+) -> float:
+    if query_total <= 0:
+        return 0.0
+    safe_query_index = max(1, min(query_total, int(query_index)))
+    base = float(safe_query_index - 1) / float(query_total)
+    if job_total > 0:
+        within = (float(max(0, min(job_total, int(job_index)))) / float(job_total)) * (1.0 / float(query_total))
+    else:
+        within = (1.0 / float(query_total)) if query_complete_no_jobs else 0.0
+    return max(0.0, min(1.0, base + within))
+
+
+def _overall_fraction(*, search_fraction: float, processed_jobs: int, total_jobs: int) -> float:
+    search_part = max(0.0, min(1.0, float(search_fraction)))
+    if total_jobs <= 0:
+        process_part = 0.0
+    else:
+        process_part = max(0.0, min(1.0, float(processed_jobs) / float(total_jobs)))
+    return max(0.0, min(1.0, (SEARCH_PHASE_WEIGHT * search_part) + ((1.0 - SEARCH_PHASE_WEIGHT) * process_part)))
+
+
+class ProgressReporter:
+    def __init__(
+        self,
+        *,
+        task_id: str,
+        db_path: Path,
+        callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> None:
+        self._task_id = task_id
+        self._db_path = db_path
+        self._callback = callback
+        self._last_emit_key: tuple[str, int, int, int, int] | None = None
+
+    def emit(self, payload: dict[str, Any]) -> None:
+        status_line = _coerce_text(payload.get("status_line")) or "task progress update"
+        stage = _coerce_text(payload.get("stage")) or "running"
+        total_percent = float(payload.get("total_percent") or 0.0)
+        search_fraction = float(payload.get("search_fraction") or 0.0)
+        query_index = int(payload.get("query_index") or 0)
+        query_total = int(payload.get("query_total") or 0)
+        job_index = int(payload.get("job_index") or 0)
+        job_total = int(payload.get("job_total") or 0)
+        emit_key = (stage, round(total_percent), query_index, query_total, job_index + job_total)
+        if emit_key == self._last_emit_key:
+            return
+        self._last_emit_key = emit_key
+
+        progress_row = {
+            **payload,
+            "search_percent": round(max(0.0, min(100.0, search_fraction * 100.0)), 1),
+            "overall_percent": round(max(0.0, min(100.0, total_percent)), 1),
+            "total_percent": round(total_percent, 1),
+            "updated_at": _iso_now(),
+        }
+        try:
+            _upsert_task_state_snapshot(
+                task_id=self._task_id,
+                state_key="live_progress",
+                value=progress_row,
+                updated_by="indeed_daily_search_task",
+                db_path=self._db_path,
+            )
+        except Exception:
+            pass
+        if self._callback is not None:
+            try:
+                self._callback(progress_row)
+            except Exception:
+                pass
+
 def _render_cover_letter_docx(
     *,
     output_path: Path,
@@ -577,6 +660,48 @@ def _extract_sheet_fields_via_llm(
     return {"ok": False, "error": last_error, "fields": _default_sheet_fields()}
 
 
+def _extract_first_json_object(text: str) -> dict[str, Any] | None:
+    if not isinstance(text, str):
+        return None
+    raw = text.strip()
+    if not raw:
+        return None
+    # Strip common fenced wrappers if present.
+    raw = raw.replace("```json", "```")
+    raw = raw.replace("```JSON", "```")
+    raw = raw.strip("`").strip()
+    # Try direct parse first.
+    try:
+        payload = json.loads(raw)
+        if isinstance(payload, dict):
+            return payload
+    except Exception:
+        pass
+
+    # Best-effort balanced brace extraction.
+    for start_idx, ch in enumerate(raw):
+        if ch != "{":
+            continue
+        depth = 0
+        for end_idx in range(start_idx, len(raw)):
+            token = raw[end_idx]
+            if token == "{":
+                depth += 1
+            elif token == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = raw[start_idx : end_idx + 1]
+                    try:
+                        payload = json.loads(candidate)
+                    except Exception:
+                        break
+                    if isinstance(payload, dict):
+                        return payload
+                    break
+        # continue searching from next start_idx
+    return None
+
+
 def _llm_json_response(
     *,
     model_alias: str,
@@ -596,12 +721,9 @@ def _llm_json_response(
     text = _coerce_text(out.get("text"))
     if not text:
         return {"ok": False, "error": "llm_empty_text"}
-    try:
-        payload = json.loads(text)
-    except Exception:
-        return {"ok": False, "error": "invalid_json", "raw_text": text}
+    payload = _extract_first_json_object(text)
     if not isinstance(payload, dict):
-        return {"ok": False, "error": "json_root_not_object", "raw_text": text}
+        return {"ok": False, "error": "invalid_json", "raw_text": text}
     return {"ok": True, "payload": payload, "raw_text": text}
 
 
@@ -706,7 +828,37 @@ def _generate_cover_letter(
         last_error = reason
         if attempt < attempts:
             prompt += f"\n\nValidation error from prior attempt: {reason}. Fix JSON strictly."
-    return {"ok": False, "error": last_error}
+    # Robust deterministic fallback so apply/maybe jobs still produce a cover letter.
+    title = _extract_job_title(job_listing) or _extract_from_dict(
+        job_detail.get("job") if isinstance(job_detail.get("job"), dict) else {},
+        ["title", "jobTitle", "position"],
+    )
+    company = _extract_job_company(job_listing) or _extract_from_dict(
+        job_detail.get("job") if isinstance(job_detail.get("job"), dict) else {},
+        ["companyName", "company", "employer"],
+    )
+    title = title or "the role"
+    company = company or "the company"
+    paragraphs = [
+        (
+            f"I am excited to apply for {title} at {company}. "
+            "I recently completed my Computer Science degree and I enjoy building reliable software systems that solve real problems."
+        ),
+        (
+            "My background is strongest in backend engineering, data systems, and end-to-end product execution. "
+            "I have built production-style projects involving APIs, relational databases, and iterative feature delivery."
+        ),
+        (
+            f"I would welcome the opportunity to contribute to {company} and continue growing as an engineer. "
+            "Thank you for your consideration."
+        ),
+    ]
+    return {
+        "ok": True,
+        "paragraphs": paragraphs,
+        "fallback_used": True,
+        "fallback_reason": last_error,
+    }
 
 
 def _map_sheet_row(
@@ -715,6 +867,7 @@ def _map_sheet_row(
     extracted_fields: dict[str, str],
     decision_payload: dict[str, Any],
     date_found_iso: str,
+    job_url_fallback: str | None = None,
     cover_letter_link: str | None,
     note_suffix: str | None = None,
 ) -> dict[str, str]:
@@ -723,6 +876,8 @@ def _map_sheet_row(
     location = _normalize_not_found(extracted_fields.get("location"))
     pay_range = _normalize_not_found(extracted_fields.get("pay_range"))
     job_url = _normalize_not_found(extracted_fields.get("job_link"))
+    if _is_not_found(job_url) and _coerce_text(job_url_fallback):
+        job_url = _coerce_text(job_url_fallback)
     decision = _coerce_text(decision_payload.get("decision")) or DECISION_SKIP
     fit_score = decision_payload.get("fit_score")
     rationale = _coerce_text(decision_payload.get("rationale_short"))
@@ -750,6 +905,13 @@ class SearchCandidate:
     job_key: str
     job_listing: dict[str, Any]
     search_profile_id: str
+    query_index: int
+    query_total: int
+    result_index: int
+    results_total: int
+    keyword: str
+    location: str
+    is_new: bool
 
 
 def _collect_new_candidates(
@@ -759,6 +921,7 @@ def _collect_new_candidates(
     search_profiles: list[dict[str, Any]],
     seen_limit: int,
     provider: str,
+    progress: ProgressReporter | None = None,
 ) -> tuple[list[SearchCandidate], dict[str, Any], list[str]]:
     errors: list[str] = []
     stats: dict[str, Any] = {
@@ -774,10 +937,39 @@ def _collect_new_candidates(
     stats["initial_seen_loaded"] = len(initial_seen)
     discovered: list[SearchCandidate] = []
 
-    for profile in search_profiles:
+    total_queries = len(search_profiles)
+    for query_idx, profile in enumerate(search_profiles, start=1):
         profile_id = _coerce_text(profile.get("profile_id")) or "search_profile"
         keyword = _coerce_text(profile.get("keyword"))
         location = _coerce_text(profile.get("location"))
+        if progress is not None:
+            search_frac = _search_fraction(
+                query_index=query_idx,
+                query_total=total_queries,
+                job_index=0,
+                job_total=0,
+                query_complete_no_jobs=False,
+            )
+            overall_pct = _overall_fraction(search_fraction=search_frac, processed_jobs=0, total_jobs=0) * 100.0
+            progress.emit(
+                {
+                    "stage": "search",
+                    "query_index": query_idx,
+                    "query_total": total_queries,
+                    "query_keyword": keyword,
+                    "query_location": location,
+                    "job_index": 0,
+                    "job_total": 0,
+                    "search_fraction": round(search_frac, 4),
+                    "processed_jobs": 0,
+                    "total_jobs_for_processing": 0,
+                    "total_percent": overall_pct,
+                    "status_line": (
+                        f"searching query {query_idx}/{total_queries} ({keyword}, {location}), "
+                        f"fetching listings..."
+                    ),
+                }
+            )
         if not keyword or not location:
             errors.append(f"search profile `{profile_id}` missing keyword/location")
             continue
@@ -799,41 +991,118 @@ def _collect_new_candidates(
         jobs = result.get("jobs") if isinstance(result.get("jobs"), list) else []
         query_stats["returned"] = len(jobs)
         stats["jobs_returned_total"] += len(jobs)
-        for job in jobs:
+        if progress is not None and not jobs:
+            search_frac = _search_fraction(
+                query_index=query_idx,
+                query_total=total_queries,
+                job_index=0,
+                job_total=0,
+                query_complete_no_jobs=True,
+            )
+            overall_pct = _overall_fraction(search_fraction=search_frac, processed_jobs=0, total_jobs=0) * 100.0
+            progress.emit(
+                {
+                    "stage": "search",
+                    "query_index": query_idx,
+                    "query_total": total_queries,
+                    "query_keyword": keyword,
+                    "query_location": location,
+                    "job_index": 0,
+                    "job_total": 0,
+                    "search_fraction": round(search_frac, 4),
+                    "processed_jobs": 0,
+                    "total_jobs_for_processing": 0,
+                    "total_percent": overall_pct,
+                    "status_line": (
+                        f"searching query {query_idx}/{total_queries} ({keyword}, {location}), no jobs returned"
+                    ),
+                }
+            )
+        if progress is not None and jobs:
+            search_frac = _search_fraction(
+                query_index=query_idx,
+                query_total=total_queries,
+                job_index=0,
+                job_total=len(jobs),
+                query_complete_no_jobs=False,
+            )
+            overall_pct = _overall_fraction(search_fraction=search_frac, processed_jobs=0, total_jobs=0) * 100.0
+            progress.emit(
+                {
+                    "stage": "search",
+                    "query_index": query_idx,
+                    "query_total": total_queries,
+                    "query_keyword": keyword,
+                    "query_location": location,
+                    "job_index": 0,
+                    "job_total": len(jobs),
+                    "search_fraction": round(search_frac, 4),
+                    "processed_jobs": 0,
+                    "total_jobs_for_processing": 0,
+                    "total_percent": overall_pct,
+                    "status_line": (
+                        f"searching query {query_idx}/{total_queries} ({keyword}, {location}), "
+                        f"received {len(jobs)} result(s)"
+                    ),
+                }
+            )
+
+        for job_idx, job in enumerate(jobs, start=1):
             if not isinstance(job, dict):
                 continue
             job_key = _extract_job_key(job)
             if not job_key:
                 continue
-            if job_key in in_run_seen:
+            is_new = job_key not in in_run_seen
+            if not is_new:
                 query_stats["filtered_seen"] += 1
                 stats["jobs_filtered_seen"] += 1
-                continue
-            in_run_seen.add(job_key)
-            discovered.append(SearchCandidate(job_key=job_key, job_listing=job, search_profile_id=profile_id))
-            query_stats["kept_new"] += 1
-            stats["jobs_new_total"] += 1
-            try:
-                _mark_job_seen(
-                    task_id=task_id,
-                    provider=provider,
+            else:
+                in_run_seen.add(job_key)
+                query_stats["kept_new"] += 1
+                stats["jobs_new_total"] += 1
+                try:
+                    _mark_job_seen(
+                        task_id=task_id,
+                        provider=provider,
+                        job_key=job_key,
+                        metadata={
+                            "search_profile_id": profile_id,
+                            "keyword": keyword,
+                            "location": location,
+                            "job_url": _extract_job_url(job),
+                            "job_title": _extract_job_title(job),
+                        },
+                        db_path=db_path,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive runtime guard
+                    errors.append(f"mark_seen failed for `{job_key}`: {exc}")
+            discovered.append(
+                SearchCandidate(
                     job_key=job_key,
-                    metadata={
-                        "search_profile_id": profile_id,
-                        "keyword": keyword,
-                        "location": location,
-                        "job_url": _extract_job_url(job),
-                        "job_title": _extract_job_title(job),
-                    },
-                    db_path=db_path,
+                    job_listing=job,
+                    search_profile_id=profile_id,
+                    query_index=query_idx,
+                    query_total=total_queries,
+                    result_index=job_idx,
+                    results_total=len(jobs),
+                    keyword=keyword,
+                    location=location,
+                    is_new=is_new,
                 )
-            except Exception as exc:  # pragma: no cover - defensive runtime guard
-                errors.append(f"mark_seen failed for `{job_key}`: {exc}")
+            )
         stats["per_query"].append(query_stats)
     return discovered, stats, errors
 
 
-def run_pipeline(*, task_id: str, payload: dict[str, Any], local_config: dict[str, Any], resources_dir: Path) -> dict[str, Any]:
+def run_pipeline(
+    *,
+    task_id: str,
+    payload: dict[str, Any],
+    local_config: dict[str, Any],
+    resources_dir: Path,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
     cfg = local_config if isinstance(local_config, dict) else {}
     search_profiles_raw = cfg.get("search_profiles")
     search_profiles = [item for item in search_profiles_raw if isinstance(item, dict)] if isinstance(search_profiles_raw, list) else []
@@ -856,12 +1125,28 @@ def run_pipeline(*, task_id: str, payload: dict[str, Any], local_config: dict[st
         file_mode = DEFAULT_FILE_MODE
 
     db_path = _db_path_from_config()
+    progress = ProgressReporter(task_id=task_id, db_path=db_path, callback=progress_callback)
+    progress.emit(
+        {
+            "stage": "starting",
+            "query_index": 0,
+            "query_total": len(search_profiles),
+            "job_index": 0,
+            "job_total": 0,
+            "search_fraction": 0.0,
+            "processed_jobs": 0,
+            "total_jobs_for_processing": 0,
+            "total_percent": 0.0,
+            "status_line": f"starting indeed_daily_search with {len(search_profiles)} query profile(s)...",
+        }
+    )
     discovered, search_stats, errors = _collect_new_candidates(
         task_id=task_id,
         db_path=db_path,
         search_profiles=search_profiles,
         seen_limit=seen_limit,
         provider=provider,
+        progress=progress,
     )
 
     candidate_context_bundle = _load_candidate_context_bundle(cfg)
@@ -880,7 +1165,7 @@ def run_pipeline(*, task_id: str, payload: dict[str, Any], local_config: dict[st
 
     counts = {
         "searched": int(search_stats.get("queries_total") or 0),
-        "new_jobs": len(discovered),
+        "new_jobs": int(search_stats.get("jobs_new_total") or 0),
         "seen_filtered": int(search_stats.get("jobs_filtered_seen") or 0),
         "recommended_apply": 0,
         "recommended_maybe": 0,
@@ -894,22 +1179,146 @@ def run_pipeline(*, task_id: str, payload: dict[str, Any], local_config: dict[st
     }
     job_results: list[dict[str, Any]] = []
     found_at_iso = _utc_now().date().isoformat()
+    total_jobs_to_process = len(discovered)
+    processed_jobs = 0
+    progress.emit(
+        {
+            "stage": "process",
+            "query_index": 0,
+            "query_total": int(search_stats.get("queries_total") or 0),
+            "job_index": 0,
+            "job_total": total_jobs_to_process,
+            "search_fraction": 0.0,
+            "processed_jobs": 0,
+            "total_jobs_for_processing": total_jobs_to_process,
+            "total_percent": 0.0,
+            "status_line": f"search phase complete, processing {total_jobs_to_process} result(s)...",
+        }
+    )
 
-    for candidate in discovered:
+    def _emit_job_result(
+        *,
+        candidate: DiscoveredCandidate,
+        query_fraction: float,
+        job_key: str,
+        decision: str,
+        outcome: str,
+        job_url: str | None = None,
+        error_reason: str | None = None,
+        cover_letter_local_path: str | None = None,
+    ) -> None:
+        status_line = (
+            f"query {candidate.query_index}/{candidate.query_total} "
+            f"({candidate.keyword}, {candidate.location}), "
+            f"result {candidate.result_index}/{candidate.results_total} ({job_key}) "
+            f"decision={decision} outcome={outcome}"
+        )
+        if job_url:
+            status_line += f" job_url={job_url}"
+        if error_reason:
+            status_line += f" error={error_reason}"
+        if cover_letter_local_path:
+            status_line += f" cover_letter_local_path={cover_letter_local_path}"
+        progress.emit(
+            {
+                "stage": "process_result",
+                "query_index": candidate.query_index,
+                "query_total": candidate.query_total,
+                "query_keyword": candidate.keyword,
+                "query_location": candidate.location,
+                "job_index": candidate.result_index,
+                "job_total": candidate.results_total,
+                "job_key": job_key,
+                "job_url": job_url,
+                "decision": decision,
+                "outcome": outcome,
+                "error_reason": error_reason,
+                "cover_letter_local_path": cover_letter_local_path,
+                "search_fraction": round(query_fraction, 4),
+                "processed_jobs": processed_jobs,
+                "total_jobs_for_processing": total_jobs_to_process,
+                "total_percent": query_fraction * 100.0,
+                "status_line": status_line,
+            }
+        )
+
+    for idx, candidate in enumerate(discovered, start=1):
         listing = candidate.job_listing
         job_key = candidate.job_key
         job_url = _extract_job_url(listing)
+        query_fraction = _search_fraction(
+            query_index=candidate.query_index,
+            query_total=candidate.query_total,
+            job_index=candidate.result_index,
+            job_total=candidate.results_total,
+            query_complete_no_jobs=False,
+        )
+        progress.emit(
+            {
+                "stage": "process",
+                "query_index": candidate.query_index,
+                "query_total": candidate.query_total,
+                "query_keyword": candidate.keyword,
+                "query_location": candidate.location,
+                "job_index": candidate.result_index,
+                "job_total": candidate.results_total,
+                "job_key": job_key,
+                "job_url": job_url,
+                "search_fraction": round(query_fraction, 4),
+                "processed_jobs": processed_jobs,
+                "total_jobs_for_processing": total_jobs_to_process,
+                "total_percent": query_fraction * 100.0,
+                "status_line": (
+                    f"query {candidate.query_index}/{candidate.query_total} "
+                    f"({candidate.keyword}, {candidate.location}), "
+                    f"result {candidate.result_index}/{candidate.results_total} ({job_key}) "
+                    f"job_url={job_url or NOT_FOUND_VALUE}"
+                ),
+            }
+        )
+        if not candidate.is_new:
+            job_results.append({"job_key": job_key, "decision": None, "status": "seen_skip"})
+            processed_jobs += 1
+            _emit_job_result(
+                candidate=candidate,
+                query_fraction=query_fraction,
+                job_key=job_key,
+                decision="SeenSkip",
+                outcome="already_seen",
+                job_url=job_url,
+            )
+            continue
         if not job_url:
             counts["skipped"] += 1
             counts["decision_errors"] += 1
             errors.append(f"missing job url for `{job_key}`")
+            processed_jobs += 1
+            _emit_job_result(
+                candidate=candidate,
+                query_fraction=query_fraction,
+                job_key=job_key,
+                decision=DECISION_SKIP,
+                outcome="missing_job_url",
+                error_reason="missing_job_url",
+            )
             continue
 
         detail = get_indeed_job_detail(url=job_url)
         if not detail.get("ok"):
             counts["skipped"] += 1
             counts["decision_errors"] += 1
-            errors.append(f"detail fetch failed for `{job_key}`: {detail.get('error')}")
+            detail_err = _coerce_text(detail.get("error")) or "detail_fetch_error"
+            errors.append(f"detail fetch failed for `{job_key}`: {detail_err}")
+            processed_jobs += 1
+            _emit_job_result(
+                candidate=candidate,
+                query_fraction=query_fraction,
+                job_key=job_key,
+                decision=DECISION_SKIP,
+                outcome="detail_fetch_error",
+                job_url=job_url,
+                error_reason=detail_err,
+            )
             continue
 
         candidate_context = _assemble_candidate_context_for_job(
@@ -929,6 +1338,8 @@ def run_pipeline(*, task_id: str, payload: dict[str, Any], local_config: dict[st
         if not sheet_extract.get("ok"):
             counts["extraction_errors"] += 1
             errors.append(f"field extraction failed for `{job_key}`: {sheet_extract.get('error')}")
+        if _is_not_found(extracted_fields.get("job_link")) and job_url:
+            extracted_fields["job_link"] = job_url
 
         decision_out = _evaluate_job(
             model_alias=decision_model_alias,
@@ -954,6 +1365,17 @@ def run_pipeline(*, task_id: str, payload: dict[str, Any], local_config: dict[st
             except Exception as exc:  # pragma: no cover
                 errors.append(f"job_discovery write failed for `{job_key}`: {exc}")
             job_results.append({"job_key": job_key, "decision": DECISION_SKIP, "status": "decision_error", "error": decision_error})
+            processed_jobs += 1
+            decision_err = _coerce_text(decision_out.get("error")) or "decision_failed"
+            _emit_job_result(
+                candidate=candidate,
+                query_fraction=query_fraction,
+                job_key=job_key,
+                decision=DECISION_SKIP,
+                outcome="decision_error",
+                job_url=job_url,
+                error_reason=decision_err,
+            )
             continue
 
         decision_payload = decision_out["decision_payload"]
@@ -978,8 +1400,20 @@ def run_pipeline(*, task_id: str, payload: dict[str, Any], local_config: dict[st
 
         if decision == DECISION_SKIP:
             job_results.append({"job_key": job_key, "decision": decision, "status": "skipped"})
+            processed_jobs += 1
+            _emit_job_result(
+                candidate=candidate,
+                query_fraction=query_fraction,
+                job_key=job_key,
+                decision=decision,
+                outcome="skipped",
+                job_url=job_url,
+            )
             continue
 
+        note_suffix_parts: list[str] = []
+        cover_link: str | None = None
+        cover_letter_local_path: str | None = None
         letter_out = _generate_cover_letter(
             model_alias=cover_letter_model_alias,
             job_listing=listing,
@@ -990,49 +1424,77 @@ def run_pipeline(*, task_id: str, payload: dict[str, Any], local_config: dict[st
         )
         if not letter_out.get("ok"):
             counts["cover_letter_errors"] += 1
-            errors.append(f"cover letter generation failed for `{job_key}`: {letter_out.get('error')}")
-            job_results.append({"job_key": job_key, "decision": decision, "status": "cover_letter_error"})
-            continue
-
-        company_name = _coerce_text(extracted_fields.get("company"))
-        if not company_name or company_name.lower() == NOT_FOUND_VALUE.lower():
-            company_name = "the company"
-        file_stem = _sanitize_file_stem(f"{job_key}_cover_letter")
-        if file_mode == "versioned":
-            file_stem = f"{file_stem}_{_utc_now().strftime('%Y%m%d_%H%M%S')}"
-        relative_output_path = _repo_relative_path(resources_dir) / "state" / "cover_letters" / f"{file_stem}.docx"
-        absolute_output_path = _repo_root() / relative_output_path
-        try:
-            _render_cover_letter_docx(
-                output_path=absolute_output_path,
-                company_name=company_name,
-                body_paragraphs=letter_out["paragraphs"],
-            )
-        except Exception as exc:
-            counts["cover_letter_errors"] += 1
-            errors.append(f"cover letter render failed for `{job_key}`: {exc}")
-            job_results.append({"job_key": job_key, "decision": decision, "status": "cover_letter_render_error"})
-            continue
-
-        upload_out = upload_file_to_google_drive(
-            local_path=str(relative_output_path),
-            destination_path=destination_path,
-            filename=absolute_output_path.name,
-        )
-        if not upload_out.get("ok"):
-            counts["upload_errors"] += 1
-            errors.append(f"cover letter upload failed for `{job_key}`: {upload_out.get('error')}")
-            job_results.append({"job_key": job_key, "decision": decision, "status": "cover_letter_upload_error"})
-            continue
-        cover_link = _coerce_text(upload_out.get("web_view_link"))
+            err = _coerce_text(letter_out.get("error")) or "unknown"
+            errors.append(f"cover letter generation failed for `{job_key}`: {err}")
+            note_suffix_parts.append(f"cover_letter_error={err}")
+        else:
+            if bool(letter_out.get("fallback_used")):
+                fallback_reason = _coerce_text(letter_out.get("fallback_reason")) or "fallback_used"
+                note_suffix_parts.append(f"cover_letter_fallback={fallback_reason}")
+            company_name = _coerce_text(extracted_fields.get("company"))
+            if not company_name or company_name.lower() == NOT_FOUND_VALUE.lower():
+                company_name = "the company"
+            file_stem = _sanitize_file_stem(f"{job_key}_cover_letter")
+            if file_mode == "versioned":
+                file_stem = f"{file_stem}_{_utc_now().strftime('%Y%m%d_%H%M%S')}"
+            relative_output_path = _repo_relative_path(resources_dir) / "state" / "cover_letters" / f"{file_stem}.docx"
+            absolute_output_path = _repo_root() / relative_output_path
+            try:
+                _render_cover_letter_docx(
+                    output_path=absolute_output_path,
+                    company_name=company_name,
+                    body_paragraphs=letter_out["paragraphs"],
+                )
+            except Exception as exc:
+                counts["cover_letter_errors"] += 1
+                errors.append(f"cover letter render failed for `{job_key}`: {exc}")
+                note_suffix_parts.append("cover_letter_error=render_failed")
+            else:
+                cover_letter_local_path = str(relative_output_path)
+                upload_out = upload_file_to_google_drive(
+                    local_path=str(relative_output_path),
+                    destination_path=destination_path,
+                    filename=absolute_output_path.name,
+                )
+                if not upload_out.get("ok"):
+                    counts["upload_errors"] += 1
+                    err = _coerce_text(upload_out.get("error")) or "unknown"
+                    errors.append(f"cover letter upload failed for `{job_key}`: {err}")
+                    note_suffix_parts.append(f"cover_letter_error=upload_failed:{err}")
+                else:
+                    cover_link = _coerce_text(upload_out.get("web_view_link"))
+                    if not cover_link:
+                        drive_file_id = _coerce_text(upload_out.get("drive_file_id"))
+                        if drive_file_id:
+                            cover_link = f"https://drive.google.com/file/d/{drive_file_id}/view"
+                        else:
+                            note_suffix_parts.append("cover_letter_error=upload_missing_link")
 
         row = _map_sheet_row(
             job_key=job_key,
             extracted_fields=extracted_fields,
             decision_payload=decision_payload,
             date_found_iso=found_at_iso,
+            job_url_fallback=job_url,
             cover_letter_link=cover_link,
+            note_suffix="; ".join(note_suffix_parts) if note_suffix_parts else None,
         )
+        if _is_not_found(row.get("Job Link")):
+            counts["upload_errors"] += 1
+            errors.append(f"sheet row missing job link for `{job_key}`; row skipped")
+            job_results.append({"job_key": job_key, "decision": decision, "status": "missing_job_link"})
+            processed_jobs += 1
+            _emit_job_result(
+                candidate=candidate,
+                query_fraction=query_fraction,
+                job_key=job_key,
+                decision=decision,
+                outcome="missing_job_link",
+                job_url=job_url,
+                error_reason="missing_job_link",
+                cover_letter_local_path=cover_letter_local_path,
+            )
+            continue
         append_out = _append_sheet_row_with_retry(
             row=row,
             attempts=sheet_retry_attempts,
@@ -1040,17 +1502,49 @@ def run_pipeline(*, task_id: str, payload: dict[str, Any], local_config: dict[st
         )
         if append_out.get("ok"):
             counts["sheet_rows_written"] += 1
-            job_results.append({"job_key": job_key, "decision": decision, "status": "uploaded", "cover_letter": cover_link})
+            status = "uploaded" if cover_link else "uploaded_without_cover_letter"
+            job_results.append({"job_key": job_key, "decision": decision, "status": status, "cover_letter": cover_link})
+            processed_jobs += 1
+            _emit_job_result(
+                candidate=candidate,
+                query_fraction=query_fraction,
+                job_key=job_key,
+                decision=decision,
+                outcome=status,
+                job_url=job_url,
+                cover_letter_local_path=cover_letter_local_path,
+            )
             continue
 
         err_text = _coerce_text(append_out.get("error"))
         if "Duplicate JobKey" in err_text:
             counts["sheet_rows_deduped"] += 1
             job_results.append({"job_key": job_key, "decision": decision, "status": "sheet_duplicate", "cover_letter": cover_link})
+            processed_jobs += 1
+            _emit_job_result(
+                candidate=candidate,
+                query_fraction=query_fraction,
+                job_key=job_key,
+                decision=decision,
+                outcome="sheet_duplicate",
+                job_url=job_url,
+                cover_letter_local_path=cover_letter_local_path,
+            )
             continue
         counts["upload_errors"] += 1
         errors.append(f"sheet upload failed for `{job_key}`: {err_text or append_out.get('source')}")
         job_results.append({"job_key": job_key, "decision": decision, "status": "sheet_upload_error"})
+        processed_jobs += 1
+        _emit_job_result(
+            candidate=candidate,
+            query_fraction=query_fraction,
+            job_key=job_key,
+            decision=decision,
+            outcome="sheet_upload_error",
+            job_url=job_url,
+            error_reason=err_text or "sheet_upload_error",
+            cover_letter_local_path=cover_letter_local_path,
+        )
 
     trigger = _coerce_text(payload.get("trigger")) or "scheduled"
     summary = (
@@ -1084,6 +1578,21 @@ def run_pipeline(*, task_id: str, payload: dict[str, Any], local_config: dict[st
         )
     except Exception as exc:  # pragma: no cover
         errors.append(f"failed to persist last_run_snapshot: {exc}")
+
+    progress.emit(
+        {
+            "stage": "done",
+            "query_index": int(search_stats.get("queries_total") or 0),
+            "query_total": int(search_stats.get("queries_total") or 0),
+            "job_index": max(0, total_jobs_to_process),
+            "job_total": max(0, total_jobs_to_process),
+            "search_fraction": 1.0,
+            "processed_jobs": processed_jobs,
+            "total_jobs_for_processing": total_jobs_to_process,
+            "total_percent": 100.0,
+            "status_line": summary,
+        }
+    )
 
     return {
         "ok": True,

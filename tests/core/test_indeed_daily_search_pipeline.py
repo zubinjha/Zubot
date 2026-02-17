@@ -62,6 +62,19 @@ def test_load_recent_seen_job_keys_empty(tmp_path: Path):
     assert out == []
 
 
+def test_search_fraction_formula_matches_expected():
+    # Example requested behavior:
+    # 0/5 + (1/5)*(x/15)
+    f = pipeline._search_fraction(query_index=1, query_total=5, job_index=3, job_total=15)
+    expected = 0.0 + (1.0 / 5.0) * (3.0 / 15.0)
+    assert abs(f - expected) < 1e-9
+
+
+def test_overall_fraction_starts_at_zero_when_total_jobs_unknown():
+    out = pipeline._overall_fraction(search_fraction=0.0, processed_jobs=0, total_jobs=0)
+    assert out == 0.0
+
+
 def test_load_recent_seen_job_keys_applies_limit(tmp_path: Path):
     db_path = tmp_path / "core.db"
     _init_task_db(db_path)
@@ -203,7 +216,8 @@ def test_collect_new_candidates_dedupes_seen_and_cross_query(tmp_path: Path, mon
         provider="indeed",
     )
     assert errors == []
-    assert [item.job_key for item in candidates] == ["new_1", "new_2", "new_3"]
+    assert [item.job_key for item in candidates] == ["seen_1", "new_1", "new_2", "new_2", "new_3"]
+    assert [item.is_new for item in candidates] == [False, True, True, False, True]
     assert stats["jobs_filtered_seen"] == 2
     assert stats["jobs_new_total"] == 3
 
@@ -332,6 +346,7 @@ def test_run_pipeline_happy_path(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(pipeline, "_render_cover_letter_docx", lambda **kwargs: None)
     monkeypatch.setattr(pipeline, "upload_file_to_google_drive", lambda **kwargs: {"ok": True, "web_view_link": "https://drive.google.com/file/d/1"})
     monkeypatch.setattr(pipeline, "append_job_app_row", lambda **kwargs: {"ok": True, "updated_rows": 1})
+    progress_events: list[dict[str, object]] = []
 
     out = pipeline.run_pipeline(
         task_id="indeed_daily_search",
@@ -340,11 +355,66 @@ def test_run_pipeline_happy_path(tmp_path: Path, monkeypatch):
             "search_profiles": [{"profile_id": "p1", "keyword": "Software Engineer", "location": "Columbus, OH"}],
         },
         resources_dir=resources_dir,
+        progress_callback=lambda item: progress_events.append(item),
     )
     assert out["ok"] is True
     assert out["counts"]["new_jobs"] == 1
     assert out["counts"]["sheet_rows_written"] == 1
     assert out["counts"]["recommended_apply"] == 1
+    result_events = [event for event in progress_events if event.get("stage") == "process_result"]
+    assert result_events
+    status_line = str(result_events[-1].get("status_line") or "")
+    assert "decision=Recommend Apply" in status_line
+    assert "job_url=https://www.indeed.com/viewjob?jk=jk1" in status_line
+    assert "cover_letter_local_path=" in status_line
+
+
+def test_run_pipeline_decision_error_progress_includes_reason_and_url(tmp_path: Path, monkeypatch):
+    db_path = tmp_path / "core.db"
+    _init_task_db(db_path)
+    resources_dir = tmp_path / "indeed_daily_search"
+    (resources_dir / "assets").mkdir(parents=True)
+    (resources_dir / "assets" / "decision_rubric.md").write_text("rubric", encoding="utf-8")
+    (resources_dir / "assets" / "cover_letter_style_spec.md").write_text("style", encoding="utf-8")
+
+    progress_events: list[dict[str, object]] = []
+
+    monkeypatch.setattr(pipeline, "_db_path_from_config", lambda: db_path)
+    monkeypatch.setattr(pipeline, "_load_candidate_context_bundle", lambda cfg: _context_bundle())
+    monkeypatch.setattr(pipeline, "_assemble_candidate_context_for_job", lambda **kwargs: {"user": "context"})
+    monkeypatch.setattr(
+        pipeline,
+        "_extract_sheet_fields_via_llm",
+        lambda **kwargs: {"ok": True, "fields": pipeline._default_sheet_fields()},
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "get_indeed_jobs",
+        lambda **kwargs: {"ok": True, "jobs": [{"jobKey": "jk1", "url": "https://www.indeed.com/viewjob?jk=jk1", "title": "SE", "companyName": "Acme", "location": "Remote"}]},
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "get_indeed_job_detail",
+        lambda **kwargs: {"ok": True, "job": {"description": "desc", "title": "SE", "companyName": "Acme"}},
+    )
+    monkeypatch.setattr(pipeline, "_evaluate_job", lambda **kwargs: {"ok": False, "error": "invalid_json"})
+
+    out = pipeline.run_pipeline(
+        task_id="indeed_daily_search",
+        payload={"trigger": "manual"},
+        local_config={"search_profiles": [{"profile_id": "p1", "keyword": "Software Engineer", "location": "Columbus, OH"}]},
+        resources_dir=resources_dir,
+        progress_callback=lambda item: progress_events.append(item),
+    )
+    assert out["ok"] is True
+    assert out["counts"]["decision_errors"] == 1
+    result_events = [event for event in progress_events if event.get("stage") == "process_result"]
+    assert result_events
+    status_line = str(result_events[-1].get("status_line") or "")
+    assert "decision=Skip" in status_line
+    assert "outcome=decision_error" in status_line
+    assert "job_url=https://www.indeed.com/viewjob?jk=jk1" in status_line
+    assert "error=invalid_json" in status_line
 
 
 def test_run_pipeline_partial_failure_upload_error(tmp_path: Path, monkeypatch):
@@ -412,7 +482,7 @@ def test_run_pipeline_partial_failure_upload_error(tmp_path: Path, monkeypatch):
     )
     assert out["ok"] is True
     assert out["counts"]["upload_errors"] == 1
-    assert out["counts"]["sheet_rows_written"] == 0
+    assert out["counts"]["sheet_rows_written"] == 1
 
 
 def test_run_pipeline_sheet_duplicate_counts_as_deduped(tmp_path: Path, monkeypatch):
@@ -553,3 +623,34 @@ def test_run_pipeline_uses_not_found_defaults_when_extraction_fails(tmp_path: Pa
     assert captured_rows
     assert captured_rows[0]["Company"] == "Not Found"
     assert captured_rows[0]["Pay Range"] == "Not Found"
+    assert captured_rows[0]["Job Link"] == "https://www.indeed.com/viewjob?jk=jk1"
+
+
+def test_llm_json_response_extracts_embedded_json(monkeypatch):
+    monkeypatch.setattr(
+        pipeline,
+        "call_llm",
+        lambda **kwargs: {"ok": True, "text": "Sure, here you go:\n```json\n{\"decision\":\"Skip\",\"fit_score\":6}\n```"},
+    )
+    out = pipeline._llm_json_response(
+        model_alias="medium",
+        system_prompt="system",
+        user_prompt="user",
+    )
+    assert out["ok"] is True
+    assert out["payload"]["decision"] == "Skip"
+
+
+def test_generate_cover_letter_fallback_when_llm_invalid(monkeypatch):
+    monkeypatch.setattr(pipeline, "_llm_json_response", lambda **kwargs: {"ok": False, "error": "invalid_json"})
+    out = pipeline._generate_cover_letter(
+        model_alias="high",
+        job_listing={"title": "Software Engineer", "companyName": "Acme"},
+        job_detail={"job": {"description": "desc"}},
+        candidate_context={"profile": "context"},
+        style_spec_text="style",
+        invalid_retry_limit=0,
+    )
+    assert out["ok"] is True
+    assert out.get("fallback_used") is True
+    assert len(out.get("paragraphs") or []) >= 3

@@ -152,13 +152,14 @@ class TaskAgentRunner:
         env["ZUBOT_TASK_RESOURCES_DIR"] = str(resources_dir)
         env["ZUBOT_TASK_LOCAL_CONFIG_JSON"] = json.dumps(task_local_config)
         env["ZUBOT_TASK_PROFILE_JSON"] = json.dumps(task_def)
+        stream_output = str(env.get("ZUBOT_TASK_STREAM_STDOUT", "")).strip().lower() in {"1", "true", "yes", "on"}
 
         try:
             process = subprocess.Popen(
                 [sys.executable, str(entrypoint), *arg_list],
                 cwd=str(_repo_root()),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=None if stream_output else subprocess.PIPE,
+                stderr=None if stream_output else subprocess.PIPE,
                 text=True,
                 env=env,
             )
@@ -203,6 +204,10 @@ class TaskAgentRunner:
             sleep(0.15)
 
         stdout, stderr = process.communicate()
+        if not isinstance(stdout, str):
+            stdout = ""
+        if not isinstance(stderr, str):
+            stderr = ""
         completed = subprocess.CompletedProcess(
             args=[sys.executable, str(entrypoint), *arg_list],
             returncode=int(process.returncode or 0),

@@ -119,6 +119,20 @@ source .venv/bin/activate
 python -m src.zubot.daemon.main
 ```
 
+## Terminal Task Debug
+- List available task profiles/folders:
+  - `python -m src.zubot.daemon.task_cli list`
+- Run a task directly by `task_id`:
+  - `python -m src.zubot.daemon.task_cli run indeed_daily_search`
+- Terminal run behavior:
+  - enables live `tqdm` progress bar when available
+  - task also writes continuous progress snapshots to `task_state_kv` (`state_key=live_progress`)
+  - auto-registers local fallback task profiles into DB when missing (useful right after DB resets)
+- Run with explicit payload:
+  - `python -m src.zubot.daemon.task_cli run indeed_daily_search --payload-json '{"trigger":"manual"}'`
+- Ad-hoc run without DB registration (uses local task file path):
+  - `python -m src.zubot.daemon.task_cli run my_task --entrypoint src/zubot/predefined_tasks/my_task/task.py`
+
 ## Usage
 Choose one of these startup modes based on what you want to run.
 
