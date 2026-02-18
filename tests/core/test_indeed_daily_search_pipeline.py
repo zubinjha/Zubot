@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 import sqlite3
 from pathlib import Path
+import zipfile
 
 from src.zubot.predefined_tasks.indeed_daily_search import pipeline
 
@@ -290,6 +291,8 @@ def test_map_sheet_row_contract():
     assert row["Status"] == "Recommend Apply"
     assert row["Source"] == "Indeed"
     assert row["Cover Letter"] == "https://drive.google.com/file/d/1"
+    assert row["Notes"] == ""
+    assert "fit_score=8" in row["AI Notes"]
 
 
 def test_run_pipeline_happy_path(tmp_path: Path, monkeypatch):
@@ -485,6 +488,149 @@ def test_run_pipeline_partial_failure_upload_error(tmp_path: Path, monkeypatch):
     assert out["counts"]["sheet_rows_written"] == 1
 
 
+def test_run_pipeline_upload_missing_web_link_uses_drive_id_fallback(tmp_path: Path, monkeypatch):
+    db_path = tmp_path / "core.db"
+    _init_task_db(db_path)
+    resources_dir = tmp_path / "indeed_daily_search"
+    (resources_dir / "assets").mkdir(parents=True)
+    (resources_dir / "assets" / "decision_rubric.md").write_text("rubric", encoding="utf-8")
+    (resources_dir / "assets" / "cover_letter_style_spec.md").write_text("style", encoding="utf-8")
+
+    captured_rows: list[dict[str, str]] = []
+    monkeypatch.setattr(pipeline, "_db_path_from_config", lambda: db_path)
+    monkeypatch.setattr(pipeline, "_load_candidate_context_bundle", lambda cfg: _context_bundle())
+    monkeypatch.setattr(pipeline, "_assemble_candidate_context_for_job", lambda **kwargs: {"user": "context"})
+    monkeypatch.setattr(
+        pipeline,
+        "_extract_sheet_fields_via_llm",
+        lambda **kwargs: {
+            "ok": True,
+            "fields": {
+                "company": "Acme",
+                "job_title": "SE",
+                "location": "Remote",
+                "pay_range": "Not Found",
+                "job_link": "https://www.indeed.com/viewjob?jk=jk1",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "get_indeed_jobs",
+        lambda **kwargs: {"ok": True, "jobs": [{"jobKey": "jk1", "url": "https://www.indeed.com/viewjob?jk=jk1", "title": "SE", "companyName": "Acme", "location": "Remote"}]},
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "get_indeed_job_detail",
+        lambda **kwargs: {"ok": True, "job": {"description": "desc", "title": "SE", "companyName": "Acme"}},
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_evaluate_job",
+        lambda **kwargs: {
+            "ok": True,
+            "decision_payload": {
+                "decision": "Recommend Apply",
+                "fit_score": 8,
+                "rationale_short": "good",
+                "reasons": ["r1"],
+                "risks": ["r2"],
+                "missing_requirements": ["r3"],
+            },
+        },
+    )
+    monkeypatch.setattr(pipeline, "_generate_cover_letter", lambda **kwargs: {"ok": True, "paragraphs": ["p1 " * 60, "p2 " * 60, "p3 " * 60, "p4 " * 60]})
+    monkeypatch.setattr(pipeline, "_render_cover_letter_docx", lambda **kwargs: None)
+    monkeypatch.setattr(pipeline, "upload_file_to_google_drive", lambda **kwargs: {"ok": True, "drive_file_id": "drv_123", "web_view_link": ""})
+    monkeypatch.setattr(
+        pipeline,
+        "append_job_app_row",
+        lambda **kwargs: captured_rows.append(kwargs["row"]) or {"ok": True, "updated_rows": 1},
+    )
+
+    out = pipeline.run_pipeline(
+        task_id="indeed_daily_search",
+        payload={"trigger": "manual"},
+        local_config={"search_profiles": [{"profile_id": "p1", "keyword": "Software Engineer", "location": "Columbus, OH"}]},
+        resources_dir=resources_dir,
+    )
+    assert out["ok"] is True
+    assert captured_rows
+    assert captured_rows[0]["Cover Letter"] == "https://drive.google.com/file/d/drv_123/view"
+
+
+def test_run_pipeline_upload_failure_marks_cover_letter_error_note(tmp_path: Path, monkeypatch):
+    db_path = tmp_path / "core.db"
+    _init_task_db(db_path)
+    resources_dir = tmp_path / "indeed_daily_search"
+    (resources_dir / "assets").mkdir(parents=True)
+    (resources_dir / "assets" / "decision_rubric.md").write_text("rubric", encoding="utf-8")
+    (resources_dir / "assets" / "cover_letter_style_spec.md").write_text("style", encoding="utf-8")
+
+    captured_rows: list[dict[str, str]] = []
+    monkeypatch.setattr(pipeline, "_db_path_from_config", lambda: db_path)
+    monkeypatch.setattr(pipeline, "_load_candidate_context_bundle", lambda cfg: _context_bundle())
+    monkeypatch.setattr(pipeline, "_assemble_candidate_context_for_job", lambda **kwargs: {"user": "context"})
+    monkeypatch.setattr(
+        pipeline,
+        "_extract_sheet_fields_via_llm",
+        lambda **kwargs: {
+            "ok": True,
+            "fields": {
+                "company": "Acme",
+                "job_title": "SE",
+                "location": "Remote",
+                "pay_range": "Not Found",
+                "job_link": "https://www.indeed.com/viewjob?jk=jk1",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "get_indeed_jobs",
+        lambda **kwargs: {"ok": True, "jobs": [{"jobKey": "jk1", "url": "https://www.indeed.com/viewjob?jk=jk1", "title": "SE", "companyName": "Acme", "location": "Remote"}]},
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "get_indeed_job_detail",
+        lambda **kwargs: {"ok": True, "job": {"description": "desc", "title": "SE", "companyName": "Acme"}},
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_evaluate_job",
+        lambda **kwargs: {
+            "ok": True,
+            "decision_payload": {
+                "decision": "Recommend Apply",
+                "fit_score": 8,
+                "rationale_short": "good",
+                "reasons": ["r1"],
+                "risks": ["r2"],
+                "missing_requirements": ["r3"],
+            },
+        },
+    )
+    monkeypatch.setattr(pipeline, "_generate_cover_letter", lambda **kwargs: {"ok": True, "paragraphs": ["p1 " * 60, "p2 " * 60, "p3 " * 60, "p4 " * 60]})
+    monkeypatch.setattr(pipeline, "_render_cover_letter_docx", lambda **kwargs: None)
+    monkeypatch.setattr(pipeline, "upload_file_to_google_drive", lambda **kwargs: {"ok": False, "error": "upload fail"})
+    monkeypatch.setattr(
+        pipeline,
+        "append_job_app_row",
+        lambda **kwargs: captured_rows.append(kwargs["row"]) or {"ok": True, "updated_rows": 1},
+    )
+
+    out = pipeline.run_pipeline(
+        task_id="indeed_daily_search",
+        payload={"trigger": "manual"},
+        local_config={"search_profiles": [{"profile_id": "p1", "keyword": "Software Engineer", "location": "Columbus, OH"}]},
+        resources_dir=resources_dir,
+    )
+    assert out["ok"] is True
+    assert captured_rows
+    assert captured_rows[0]["Notes"] == ""
+    assert "cover_letter_error=upload_failed:" in captured_rows[0]["AI Notes"]
+
+
 def test_run_pipeline_sheet_duplicate_counts_as_deduped(tmp_path: Path, monkeypatch):
     db_path = tmp_path / "core.db"
     _init_task_db(db_path)
@@ -558,10 +704,18 @@ def test_render_cover_letter_docx_writes_file(tmp_path: Path):
     pipeline._render_cover_letter_docx(
         output_path=out,
         company_name="Stripe",
-        body_paragraphs=["Paragraph one.", "Paragraph two.", "Paragraph three."],
+        body_paragraphs=["Paragraph one.", "Paragraph two.", "Paragraph three.", "Paragraph four."],
+        contact_email="zubinkjha2025@gmail.com",
+        linkedin_url="https://www.linkedin.com/in/zubin-jha-30752a355",
+        linkedin_label="LinkedIn",
     )
     assert out.exists()
     assert out.stat().st_size > 0
+    with zipfile.ZipFile(out, "r") as zf:
+        xml = zf.read("word/document.xml").decode("utf-8")
+        assert "LinkedIn" in xml
+        assert "zubinkjha2025@gmail.com" in xml
+        assert "zubinjha.com" not in xml
 
 
 def test_run_pipeline_uses_not_found_defaults_when_extraction_fails(tmp_path: Path, monkeypatch):
@@ -621,7 +775,9 @@ def test_run_pipeline_uses_not_found_defaults_when_extraction_fails(tmp_path: Pa
     assert out["ok"] is True
     assert out["counts"]["extraction_errors"] == 1
     assert captured_rows
-    assert captured_rows[0]["Company"] == "Not Found"
+    assert captured_rows[0]["Company"] == "Acme"
+    assert captured_rows[0]["Job Title"] == "SE"
+    assert captured_rows[0]["Location"] == "Remote"
     assert captured_rows[0]["Pay Range"] == "Not Found"
     assert captured_rows[0]["Job Link"] == "https://www.indeed.com/viewjob?jk=jk1"
 
@@ -653,4 +809,121 @@ def test_generate_cover_letter_fallback_when_llm_invalid(monkeypatch):
     )
     assert out["ok"] is True
     assert out.get("fallback_used") is True
-    assert len(out.get("paragraphs") or []) >= 3
+    paragraphs = out.get("paragraphs") or []
+    assert len(paragraphs) >= 4
+    assert sum(pipeline._word_count(item) for item in paragraphs) >= 220
+    assert all("-" not in item for item in paragraphs)
+    assert "Software Engineer" in paragraphs[0]
+
+
+def test_generate_cover_letter_short_payload_triggers_fallback(monkeypatch):
+    monkeypatch.setattr(
+        pipeline,
+        "_llm_json_response",
+        lambda **kwargs: {"ok": True, "payload": {"paragraphs": ["too short", "short", "still short", "short"]}},
+    )
+    out = pipeline._generate_cover_letter(
+        model_alias="high",
+        job_listing={"title": "Software Engineer", "companyName": "Acme"},
+        job_detail={"job": {"description": "desc"}},
+        candidate_context={"profile": "context"},
+        style_spec_text="style",
+        invalid_retry_limit=0,
+    )
+    assert out["ok"] is True
+    assert out.get("fallback_used") is True
+    assert sum(pipeline._word_count(item) for item in (out.get("paragraphs") or [])) >= 220
+
+
+def test_normalize_role_title_for_cover_letter():
+    assert pipeline._normalize_role_title_for_cover_letter("APPLICATION DEVELOPER - INFORMATION TECHNOLOGY") == "Application Developer"
+    assert pipeline._normalize_role_title_for_cover_letter("IS Systems Programmer II - Web & Mobile Dev") == "IS Systems Programmer II"
+
+
+def test_generate_cover_letter_rewrites_raw_role_title_mentions(monkeypatch):
+    monkeypatch.setattr(
+        pipeline,
+        "_llm_json_response",
+        lambda **kwargs: {
+            "ok": True,
+            "payload": {
+                "paragraphs": [
+                    "I am excited to apply for APPLICATION DEVELOPER - INFORMATION TECHNOLOGY at Acme Company and contribute immediately with backend ownership, data focused execution, and practical product thinking. I have built full systems with APIs, data stores, and user facing workflows, and I am motivated by solving concrete problems that matter to users and teams.",
+                    "My strongest work combines backend engineering, analytics, and clear implementation plans that move quickly from design to production. I regularly build and ship complete features, write maintainable code, and iterate based on feedback. This approach helps me contribute fast while still protecting quality, reliability, and long term maintainability across the systems I own.",
+                    "I am drawn to this opportunity because it aligns with my builder mindset and my interest in software roles where measurable outcomes matter. I enjoy collaborating with technical and non technical partners, clarifying requirements, and translating goals into dependable software. I can bring a disciplined work style, strong curiosity, and consistent follow through from day one.",
+                    "Thank you for considering my application. I would value the chance to discuss how my project experience and engineering approach can support your team goals. I am ready to contribute with focused execution, thoughtful communication, and a steady commitment to building systems that are both useful and reliable in real world use.",
+                ]
+            },
+        },
+    )
+    out = pipeline._generate_cover_letter(
+        model_alias="high",
+        job_listing={"title": "APPLICATION DEVELOPER - INFORMATION TECHNOLOGY", "companyName": "Acme"},
+        job_detail={"job": {"description": "desc"}},
+        candidate_context={"profile": "context"},
+        style_spec_text="style",
+        invalid_retry_limit=0,
+    )
+    assert out["ok"] is True
+    paragraphs = out.get("paragraphs") or []
+    assert paragraphs
+    assert "Application Developer" in paragraphs[0]
+    assert "APPLICATION DEVELOPER - INFORMATION TECHNOLOGY" not in paragraphs[0]
+
+
+def test_compact_file_segment_shortens_wordy_text():
+    out = pipeline._compact_file_segment(
+        "NATIONWIDE CHILDREN'S HOSPITAL INFORMATION TECHNOLOGY",
+        fallback="Company",
+        max_words=3,
+        max_chars=24,
+    )
+    assert len(out) <= 24
+    assert out
+
+
+def test_next_available_local_docx_path_uses_numeric_suffix(tmp_path: Path):
+    output_dir = tmp_path / "letters"
+    output_dir.mkdir(parents=True)
+    (output_dir / "2026-02-18 - Acme - Software Engineer.docx").write_text("x", encoding="utf-8")
+    (output_dir / "2026-02-18 - Acme - Software Engineer - 1.docx").write_text("x", encoding="utf-8")
+
+    out = pipeline._next_available_local_docx_path(
+        output_dir=output_dir,
+        base_name="2026-02-18 - Acme - Software Engineer",
+        file_mode="versioned",
+    )
+    assert out.name == "2026-02-18 - Acme - Software Engineer - 2.docx"
+
+
+def test_run_pipeline_skips_row_when_job_url_missing(tmp_path: Path, monkeypatch):
+    db_path = tmp_path / "core.db"
+    _init_task_db(db_path)
+    resources_dir = tmp_path / "indeed_daily_search"
+    (resources_dir / "assets").mkdir(parents=True)
+    (resources_dir / "assets" / "decision_rubric.md").write_text("rubric", encoding="utf-8")
+    (resources_dir / "assets" / "cover_letter_style_spec.md").write_text("style", encoding="utf-8")
+
+    captured_rows: list[dict[str, str]] = []
+    monkeypatch.setattr(pipeline, "_db_path_from_config", lambda: db_path)
+    monkeypatch.setattr(
+        pipeline,
+        "get_indeed_jobs",
+        lambda **kwargs: {"ok": True, "jobs": [{"jobKey": "jk1", "title": "SE", "companyName": "Acme", "location": "Remote"}]},
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "append_job_app_row",
+        lambda **kwargs: captured_rows.append(kwargs["row"]) or {"ok": True, "updated_rows": 1},
+    )
+
+    out = pipeline.run_pipeline(
+        task_id="indeed_daily_search",
+        payload={"trigger": "manual"},
+        local_config={"search_profiles": [{"profile_id": "p1", "keyword": "Software Engineer", "location": "Columbus, OH"}]},
+        resources_dir=resources_dir,
+    )
+    assert out["ok"] is True
+    assert out["counts"]["sheet_rows_written"] == 0
+    assert out["counts"]["decision_errors"] == 1
+    assert captured_rows == []

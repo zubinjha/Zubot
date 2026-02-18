@@ -33,6 +33,11 @@ DEFAULT_DECISION_MODEL = "medium"
 DEFAULT_COVER_LETTER_MODEL = "high"
 DEFAULT_COVER_LETTER_DESTINATION_PATH = "Job Applications/Cover Letters"
 DEFAULT_FILE_MODE = "versioned"
+DEFAULT_COVER_LETTER_CONTACT_EMAIL = "zubinkjha2025@gmail.com"
+DEFAULT_COVER_LETTER_LINKEDIN_URL = "https://www.linkedin.com/in/zubin-jha-30752a355"
+DEFAULT_COVER_LETTER_LINKEDIN_LABEL = "LinkedIn"
+DEFAULT_COVER_LETTER_UPLOAD_RETRY_ATTEMPTS = 3
+DEFAULT_COVER_LETTER_UPLOAD_RETRY_BACKOFF_SEC = 1.0
 DEFAULT_SHEET_RETRY_ATTEMPTS = 2
 DEFAULT_SHEET_RETRY_BACKOFF_SEC = 1.0
 DEFAULT_PROJECT_CONTEXT_TOP_N = 3
@@ -53,6 +58,7 @@ DEFAULT_CANDIDATE_CONTEXT_FILES = [
 
 _KEY_CHARS_PATTERN = re.compile(r"[^a-zA-Z0-9._-]+")
 _TOKEN_PATTERN = re.compile(r"[a-z0-9]{3,}")
+_WORD_PATTERN = re.compile(r"[A-Za-z0-9']+")
 
 
 def _repo_root() -> Path:
@@ -142,6 +148,44 @@ def _sanitize_file_stem(value: str) -> str:
     return clean.strip("._")[:96] or "cover_letter"
 
 
+def _compact_file_segment(value: str, *, fallback: str, max_words: int = 4, max_chars: int = 28) -> str:
+    text = _coerce_text(value)
+    if not text or _is_not_found(text):
+        text = fallback
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.split(r"\s(?:-|:|\|)\s", text, maxsplit=1)[0].strip() or text
+    text = re.sub(r"[^A-Za-z0-9 ]+", " ", text)
+    words = [w for w in text.split(" ") if w]
+    if not words:
+        words = [fallback]
+    clipped = words[: max(1, max_words)]
+    normalized = " ".join(clipped)
+    if len(normalized) > max_chars:
+        normalized = normalized[:max_chars].strip()
+    if not normalized:
+        normalized = fallback
+    return normalized
+
+
+def _next_available_local_docx_path(*, output_dir: Path, base_name: str, file_mode: str) -> Path:
+    safe_base = _coerce_text(base_name) or "cover_letter"
+    safe_base = safe_base.replace("/", " ").replace("\\", " ").strip()
+    safe_base = re.sub(r"\s{2,}", " ", safe_base)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    candidate = output_dir / f"{safe_base}.docx"
+    if file_mode == "overwrite":
+        return candidate
+    if not candidate.exists():
+        return candidate
+    idx = 1
+    while True:
+        named = output_dir / f"{safe_base} - {idx}.docx"
+        if not named.exists():
+            return named
+        idx += 1
+
+
 def _repo_relative_path(path: Path) -> Path:
     try:
         return path.resolve().relative_to(_repo_root())
@@ -170,6 +214,57 @@ def _normalize_not_found(value: Any) -> str:
 
 def _is_not_found(value: Any) -> bool:
     return _normalize_not_found(value).strip().lower() == NOT_FOUND_VALUE.lower()
+
+
+def _word_count(text: str) -> int:
+    if not isinstance(text, str):
+        return 0
+    return len(_WORD_PATTERN.findall(text))
+
+
+def _sanitize_cover_letter_text(text: str) -> str:
+    cleaned = _coerce_text(text)
+    if not cleaned:
+        return ""
+    cleaned = cleaned.replace("\u2014", ", ")
+    cleaned = cleaned.replace("\u2013", ", ")
+    # Remove hyphen punctuation in body text to honor no-dash style.
+    cleaned = re.sub(r"(?<=\w)-(?=\w)", " ", cleaned)
+    cleaned = re.sub(r"\s-\s", ", ", cleaned)
+    cleaned = cleaned.replace("-", " ")
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    return cleaned
+
+
+def _normalize_role_title_for_cover_letter(raw_title: str) -> str:
+    text = _coerce_text(raw_title)
+    if not text:
+        return "the role"
+    cleaned = re.sub(r"\s+", " ", text).strip(" -|,:")
+    # Drop trailing qualifiers like " - Information Technology".
+    cleaned = re.split(r"\s(?:-|:|\|)\s", cleaned, maxsplit=1)[0].strip() or cleaned
+    # Drop trailing parenthetical qualifiers.
+    cleaned = re.sub(r"\s*\([^)]*\)\s*$", "", cleaned).strip() or cleaned
+
+    alpha_chars = [ch for ch in cleaned if ch.isalpha()]
+    uppercase_chars = [ch for ch in alpha_chars if ch.isupper()]
+    if alpha_chars and (len(uppercase_chars) / len(alpha_chars)) >= 0.65:
+        cleaned = cleaned.title()
+
+    for token in ("Ii", "Iii", "Iv", "Vi", "Vii", "Viii", "Ix"):
+        cleaned = re.sub(rf"\b{token}\b", token.upper(), cleaned)
+    return cleaned or "the role"
+
+
+def _rewrite_role_title_mentions(text: str, *, raw_title: str, normalized_title: str) -> str:
+    body = _coerce_text(text)
+    raw = _coerce_text(raw_title)
+    target = _coerce_text(normalized_title)
+    if not body or not raw or not target:
+        return body
+    if raw.lower() == target.lower():
+        return body
+    return re.sub(re.escape(raw), target, body, flags=re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -490,14 +585,58 @@ def _render_cover_letter_docx(
     output_path: Path,
     company_name: str,
     body_paragraphs: list[str],
+    contact_email: str,
+    linkedin_url: str,
+    linkedin_label: str = "LinkedIn",
     date_line: str | None = None,
 ) -> None:
     from docx import Document  # type: ignore
+    from docx.opc.constants import RELATIONSHIP_TYPE as RT
     from docx.enum.text import WD_PARAGRAPH_ALIGNMENT, WD_TAB_ALIGNMENT
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
     from docx.shared import Inches, Pt
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc = Document()
+
+    def _append_hyperlink(*, paragraph: Any, url: str, text: str) -> None:
+        if not _coerce_text(url) or not _coerce_text(text):
+            return
+        rel_id = paragraph.part.relate_to(url, RT.HYPERLINK, is_external=True)
+        hyperlink = OxmlElement("w:hyperlink")
+        hyperlink.set(qn("r:id"), rel_id)
+
+        run = OxmlElement("w:r")
+        run_props = OxmlElement("w:rPr")
+
+        run_fonts = OxmlElement("w:rFonts")
+        run_fonts.set(qn("w:ascii"), "Times New Roman")
+        run_fonts.set(qn("w:hAnsi"), "Times New Roman")
+        run_props.append(run_fonts)
+
+        color = OxmlElement("w:color")
+        color.set(qn("w:val"), "0563C1")
+        run_props.append(color)
+
+        underline = OxmlElement("w:u")
+        underline.set(qn("w:val"), "single")
+        run_props.append(underline)
+
+        size = OxmlElement("w:sz")
+        size.set(qn("w:val"), "24")
+        run_props.append(size)
+        size_cs = OxmlElement("w:szCs")
+        size_cs.set(qn("w:val"), "24")
+        run_props.append(size_cs)
+
+        run.append(run_props)
+        text_node = OxmlElement("w:t")
+        text_node.text = text
+        run.append(text_node)
+
+        hyperlink.append(run)
+        paragraph._p.append(hyperlink)
 
     # Name line
     name_paragraph = doc.add_paragraph()
@@ -515,18 +654,15 @@ def _render_cover_letter_docx(
     run.font.name = "Times New Roman"
     run.font.size = Pt(12)
 
-    # Email + LinkedIn + Portfolio line
+    # Email + LinkedIn line
     contact_line = doc.add_paragraph()
-    contact_line.paragraph_format.tab_stops.add_tab_stop(Inches(4.4), WD_TAB_ALIGNMENT.RIGHT)
     contact_line.paragraph_format.tab_stops.add_tab_stop(Inches(6.5), WD_TAB_ALIGNMENT.RIGHT)
     contact_line.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
-    email_run = contact_line.add_run("zubinkjha2025@gmail.com")
-    email_run.font.name = "Times New Roman"
-    email_run.font.size = Pt(12)
-    email_run.underline = True
-    divider = contact_line.add_run("\tlinkedin.com/in/zubin-jha-30752a355\tzubinjha.com")
-    divider.font.name = "Times New Roman"
-    divider.font.size = Pt(12)
+    _append_hyperlink(paragraph=contact_line, url=f"mailto:{contact_email}", text=contact_email)
+    spacer = contact_line.add_run("\t")
+    spacer.font.name = "Times New Roman"
+    spacer.font.size = Pt(12)
+    _append_hyperlink(paragraph=contact_line, url=linkedin_url, text=linkedin_label)
 
     doc.add_paragraph("")
 
@@ -585,9 +721,17 @@ def _validate_letter_payload(raw: dict[str, Any]) -> tuple[bool, str]:
     paragraphs = raw.get("paragraphs")
     if not isinstance(paragraphs, list):
         return False, "paragraphs must be a list"
-    clean = [item.strip() for item in paragraphs if isinstance(item, str) and item.strip()]
-    if len(clean) < 3:
-        return False, "paragraphs must contain at least 3 non-empty entries"
+    clean = [_sanitize_cover_letter_text(item) for item in paragraphs if isinstance(item, str) and _sanitize_cover_letter_text(item)]
+    if len(clean) < 4:
+        return False, "paragraphs must contain at least 4 non-empty entries"
+    if len(clean) > 5:
+        return False, "paragraphs must contain at most 5 entries"
+    total_words = sum(_word_count(item) for item in clean)
+    if total_words < 220:
+        return False, "cover letter must be at least 220 words"
+    for idx, item in enumerate(clean, start=1):
+        if _word_count(item) < 35:
+            return False, f"paragraph {idx} must be at least 35 words"
     return True, ""
 
 
@@ -748,6 +892,35 @@ def _append_sheet_row_with_retry(
     return {**last, "attempts_used": safe_attempts, "attempts_configured": safe_attempts}
 
 
+def _upload_cover_letter_with_retry(
+    *,
+    local_path: str,
+    destination_path: str,
+    destination_folder_id: str | None,
+    filename: str,
+    attempts: int,
+    backoff_sec: float,
+) -> dict[str, Any]:
+    safe_attempts = max(1, int(attempts))
+    safe_backoff = max(0.0, float(backoff_sec))
+    last: dict[str, Any] = {"ok": False, "error": "unknown"}
+    for idx in range(1, safe_attempts + 1):
+        out = upload_file_to_google_drive(
+            local_path=local_path,
+            destination_path=destination_path,
+            destination_folder_id=destination_folder_id,
+            filename=filename,
+        )
+        if bool(out.get("ok")):
+            return {**out, "attempts_used": idx, "attempts_configured": safe_attempts}
+        last = out if isinstance(out, dict) else {"ok": False, "error": "invalid_response"}
+        if idx >= safe_attempts:
+            break
+        if safe_backoff > 0:
+            sleep(safe_backoff * idx)
+    return {**last, "attempts_used": safe_attempts, "attempts_configured": safe_attempts}
+
+
 def _evaluate_job(
     *,
     model_alias: str,
@@ -798,13 +971,25 @@ def _generate_cover_letter(
     style_spec_text: str,
     invalid_retry_limit: int,
 ) -> dict[str, Any]:
+    raw_role_title = _extract_job_title(job_listing) or _extract_from_dict(
+        job_detail.get("job") if isinstance(job_detail.get("job"), dict) else {},
+        ["title", "jobTitle", "position"],
+    )
+    normalized_role_title = _normalize_role_title_for_cover_letter(raw_role_title)
     listing_json = json.dumps(job_listing, ensure_ascii=True)
     detail_json = json.dumps(job_detail.get("job") if isinstance(job_detail.get("job"), dict) else {}, ensure_ascii=True)
     context_text = _candidate_context_text(candidate_context)
     prompt = (
         "Write a tailored cover letter body that sounds like the candidate profile.\n"
-        "Output JSON only with key paragraphs: array of 3-5 paragraphs.\n"
-        "No em dash characters.\n\n"
+        "Output JSON only with key paragraphs: array of exactly 4 paragraphs.\n"
+        "Each paragraph should be between 45 and 95 words.\n"
+        "Total word count should be between 220 and 380 words.\n"
+        "No dash punctuation in body text.\n"
+        "When mentioning the role title, use concise natural wording in title case.\n"
+        "Do not copy long all-caps or department-heavy posting titles directly.\n"
+        "Do not use markdown.\n\n"
+        f"[RoleTitleRaw]\n{raw_role_title or 'Not Found'}\n\n"
+        f"[RoleTitlePreferred]\n{normalized_role_title}\n\n"
         f"[StyleSpec]\n{style_spec_text}\n\n"
         f"[CandidateContext]\n{context_text}\n\n"
         f"[JobListing]\n{listing_json}\n\n"
@@ -823,34 +1008,40 @@ def _generate_cover_letter(
         payload = result["payload"]
         valid, reason = _validate_letter_payload(payload)
         if valid:
-            paragraphs = [str(item).strip() for item in payload.get("paragraphs", []) if isinstance(item, str) and str(item).strip()]
+            paragraphs = [
+                _sanitize_cover_letter_text(
+                    _rewrite_role_title_mentions(
+                        str(item),
+                        raw_title=raw_role_title,
+                        normalized_title=normalized_role_title,
+                    )
+                )
+                for item in payload.get("paragraphs", [])
+                if isinstance(item, str) and _sanitize_cover_letter_text(str(item))
+            ]
             return {"ok": True, "paragraphs": paragraphs}
         last_error = reason
         if attempt < attempts:
             prompt += f"\n\nValidation error from prior attempt: {reason}. Fix JSON strictly."
     # Robust deterministic fallback so apply/maybe jobs still produce a cover letter.
-    title = _extract_job_title(job_listing) or _extract_from_dict(
-        job_detail.get("job") if isinstance(job_detail.get("job"), dict) else {},
-        ["title", "jobTitle", "position"],
-    )
     company = _extract_job_company(job_listing) or _extract_from_dict(
         job_detail.get("job") if isinstance(job_detail.get("job"), dict) else {},
         ["companyName", "company", "employer"],
     )
-    title = title or "the role"
+    title = normalized_role_title or "the role"
     company = company or "the company"
     paragraphs = [
         (
-            f"I am excited to apply for {title} at {company}. "
-            "I recently completed my Computer Science degree and I enjoy building reliable software systems that solve real problems."
+            f"I am excited to apply for {title} at {company}. I recently completed my Computer Science degree and I focus on building reliable software systems that solve practical problems. My background combines backend development, data focused engineering, and real product delivery. I am most engaged when I can turn messy requirements into clear technical plans and working software that teams can trust and improve over time."
         ),
         (
-            "My background is strongest in backend engineering, data systems, and end-to-end product execution. "
-            "I have built production-style projects involving APIs, relational databases, and iterative feature delivery."
+            "Across my projects, I have taken full ownership of systems from initial architecture through implementation, testing, and iteration. I have built API driven applications, relational database workflows, and analytics tools that required careful schema design, performance minded querying, and maintainable backend logic. This hands on work strengthened my ability to communicate tradeoffs, debug issues quickly, and deliver clean software under realistic constraints."
         ),
         (
-            f"I would welcome the opportunity to contribute to {company} and continue growing as an engineer. "
-            "Thank you for your consideration."
+            f"I am drawn to {company} because this role aligns with how I work best: building dependable systems, collaborating across functions, and continuously improving technical quality. I would bring a builder mindset, strong curiosity, and a clear focus on delivering useful outcomes for users and internal stakeholders. I am ready to contribute quickly while continuing to grow in the technologies and domain priorities that matter most to your team."
+        ),
+        (
+            f"Thank you for considering my application for {title}. I would welcome the opportunity to discuss how my background in software engineering, data systems, and project ownership can support {company}. I am confident I can contribute with disciplined execution, thoughtful collaboration, and a strong commitment to quality from day one. I appreciate your time and I look forward to speaking with you."
         ),
     ]
     return {
@@ -896,7 +1087,43 @@ def _map_sheet_row(
         "Job Link": job_url,
         "Source": "Indeed",
         "Cover Letter": cover_letter_link or "",
-        "Notes": notes[:500],
+        "Notes": "",
+        "AI Notes": notes[:500],
+    }
+
+
+def _apply_deterministic_field_fallback(
+    *,
+    extracted_fields: dict[str, str],
+    job_listing: dict[str, Any],
+    job_detail: dict[str, Any],
+    job_url: str,
+) -> dict[str, str]:
+    merged = dict(_default_sheet_fields())
+    merged.update({k: _normalize_not_found(v) for k, v in (extracted_fields or {}).items() if isinstance(k, str)})
+    detail_job = job_detail.get("job") if isinstance(job_detail.get("job"), dict) else {}
+
+    deterministic_company = _extract_job_company(job_listing) or _extract_from_dict(detail_job, ["companyName", "company", "employer"])
+    deterministic_title = _extract_job_title(job_listing) or _extract_from_dict(detail_job, ["title", "jobTitle", "position"])
+    deterministic_location = _extract_job_location(job_listing) or _extract_from_dict(
+        detail_job, ["location", "jobLocation", "formattedLocation", "cityState"]
+    )
+    deterministic_link = _coerce_text(job_url) or _extract_from_dict(detail_job, ["url", "jobUrl", "job_link", "jobLink", "link"])
+
+    if _is_not_found(merged.get("company")) and deterministic_company:
+        merged["company"] = deterministic_company
+    if _is_not_found(merged.get("job_title")) and deterministic_title:
+        merged["job_title"] = deterministic_title
+    if _is_not_found(merged.get("location")) and deterministic_location:
+        merged["location"] = deterministic_location
+    if _is_not_found(merged.get("job_link")) and deterministic_link:
+        merged["job_link"] = deterministic_link
+    return {
+        "company": _normalize_not_found(merged.get("company")),
+        "job_title": _normalize_not_found(merged.get("job_title")),
+        "location": _normalize_not_found(merged.get("location")),
+        "pay_range": _normalize_not_found(merged.get("pay_range")),
+        "job_link": _normalize_not_found(merged.get("job_link")),
     }
 
 
@@ -1116,7 +1343,22 @@ def run_pipeline(
     cover_letter_model_alias = _coerce_text(cfg.get("cover_letter_model_alias")) or DEFAULT_COVER_LETTER_MODEL
     invalid_retry_limit = _config_int(cfg, "invalid_schema_retry_limit", 1, min_value=0)
     destination_path = _coerce_text(cfg.get("cover_letter_destination_path")) or DEFAULT_COVER_LETTER_DESTINATION_PATH
+    destination_folder_id = _coerce_text(cfg.get("cover_letter_destination_folder_id")) or None
     file_mode = _coerce_text(cfg.get("cover_letter_file_mode")).lower() or DEFAULT_FILE_MODE
+    contact_email = _coerce_text(cfg.get("cover_letter_contact_email")) or DEFAULT_COVER_LETTER_CONTACT_EMAIL
+    linkedin_url = _coerce_text(cfg.get("cover_letter_linkedin_url")) or DEFAULT_COVER_LETTER_LINKEDIN_URL
+    linkedin_label = _coerce_text(cfg.get("cover_letter_linkedin_label")) or DEFAULT_COVER_LETTER_LINKEDIN_LABEL
+    cover_letter_upload_retry_attempts = _config_int(
+        cfg,
+        "cover_letter_upload_retry_attempts",
+        DEFAULT_COVER_LETTER_UPLOAD_RETRY_ATTEMPTS,
+        min_value=1,
+    )
+    cover_letter_upload_retry_backoff_sec = (
+        float(cfg.get("cover_letter_upload_retry_backoff_sec"))
+        if isinstance(cfg.get("cover_letter_upload_retry_backoff_sec"), (int, float))
+        else DEFAULT_COVER_LETTER_UPLOAD_RETRY_BACKOFF_SEC
+    )
     sheet_retry_attempts = _config_int(cfg, "sheet_retry_attempts", DEFAULT_SHEET_RETRY_ATTEMPTS, min_value=1)
     sheet_retry_backoff_sec = float(cfg.get("sheet_retry_backoff_sec")) if isinstance(cfg.get("sheet_retry_backoff_sec"), (int, float)) else DEFAULT_SHEET_RETRY_BACKOFF_SEC
     project_context_top_n = _config_int(cfg, "project_context_top_n", DEFAULT_PROJECT_CONTEXT_TOP_N, min_value=0)
@@ -1335,11 +1577,15 @@ def run_pipeline(
             invalid_retry_limit=invalid_retry_limit,
         )
         extracted_fields = sheet_extract.get("fields") if isinstance(sheet_extract.get("fields"), dict) else _default_sheet_fields()
+        extracted_fields = _apply_deterministic_field_fallback(
+            extracted_fields=extracted_fields,
+            job_listing=listing,
+            job_detail=detail,
+            job_url=job_url,
+        )
         if not sheet_extract.get("ok"):
             counts["extraction_errors"] += 1
             errors.append(f"field extraction failed for `{job_key}`: {sheet_extract.get('error')}")
-        if _is_not_found(extracted_fields.get("job_link")) and job_url:
-            extracted_fields["job_link"] = job_url
 
         decision_out = _evaluate_job(
             model_alias=decision_model_alias,
@@ -1434,16 +1680,30 @@ def run_pipeline(
             company_name = _coerce_text(extracted_fields.get("company"))
             if not company_name or company_name.lower() == NOT_FOUND_VALUE.lower():
                 company_name = "the company"
-            file_stem = _sanitize_file_stem(f"{job_key}_cover_letter")
-            if file_mode == "versioned":
-                file_stem = f"{file_stem}_{_utc_now().strftime('%Y%m%d_%H%M%S')}"
-            relative_output_path = _repo_relative_path(resources_dir) / "state" / "cover_letters" / f"{file_stem}.docx"
-            absolute_output_path = _repo_root() / relative_output_path
+            role_name = (
+                _coerce_text(extracted_fields.get("job_title"))
+                or _normalize_role_title_for_cover_letter(_extract_job_title(listing))
+                or "Role"
+            )
+            found_date = _coerce_text(found_at_iso)[:10] or _utc_now().strftime("%Y-%m-%d")
+            company_segment = _compact_file_segment(company_name, fallback="Company")
+            role_segment = _compact_file_segment(role_name, fallback="Role")
+            base_file_name = f"{found_date} - {company_segment} - {role_segment}"
+            output_dir = _repo_root() / _repo_relative_path(resources_dir) / "state" / "cover_letters"
+            absolute_output_path = _next_available_local_docx_path(
+                output_dir=output_dir,
+                base_name=base_file_name,
+                file_mode=file_mode,
+            )
+            relative_output_path = absolute_output_path.relative_to(_repo_root())
             try:
                 _render_cover_letter_docx(
                     output_path=absolute_output_path,
                     company_name=company_name,
                     body_paragraphs=letter_out["paragraphs"],
+                    contact_email=contact_email,
+                    linkedin_url=linkedin_url,
+                    linkedin_label=linkedin_label,
                 )
             except Exception as exc:
                 counts["cover_letter_errors"] += 1
@@ -1451,10 +1711,13 @@ def run_pipeline(
                 note_suffix_parts.append("cover_letter_error=render_failed")
             else:
                 cover_letter_local_path = str(relative_output_path)
-                upload_out = upload_file_to_google_drive(
+                upload_out = _upload_cover_letter_with_retry(
                     local_path=str(relative_output_path),
                     destination_path=destination_path,
+                    destination_folder_id=destination_folder_id,
                     filename=absolute_output_path.name,
+                    attempts=cover_letter_upload_retry_attempts,
+                    backoff_sec=cover_letter_upload_retry_backoff_sec,
                 )
                 if not upload_out.get("ok"):
                     counts["upload_errors"] += 1

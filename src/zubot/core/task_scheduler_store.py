@@ -487,6 +487,7 @@ class TaskSchedulerStore:
                     source TEXT NOT NULL,
                     cover_letter TEXT,
                     notes TEXT,
+                    ai_notes TEXT,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
@@ -586,10 +587,11 @@ class TaskSchedulerStore:
                         source TEXT NOT NULL,
                         cover_letter TEXT,
                         notes TEXT,
+                        ai_notes TEXT,
                         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                     );
-                    INSERT INTO job_applications_new(job_key, company, job_title, location, date_found, date_applied, status, pay_range, job_link, source, cover_letter, notes, created_at, updated_at)
+                    INSERT INTO job_applications_new(job_key, company, job_title, location, date_found, date_applied, status, pay_range, job_link, source, cover_letter, notes, ai_notes, created_at, updated_at)
                     SELECT
                         job_key,
                         company,
@@ -606,6 +608,7 @@ class TaskSchedulerStore:
                         source,
                         cover_letter,
                         notes,
+                        '',
                         created_at,
                         updated_at
                     FROM job_applications;
@@ -617,6 +620,13 @@ class TaskSchedulerStore:
                         ON job_applications(status);
                     """
                 )
+
+            job_app_columns = {
+                str(col["name"])
+                for col in conn.execute("PRAGMA table_info(job_applications);").fetchall()
+            }
+            if "ai_notes" not in job_app_columns:
+                conn.execute("ALTER TABLE job_applications ADD COLUMN ai_notes TEXT;")
 
             run_columns = {
                 str(col["name"])

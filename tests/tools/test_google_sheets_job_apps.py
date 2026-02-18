@@ -56,7 +56,7 @@ def test_list_job_app_rows_inclusive_date_filter_and_mapping(configured_google_d
     monkeypatch.setattr(module, "get_google_access_token", lambda: {"ok": True, "access_token": "token"})
 
     def fake_fetch_json(url: str, headers: dict[str, str], timeout_sec: int):
-        assert "Job%20Applications!A1:L" in url
+        assert "Job%20Applications!A1:M" in url
         assert headers["Authorization"] == "Bearer token"
         assert timeout_sec == 9
         return {
@@ -74,6 +74,7 @@ def test_list_job_app_rows_inclusive_date_filter_and_mapping(configured_google_d
                     "Source",
                     "Cover Letter",
                     "Notes",
+                    "AI Notes",
                 ],
                 ["k1", "A", "Role A", "Remote", "02/10/2026", "", "Recommend Apply", "", "u1", "Indeed"],
                 ["k2", "B", "Role B", "Remote", "2026-02-11", "", "Applied", "", "u2", "LinkedIn"],
@@ -112,6 +113,7 @@ def test_list_job_app_rows_short_row_mapping(configured_google_drive, monkeypatc
                     "Source",
                     "Cover Letter",
                     "Notes",
+                    "AI Notes",
                 ],
                 ["k1", "Company", "Role"],
             ]
@@ -123,6 +125,7 @@ def test_list_job_app_rows_short_row_mapping(configured_google_drive, monkeypatc
     assert out["rows_count"] == 1
     assert out["rows"][0]["Location"] == ""
     assert out["rows"][0]["Notes"] == ""
+    assert out["rows"][0]["AI Notes"] == ""
 
 
 def test_append_job_app_row_status_validation(configured_google_drive):
@@ -146,7 +149,7 @@ def test_append_job_app_row_duplicate_job_key(configured_google_drive, monkeypat
     monkeypatch.setattr(module, "get_google_access_token", lambda: {"ok": True, "access_token": "token"})
 
     def fake_fetch_json(url: str, headers: dict[str, str], timeout_sec: int):
-        assert "Job%20Applications!A2:L" in url
+        assert "Job%20Applications!A2:M" in url
         return {"values": [["existing-key", "", "Engineer"], ["other-key", "", "Analyst"]]}
 
     def fail_put(*args, **kwargs):
@@ -175,7 +178,7 @@ def test_append_job_app_row_success(configured_google_drive, monkeypatch: pytest
     monkeypatch.setattr(module, "get_google_access_token", lambda: {"ok": True, "access_token": "token"})
 
     def fake_fetch_json(url: str, headers: dict[str, str], timeout_sec: int):
-        assert "Job%20Applications!A2:L" in url
+        assert "Job%20Applications!A2:M" in url
         return {
             "values": [
                 ["", "", ""],
@@ -184,11 +187,11 @@ def test_append_job_app_row_success(configured_google_drive, monkeypatch: pytest
         }
 
     def fake_put_json(url: str, headers: dict[str, str], payload: dict, timeout_sec: int):
-        assert "Job%20Applications!A2:L2" in url
+        assert "Job%20Applications!A2:M2" in url
         assert payload["values"][0][0] == "new-key"
         assert payload["values"][0][4] == "2026-02-10"
         return {
-            "updatedRange": "Job Applications!A2:L2",
+            "updatedRange": "Job Applications!A2:M2",
             "updatedRows": 1,
         }
 
@@ -209,6 +212,7 @@ def test_append_job_app_row_success(configured_google_drive, monkeypatch: pytest
             "Source": "Indeed",
             "Cover Letter": "https://drive.google.com/file/d/123",
             "Notes": "first outreach",
+            "AI Notes": "fit_score=9",
         }
     )
     assert out["ok"] is True

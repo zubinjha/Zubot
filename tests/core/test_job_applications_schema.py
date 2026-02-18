@@ -10,7 +10,7 @@ from src.zubot.core.job_applications_schema import (
 
 def test_sheet_and_db_columns_align_by_count():
     assert len(SHEET_COLUMNS) == len(DB_COLUMNS)
-    assert len(SHEET_COLUMNS) == 12
+    assert len(SHEET_COLUMNS) == 13
     assert len(REQUIRED_SHEET_COLUMNS) > 0
 
 
@@ -28,6 +28,7 @@ def test_sheet_row_to_db_row_exact_mapping():
         "Source": "Indeed",
         "Cover Letter": "https://drive.google.com/file/d/1",
         "Notes": "follow up next week",
+        "AI Notes": "fit_score=9",
     }
     db_row = sheet_row_to_db_row(sheet_row)
     assert db_row["job_key"] == "k1"
@@ -51,6 +52,7 @@ def test_db_row_to_sheet_row_exact_mapping():
         "source": "LinkedIn",
         "cover_letter": "",
         "notes": "",
+        "ai_notes": "",
         "created_at": "2026-01-01T00:00:00Z",
     }
     sheet_row = db_row_to_sheet_row(db_row)
@@ -67,3 +69,4 @@ def test_normalize_sheet_row_fills_missing_with_empty_string():
     assert out["Company"] == "Acme"
     assert out["Job Title"] == ""
     assert out["Notes"] == ""
+    assert out["AI Notes"] == ""

@@ -149,6 +149,7 @@ def test_upload_file_to_google_drive_success(configured_google, monkeypatch: pyt
     assert out["ok"] is True
     assert out["drive_file_id"] == "drive-file-1"
     assert out["destination_folder_id"] == "folder-cover-letters-1"
+    assert out["drive_folder_id"] == "folder-cover-letters-1"
 
 
 def test_upload_file_to_google_drive_name_conflict_adds_suffix(
@@ -176,6 +177,7 @@ def test_upload_file_to_google_drive_name_conflict_adds_suffix(
     )
     assert out["ok"] is True
     assert out["drive_file_name"] == "file-20260212-111111.docx"
+    assert out["web_view_link"] == "https://drive.google.com/file/d/drive-file-2/view"
 
 
 def test_upload_file_to_google_drive_upload_error(configured_google, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
@@ -208,14 +210,72 @@ def test_upload_file_to_google_drive_path_resolve_error(configured_google, monke
 
     monkeypatch.setattr(module, "get_google_access_token", lambda: {"ok": True, "access_token": "token"})
 
-    def boom(**kwargs):
+    def boom_validate(**kwargs):
+        raise RuntimeError("stale folder")
+
+    def boom_path(**kwargs):
         raise RuntimeError("resolve fail")
 
-    monkeypatch.setattr(module, "_validate_folder_id", boom)
+    monkeypatch.setattr(module, "_validate_folder_id", boom_validate)
+    monkeypatch.setattr(module, "_resolve_or_create_folder_path", boom_path)
     out = upload_file_to_google_drive(local_path=str(local_file.relative_to(module._repo_root())))
     assert out["ok"] is False
     assert out["source"] == "google_drive_path_resolve_error"
     assert "resolve fail" in out["error"]
+
+
+def test_upload_file_to_google_drive_stale_configured_folder_falls_back_to_path(
+    configured_google,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    local_file = Path(module._repo_root()) / "outputs/test_google_drive_docs/upload-stale-folder.docx"
+    local_file.parent.mkdir(parents=True, exist_ok=True)
+    local_file.write_bytes(b"dummy")
+
+    monkeypatch.setattr(module, "get_google_access_token", lambda: {"ok": True, "access_token": "token"})
+    monkeypatch.setattr(module, "_validate_folder_id", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("stale folder")))
+    monkeypatch.setattr(module, "_resolve_or_create_folder_path", lambda **kwargs: "resolved-folder-id")
+    monkeypatch.setattr(module, "_file_exists_in_folder", lambda **kwargs: False)
+    monkeypatch.setattr(
+        module,
+        "_upload_multipart",
+        lambda **kwargs: {"id": "drive-file-stale", "name": "upload-stale-folder.docx"},
+    )
+
+    out = upload_file_to_google_drive(
+        local_path=str(local_file.relative_to(module._repo_root())),
+        destination_path="Job Applications/Cover Letters",
+    )
+    assert out["ok"] is True
+    assert out["destination_folder_id"] == "resolved-folder-id"
+    assert out["web_view_link"] == "https://drive.google.com/file/d/drive-file-stale/view"
+
+
+def test_upload_file_to_google_drive_uses_explicit_destination_folder_id(
+    configured_google,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    local_file = Path(module._repo_root()) / "outputs/test_google_drive_docs/upload-explicit-folder.docx"
+    local_file.parent.mkdir(parents=True, exist_ok=True)
+    local_file.write_bytes(b"dummy")
+
+    monkeypatch.setattr(module, "get_google_access_token", lambda: {"ok": True, "access_token": "token"})
+    monkeypatch.setattr(module, "_validate_folder_id", lambda **kwargs: "explicit-folder-1")
+    monkeypatch.setattr(
+        module,
+        "_resolve_destination_folder_id",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("path resolver should not be called with explicit destination_folder_id")),
+    )
+    monkeypatch.setattr(module, "_file_exists_in_folder", lambda **kwargs: False)
+    monkeypatch.setattr(module, "_upload_multipart", lambda **kwargs: {"id": "drive-file-explicit", "name": "upload-explicit-folder.docx"})
+
+    out = upload_file_to_google_drive(
+        local_path=str(local_file.relative_to(module._repo_root())),
+        destination_folder_id="explicit-folder-1",
+        destination_path="Job Applications/Cover Letters",
+    )
+    assert out["ok"] is True
+    assert out["destination_folder_id"] == "explicit-folder-1"
 
 
 def test_upload_file_to_google_drive_falls_back_to_path_for_non_default_destination(

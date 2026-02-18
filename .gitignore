@@ -18,3 +18,6 @@ personal_notes/
 dev_docs/
 devtools/
 outputs/
+src/zubot/predefined_tasks/indeed_daily_search/state/cover_letters/
+src/zubot/predefined_tasks/indeed_daily_search/task_config*.json
+!src/zubot/predefined_tasks/indeed_daily_search/task_config.example.json

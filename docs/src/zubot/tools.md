@@ -65,7 +65,7 @@ This document defines the initial tools scaffold in `src/zubot/tools/`.
   - Reads spreadsheet id from:
     - `tool_profiles.user_specific.google_drive.job_application_spreadsheet_id`
   - Uses tab name `Job Applications` and fixed column schema:
-    - `JobKey`, `Company`, `Job Title`, `Location`, `Date Found`, `Date Applied`, `Status`, `Pay Range`, `Job Link`, `Source`, `Cover Letter`, `Notes`
+    - `JobKey`, `Company`, `Job Title`, `Location`, `Date Found`, `Date Applied`, `Status`, `Pay Range`, `Job Link`, `Source`, `Cover Letter`, `Notes`, `AI Notes`
   - Canonical sheet/db schema contract is centralized in:
     - `src/zubot/core/job_applications_schema.py`
   - Local SQLite mirror table:
@@ -93,7 +93,7 @@ This document defines the initial tools scaffold in `src/zubot/tools/`.
     - fails safely when key is missing or duplicated
 - `src/zubot/tools/kernel/google_drive_docs.py` (unregistered helper)
   - `create_local_docx(filename, title=None, paragraphs, output_dir="outputs/cover_letters")`
-  - `upload_file_to_google_drive(local_path, destination_path="Job Applications/Cover Letters", filename=None)`
+  - `upload_file_to_google_drive(local_path, destination_path="Job Applications/Cover Letters", destination_folder_id=None, filename=None)`
   - `create_and_upload_docx(filename, title=None, paragraphs, output_dir="outputs/cover_letters", destination_path="Job Applications/Cover Letters")`
   - DOCX behavior:
     - generates `.docx` files using `python-docx`

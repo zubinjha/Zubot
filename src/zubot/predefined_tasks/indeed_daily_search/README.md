@@ -4,7 +4,8 @@ This folder is the task-local resource/config package for `indeed_daily_search`.
 
 - `task.py`: predefined task entrypoint used by central task runner.
 - `pipeline.py`: end-to-end pipeline implementation.
-- `task_config.json`: runtime config (queries, model aliases, limits, file mode).
+- `task_config.example.json`: tracked schema/template config with placeholder values.
+- `task_config.json`: local runtime config (queries, model aliases, limits, file mode; gitignored).
 - `prompts/`: decision + cover-letter prompt templates.
 - `assets/`: decision rubric + cover-letter style spec.
 - `state/`: task-local runtime outputs (cover letters, debug artifacts).
@@ -20,12 +21,16 @@ This folder is the task-local resource/config package for `indeed_daily_search`.
 6. Run field-extraction LLM to normalize spreadsheet fields:
    - `company`, `job_title`, `location`, `pay_range`, `job_link`
    - on model failure or invalid JSON, deterministic fallback starts as `Not Found` for each field
-   - `job_link` is then force-filled from the known listing URL when available (prevents blank/`Not Found` links for valid listings)
+   - deterministic fallback then fills `company`, `job_title`, `location`, and `job_link` from listing/detail payloads when present
+   - `job_link` is force-filled from the known listing URL when available (prevents blank/`Not Found` links for valid listings)
 7. Run decision LLM (`Recommend Apply` / `Recommend Maybe` / `Skip`) with strict JSON validation.
 8. For non-skip decisions:
    - generate cover-letter body via LLM with strict JSON validation
-   - if cover-letter JSON generation fails, task uses deterministic fallback paragraphs so file generation can proceed
+   - generated body must pass structure checks (4 paragraphs, minimum word count, paragraph minimum length)
+   - generated body is normalized to remove dash punctuation in body text
+   - if cover-letter JSON generation fails validation, task uses deterministic fallback paragraphs so file generation can proceed
    - render styled DOCX (Times New Roman spec from `assets/cover_letter_style_spec.md`)
+   - header uses clickable email and clickable `LinkedIn` text (no portfolio header link)
    - upload DOCX to Google Drive
    - if upload response omits `web_view_link`, task falls back to a `drive_file_id`-based viewer link
    - append row to job applications spreadsheet (`append_job_app_row`)
@@ -48,8 +53,9 @@ This folder is the task-local resource/config package for `indeed_daily_search`.
 - Seen ledger: `task_seen_items(task_id, provider, item_key)` prevents duplicate processing.
 - Sheet row idempotency: `append_job_app_row` rejects duplicate `JobKey`; task treats this as deduped outcome.
 - Cover letter artifact naming is controlled by `cover_letter_file_mode`:
-  - `versioned` (default): append timestamp suffix
-  - `overwrite`: deterministic filename by job key
+  - filename format: `YYYY-MM-DD - Company - Role.docx` (shortened, human-readable)
+  - `versioned` (default): if filename exists, append numeric suffix (` - 1`, ` - 2`, ...)
+  - `overwrite`: write to the base filename without numeric suffix
 
 ## Live Progress Contract
 - During active runs, progress state is continuously upserted at:
@@ -71,8 +77,8 @@ This folder is the task-local resource/config package for `indeed_daily_search`.
 - For `Recommend Apply` / `Recommend Maybe`, spreadsheet row append is blocked if final `Job Link` resolves to `Not Found`.
 - For cover letters:
   - generation failures trigger deterministic paragraph fallback
-  - upload failures still allow row append with a `cover_letter_error=...` note marker
-  - fallback generation adds `cover_letter_fallback=...` note marker
+  - upload failures still allow row append with a `cover_letter_error=...` marker in `AI Notes`
+  - fallback generation adds `cover_letter_fallback=...` marker in `AI Notes`
 
 ## Task Config Keys
 - `search_profiles[]`: list of `{profile_id, keyword, location}` search definitions used for HasData listing calls.
@@ -86,6 +92,24 @@ This folder is the task-local resource/config package for `indeed_daily_search`.
 - `candidate_context_files[]`: optional override list of repo-relative base context files.
 - `project_context_files[]`: optional override list of repo-relative project context files.
 - `cover_letter_destination_path`: Drive folder path for uploads.
+- `cover_letter_destination_folder_id`: optional explicit Google Drive folder id; when set, uploads target this exact folder id (bypasses path resolution).
+- `cover_letter_contact_email`: email rendered in header as clickable `mailto:` hyperlink.
+- `cover_letter_linkedin_url`: destination URL for header `LinkedIn` hyperlink text.
+- `cover_letter_linkedin_label`: displayed label text for the LinkedIn hyperlink (default `LinkedIn`).
 - `cover_letter_file_mode`: `versioned` or `overwrite`.
+- `cover_letter_upload_retry_attempts`: retry attempts for Drive upload.
+- `cover_letter_upload_retry_backoff_sec`: linear backoff seconds between Drive upload retry attempts.
 - `sheet_retry_attempts`: retry attempts for spreadsheet row append failures.
 - `sheet_retry_backoff_sec`: linear backoff seconds between sheet retry attempts.
+
+## Quick Runbook
+
+- Reset central DB:
+  - `bash devtools/reset_central_db.sh`
+- Run task manually from terminal:
+  - `source .venv/bin/activate`
+  - `python -m src.zubot.daemon.task_cli run indeed_daily_search --payload-json '{"trigger":"manual_real_run"}'`
+- Inspect latest run snapshot:
+  - `sqlite3 memory/central/zubot_core.db "SELECT value_json FROM task_state_kv WHERE task_id='indeed_daily_search' AND state_key='last_run_snapshot' ORDER BY updated_at DESC LIMIT 1;"`
+- Inspect live progress:
+  - `sqlite3 memory/central/zubot_core.db "SELECT value_json FROM task_state_kv WHERE task_id='indeed_daily_search' AND state_key='live_progress' ORDER BY updated_at DESC LIMIT 1;"`

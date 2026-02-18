@@ -157,6 +157,7 @@ Conceptual behavior:
 - `source` TEXT NOT NULL
 - `cover_letter` TEXT
 - `notes` TEXT
+- `ai_notes` TEXT
 - `created_at` TEXT NOT NULL
 - `updated_at` TEXT NOT NULL
 

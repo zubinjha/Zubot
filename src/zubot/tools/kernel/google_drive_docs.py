@@ -245,11 +245,16 @@ def _resolve_destination_folder_id(
 ) -> str:
     configured_folder_id = settings.get("cover_letters_folder_id")
     if configured_folder_id and destination_path == settings["default_upload_path"]:
-        return _validate_folder_id(
-            access_token=access_token,
-            folder_id=str(configured_folder_id),
-            timeout_sec=timeout_sec,
-        )
+        try:
+            return _validate_folder_id(
+                access_token=access_token,
+                folder_id=str(configured_folder_id),
+                timeout_sec=timeout_sec,
+            )
+        except Exception:
+            # Configured folder IDs can go stale (moved/deleted/permissions). Fall
+            # back to path-based resolution so uploads still succeed.
+            return _resolve_or_create_folder_path(access_token=access_token, path=destination_path, timeout_sec=timeout_sec)
     return _resolve_or_create_folder_path(access_token=access_token, path=destination_path, timeout_sec=timeout_sec)
 
 
@@ -332,6 +337,7 @@ def upload_file_to_google_drive(
     *,
     local_path: str,
     destination_path: str = DEFAULT_UPLOAD_PATH,
+    destination_folder_id: str | None = None,
     filename: str | None = None,
 ) -> dict[str, Any]:
     source = "google_drive_upload"
@@ -355,6 +361,7 @@ def upload_file_to_google_drive(
     settings = _google_drive_settings()
     timeout_sec = settings["timeout_sec"]
     target_path = destination_path.strip() if isinstance(destination_path, str) and destination_path.strip() else settings["default_upload_path"]
+    target_folder_id = destination_folder_id.strip() if isinstance(destination_folder_id, str) and destination_folder_id.strip() else None
 
     token = get_google_access_token()
     if not token.get("ok"):
@@ -365,12 +372,19 @@ def upload_file_to_google_drive(
         return _error("google_drive_upload_error", "Google auth returned empty access token.")
 
     try:
-        folder_id = _resolve_destination_folder_id(
-            access_token=access_token,
-            settings=settings,
-            destination_path=target_path,
-            timeout_sec=timeout_sec,
-        )
+        if target_folder_id:
+            folder_id = _validate_folder_id(
+                access_token=access_token,
+                folder_id=target_folder_id,
+                timeout_sec=timeout_sec,
+            )
+        else:
+            folder_id = _resolve_destination_folder_id(
+                access_token=access_token,
+                settings=settings,
+                destination_path=target_path,
+                timeout_sec=timeout_sec,
+            )
     except Exception as exc:
         return _error("google_drive_path_resolve_error", f"Failed to resolve destination path: {exc}")
 
@@ -404,13 +418,19 @@ def upload_file_to_google_drive(
     except Exception as exc:
         return _error("google_drive_upload_error", f"Failed to upload file: {exc}")
 
+    drive_file_id = payload.get("id")
+    web_view_link = payload.get("webViewLink")
+    if (not isinstance(web_view_link, str) or not web_view_link.strip()) and isinstance(drive_file_id, str) and drive_file_id.strip():
+        web_view_link = f"https://drive.google.com/file/d/{drive_file_id.strip()}/view"
+
     return {
         "ok": True,
         "source": source,
-        "drive_file_id": payload.get("id"),
+        "drive_file_id": drive_file_id,
         "drive_file_name": payload.get("name") or final_name,
         "destination_folder_id": folder_id,
-        "web_view_link": payload.get("webViewLink"),
+        "drive_folder_id": folder_id,
+        "web_view_link": web_view_link,
         "error": None,
     }
 

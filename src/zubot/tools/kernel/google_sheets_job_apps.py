@@ -28,6 +28,27 @@ COLUMNS = list(SHEET_COLUMNS)
 REQUIRED_COLUMNS = list(REQUIRED_SHEET_COLUMNS)
 
 
+def _column_letters(one_based_index: int) -> str:
+    if one_based_index <= 0:
+        raise ValueError("one_based_index must be >= 1")
+    out: list[str] = []
+    value = one_based_index
+    while value > 0:
+        value, remainder = divmod(value - 1, 26)
+        out.append(chr(ord("A") + remainder))
+    return "".join(reversed(out))
+
+
+def _sheet_row_range(*, start_row: int) -> str:
+    end_col = _column_letters(len(COLUMNS))
+    return f"{DEFAULT_SHEET_NAME}!A{start_row}:{end_col}"
+
+
+def _sheet_single_row_range(*, row_number: int) -> str:
+    end_col = _column_letters(len(COLUMNS))
+    return f"{DEFAULT_SHEET_NAME}!A{row_number}:{end_col}{row_number}"
+
+
 def _google_drive_settings() -> dict[str, Any]:
     try:
         payload = load_config()
@@ -262,7 +283,7 @@ def list_job_app_rows(*, start_date: str | None = None, end_date: str | None = N
             "error": f"Google auth failed: {token.get('error')}",
         }
 
-    url = _build_values_get_url(spreadsheet_id, f"{DEFAULT_SHEET_NAME}!A1:L")
+    url = _build_values_get_url(spreadsheet_id, _sheet_row_range(start_row=1))
     try:
         payload = _fetch_json(url, _authorized_headers(str(token["access_token"])), settings["timeout_sec"])
     except Exception as exc:
@@ -345,7 +366,7 @@ def append_job_app_row(*, row: dict[str, Any]) -> dict[str, Any]:
 
     headers = _authorized_headers(str(token["access_token"]))
 
-    rows_url = _build_values_get_url(spreadsheet_id, f"{DEFAULT_SHEET_NAME}!A2:L")
+    rows_url = _build_values_get_url(spreadsheet_id, _sheet_row_range(start_row=2))
     try:
         rows_payload = _fetch_json(rows_url, headers, settings["timeout_sec"])
     except Exception as exc:
@@ -359,7 +380,7 @@ def append_job_app_row(*, row: dict[str, Any]) -> dict[str, Any]:
         return _error_payload(source, f"Duplicate JobKey: {new_key}")
 
     target_row = _find_first_available_row(values_rows)
-    update_url = _build_values_update_url(spreadsheet_id, f"{DEFAULT_SHEET_NAME}!A{target_row}:L{target_row}")
+    update_url = _build_values_update_url(spreadsheet_id, _sheet_single_row_range(row_number=target_row))
     body = {"values": [_row_dict_to_sheet_values(normalized_row)]}
 
     try:

@@ -515,6 +515,7 @@ def test_job_applications_table_schema_matches_sheet_columns(tmp_path):
         "source",
         "cover_letter",
         "notes",
+        "ai_notes",
         "created_at",
         "updated_at",
     ]

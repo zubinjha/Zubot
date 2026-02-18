@@ -20,6 +20,7 @@ SHEET_COLUMNS = (
     "Source",
     "Cover Letter",
     "Notes",
+    "AI Notes",
 )
 
 REQUIRED_SHEET_COLUMNS = (
@@ -47,6 +48,7 @@ DB_COLUMNS = (
     "source",
     "cover_letter",
     "notes",
+    "ai_notes",
 )
 DB_METADATA_COLUMNS = (
     "created_at",
@@ -66,6 +68,7 @@ SHEET_TO_DB_COLUMN = {
     "Source": "source",
     "Cover Letter": "cover_letter",
     "Notes": "notes",
+    "AI Notes": "ai_notes",
 }
 DB_TO_SHEET_COLUMN = {db_col: sheet_col for sheet_col, db_col in SHEET_TO_DB_COLUMN.items()}
 
