@@ -304,6 +304,40 @@ def test_collect_new_candidates_dedupes_seen_and_cross_query(tmp_path: Path, mon
     assert stats["jobs_new_total"] == 3
 
 
+def test_assemble_search_profiles_from_locations_and_keywords():
+    profiles = pipeline._assemble_search_profiles(
+        {
+            "search_locations": ["Columbus, OH", "Columbus, OH", "Denver, CO"],
+            "search_keywords": ["Software Engineer", "Data Engineer", ""],
+        }
+    )
+    assert len(profiles) == 4
+    assert [(item["location"], item["keyword"]) for item in profiles] == [
+        ("Columbus, OH", "Software Engineer"),
+        ("Columbus, OH", "Data Engineer"),
+        ("Denver, CO", "Software Engineer"),
+        ("Denver, CO", "Data Engineer"),
+    ]
+    assert len({item["profile_id"] for item in profiles}) == 4
+
+
+def test_assemble_search_profiles_falls_back_to_legacy_profiles():
+    profiles = pipeline._assemble_search_profiles(
+        {
+            "search_profiles": [
+                {"profile_id": "p1", "keyword": "Software Engineer", "location": "Columbus, OH"},
+                {"keyword": "Data Engineer", "location": "Denver, CO"},
+                {"profile_id": "bad", "keyword": "", "location": "Remote"},
+            ]
+        }
+    )
+    assert len(profiles) == 2
+    assert profiles[0]["profile_id"] == "p1"
+    assert profiles[1]["keyword"] == "Data Engineer"
+    assert profiles[1]["location"] == "Denver, CO"
+    assert profiles[1]["profile_id"]
+
+
 def test_evaluate_job_retries_after_invalid_payload(monkeypatch):
     responses = [
         {"ok": True, "payload": {"decision": "bad"}},
@@ -436,7 +470,8 @@ def test_run_pipeline_happy_path(tmp_path: Path, monkeypatch):
         task_id="indeed_daily_search",
         payload={"trigger": "manual"},
         local_config={
-            "search_profiles": [{"profile_id": "p1", "keyword": "Software Engineer", "location": "Columbus, OH"}],
+            "search_locations": ["Columbus, OH"],
+            "search_keywords": ["Software Engineer"],
         },
         resources_dir=resources_dir,
         progress_callback=lambda item: progress_events.append(item),

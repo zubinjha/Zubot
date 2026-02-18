@@ -18,11 +18,7 @@ personal_notes/
 dev_docs/
 devtools/
 outputs/
-# Predefined task local runtime artifacts (generated, non-source).
-src/zubot/predefined_tasks/**/state/
-!src/zubot/predefined_tasks/**/state/.gitkeep
-
-# Predefined task local runtime config files (tracked examples only).
-src/zubot/predefined_tasks/**/task_config.json
-src/zubot/predefined_tasks/**/config.json
-!src/zubot/predefined_tasks/**/task_config.example.json
+src/zubot/predefined_tasks/indeed_daily_search/state/cover_letters/
+src/zubot/predefined_tasks/*/state/logs/
+src/zubot/predefined_tasks/indeed_daily_search/task_config*.json
+!src/zubot/predefined_tasks/indeed_daily_search/task_config.example.json

@@ -9,12 +9,11 @@ This folder is the task-local resource/config package for `indeed_daily_search`.
 - `prompts/`: decision + cover-letter prompt templates.
 - `assets/`: decision rubric + cover-letter style spec.
 - `state/`: task-local runtime outputs (cover letters, debug artifacts).
-  - `state/logs/`: recommended per-run terminal/debug logs for this task.
 
 ## Runtime Behavior
 1. Load latest seen job keys from `task_seen_items` (capped by `seen_ids_limit`, default `200` if not configured).
    - recency policy is first discovery time (`first_seen_at DESC`), not last touch time
-2. Assemble query definitions from `search_locations[] × search_keywords[]` (or use legacy `search_profiles[]` when present), then execute listing calls with HasData Indeed API.
+2. Build query combinations from `search_locations x search_keywords` and execute each with HasData Indeed listing API.
 3. Dedupe across:
    - previously seen keys
    - current run keys from other query profiles
@@ -73,7 +72,15 @@ This folder is the task-local resource/config package for `indeed_daily_search`.
   - `status_line`
 - Search phase formula follows equal-weight query buckets and equal-weight jobs within each query:
   - `search_fraction = (query_index-1)/query_total + (1/query_total)*(job_index/job_total)`
-- `total_percent` is monotonic and phase-weighted (0.7% search + 99.3% processing), and does not drop between stages.
+- `total_percent` is monotonic and phase-weighted (search + processing), and does not drop between stages.
+- Terminal dashboard (`task_cli run`) also shows:
+  - current stage/query/result
+  - elapsed/expected runtime and projected local end time
+  - rolling decision counters
+  - rolling rate for recent non-seen completions (last up to 10)
+  - active run log path
+- Per-run terminal snapshots are logged to:
+  - `src/zubot/predefined_tasks/indeed_daily_search/state/logs/run-YYYYmmdd-HHMMSS.log`
 
 ## Row Write Resilience
 - For `Recommend Apply` / `Recommend Maybe`, spreadsheet row append is blocked if final `Job Link` resolves to `Not Found`.
@@ -83,9 +90,9 @@ This folder is the task-local resource/config package for `indeed_daily_search`.
   - fallback generation adds `cover_letter_fallback=...` marker in `AI Notes`
 
 ## Task Config Keys
-- `search_locations[]`: ordered list of location strings used for search fanout.
-- `search_keywords[]`: ordered list of job-title/keyword strings used for search fanout.
-- `search_profiles[]` (legacy): explicit list of `{profile_id, keyword, location}` definitions. If provided, it takes precedence over `search_locations[]` + `search_keywords[]`.
+- `search_locations[]`: list of locations, each paired with every keyword.
+- `search_keywords[]`: list of keywords, each paired with every location.
+- `search_profiles[]`: optional legacy explicit list of `{profile_id, keyword, location}` (used only when the new lists are not both present).
 - `seen_ids_limit`: max recent seen keys loaded before each run.
 - `task_timeout_sec`: optional predefined-task runtime timeout (seconds) used when task profile timeout is unset (`28800` recommended for full 18-query runs).
 - `extraction_model_alias`: model alias for LLM field extraction (`company/job_title/location/pay_range/job_link`).

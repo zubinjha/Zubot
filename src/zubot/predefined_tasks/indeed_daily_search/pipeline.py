@@ -42,7 +42,7 @@ DEFAULT_SHEET_RETRY_ATTEMPTS = 2
 DEFAULT_SHEET_RETRY_BACKOFF_SEC = 1.0
 DEFAULT_PROJECT_CONTEXT_TOP_N = 3
 DEFAULT_PROJECT_CONTEXT_MAX_CHARS = 2600
-SEARCH_PHASE_WEIGHT = 0.007
+SEARCH_PHASE_WEIGHT = 0.01
 
 DEFAULT_CANDIDATE_CONTEXT_FILES = [
     "context/USER.md",
@@ -146,6 +146,82 @@ def _extract_job_location(job: dict[str, Any]) -> str:
 def _sanitize_file_stem(value: str) -> str:
     clean = _KEY_CHARS_PATTERN.sub("_", value.strip())
     return clean.strip("._")[:96] or "cover_letter"
+
+
+def _unique_non_empty_texts(values: list[Any]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in values:
+        text = _coerce_text(raw)
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(text)
+    return out
+
+
+def _search_profile_id_part(value: str) -> str:
+    lowered = _coerce_text(value).lower()
+    if not lowered:
+        return "item"
+    clean = _KEY_CHARS_PATTERN.sub("_", lowered).strip("._")
+    return clean or "item"
+
+
+def _next_profile_id(*, keyword: str, location: str, used: set[str]) -> str:
+    base = f"{_search_profile_id_part(keyword)}_{_search_profile_id_part(location)}".strip("_")
+    if not base:
+        base = "search_profile"
+    profile_id = base
+    idx = 2
+    while profile_id in used:
+        profile_id = f"{base}_{idx}"
+        idx += 1
+    used.add(profile_id)
+    return profile_id
+
+
+def _assemble_search_profiles(cfg: dict[str, Any]) -> list[dict[str, str]]:
+    raw_locations = cfg.get("search_locations")
+    raw_keywords = cfg.get("search_keywords")
+    locations = _unique_non_empty_texts(raw_locations) if isinstance(raw_locations, list) else []
+    keywords = _unique_non_empty_texts(raw_keywords) if isinstance(raw_keywords, list) else []
+
+    # Prefer the new layout (locations x keywords) when both lists are provided.
+    if locations and keywords:
+        used_ids: set[str] = set()
+        out: list[dict[str, str]] = []
+        for location in locations:
+            for keyword in keywords:
+                out.append(
+                    {
+                        "profile_id": _next_profile_id(keyword=keyword, location=location, used=used_ids),
+                        "keyword": keyword,
+                        "location": location,
+                    }
+                )
+        return out
+
+    # Backward compatibility with explicit profile list.
+    search_profiles_raw = cfg.get("search_profiles")
+    search_profiles = [item for item in search_profiles_raw if isinstance(item, dict)] if isinstance(search_profiles_raw, list) else []
+    out: list[dict[str, str]] = []
+    used_ids: set[str] = set()
+    for item in search_profiles:
+        keyword = _coerce_text(item.get("keyword"))
+        location = _coerce_text(item.get("location"))
+        if not keyword or not location:
+            continue
+        profile_id = _coerce_text(item.get("profile_id")) or _next_profile_id(keyword=keyword, location=location, used=used_ids)
+        if profile_id in used_ids:
+            profile_id = _next_profile_id(keyword=keyword, location=location, used=used_ids)
+        else:
+            used_ids.add(profile_id)
+        out.append({"profile_id": profile_id, "keyword": keyword, "location": location})
+    return out
 
 
 def _compact_file_segment(value: str, *, fallback: str, max_words: int = 4, max_chars: int = 28) -> str:
@@ -386,46 +462,6 @@ def _config_int(cfg: dict[str, Any], key: str, default: int, *, min_value: int =
     return default
 
 
-def _slug_token(value: str) -> str:
-    text = _coerce_text(value).lower()
-    text = _KEY_CHARS_PATTERN.sub("_", text)
-    text = re.sub(r"_+", "_", text).strip("_")
-    return text or "item"
-
-
-def _assemble_search_profiles(cfg: dict[str, Any]) -> list[dict[str, Any]]:
-    # Backward-compatible path: explicit search_profiles list.
-    legacy_profiles = cfg.get("search_profiles")
-    if isinstance(legacy_profiles, list):
-        out = [item for item in legacy_profiles if isinstance(item, dict)]
-        if out:
-            return out
-
-    locations_raw = cfg.get("search_locations")
-    keywords_raw = cfg.get("search_keywords")
-    locations = [str(item).strip() for item in locations_raw if isinstance(item, str) and str(item).strip()] if isinstance(locations_raw, list) else []
-    keywords = [str(item).strip() for item in keywords_raw if isinstance(item, str) and str(item).strip()] if isinstance(keywords_raw, list) else []
-    if not locations or not keywords:
-        return []
-
-    profiles: list[dict[str, Any]] = []
-    seen_profile_ids: dict[str, int] = {}
-    for location in locations:
-        for keyword in keywords:
-            base_id = f"{_slug_token(keyword)}_{_slug_token(location)}"
-            count = seen_profile_ids.get(base_id, 0)
-            seen_profile_ids[base_id] = count + 1
-            profile_id = base_id if count == 0 else f"{base_id}_{count + 1}"
-            profiles.append(
-                {
-                    "profile_id": profile_id,
-                    "keyword": keyword,
-                    "location": location,
-                }
-            )
-    return profiles
-
-
 def _db_path_from_config() -> Path:
     cfg = load_config()
     central = get_central_service_config(cfg)
@@ -581,7 +617,7 @@ class ProgressReporter:
         self._task_id = task_id
         self._db_path = db_path
         self._callback = callback
-        self._last_emit_key: tuple[str, int, int, int, int] | None = None
+        self._last_emit_key: tuple[str, int, int, int, int, int, int] | None = None
 
     def emit(self, payload: dict[str, Any]) -> None:
         status_line = _coerce_text(payload.get("status_line")) or "task progress update"
@@ -592,7 +628,17 @@ class ProgressReporter:
         query_total = int(payload.get("query_total") or 0)
         job_index = int(payload.get("job_index") or 0)
         job_total = int(payload.get("job_total") or 0)
-        emit_key = (stage, round(total_percent), query_index, query_total, job_index + job_total)
+        processed_jobs = int(payload.get("processed_jobs") or 0)
+        total_jobs_for_processing = int(payload.get("total_jobs_for_processing") or 0)
+        emit_key = (
+            stage,
+            processed_jobs,
+            total_jobs_for_processing,
+            query_index,
+            query_total,
+            job_index,
+            job_total,
+        )
         if emit_key == self._last_emit_key:
             return
         self._last_emit_key = emit_key
@@ -1375,7 +1421,7 @@ def run_pipeline(
     if not search_profiles:
         return {
             "ok": False,
-            "error": "task_config must define either search_profiles[] or both search_locations[] and search_keywords[]",
+            "error": "task_config requires either both search_locations+search_keywords or search_profiles",
         }
 
     seen_limit = _config_int(cfg, "seen_ids_limit", DEFAULT_SEEN_LIMIT, min_value=1)
@@ -1421,7 +1467,7 @@ def run_pipeline(
             "processed_jobs": 0,
             "total_jobs_for_processing": 0,
             "total_percent": 0.0,
-            "status_line": f"starting indeed_daily_search with {len(search_profiles)} query profile(s)...",
+            "status_line": f"starting indeed_daily_search with {len(search_profiles)} query combination(s)...",
         }
     )
     discovered, search_stats, errors = _collect_new_candidates(
