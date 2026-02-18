@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import atexit
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import os
 from pathlib import Path
@@ -34,13 +34,33 @@ def _ts() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _fmt_local_time(dt: datetime) -> str:
+    return dt.strftime("%I:%M %p").lstrip("0")
+
+
+def _fmt_hhmm_from_seconds(seconds: float) -> str:
+    safe = max(0, int(seconds))
+    hours = safe // 3600
+    minutes = (safe % 3600) // 60
+    return f"{hours:02d}:{minutes:02d}"
+
+
 def _progress_callback_from_env(*, resources_dir: Path) -> Callable[[dict[str, Any]], None] | None:
     enabled = str(os.getenv("ZUBOT_TASK_ENABLE_TQDM", "")).strip().lower() in {"1", "true", "yes", "on"}
     if not enabled:
         return None
-    last_print = {"text": "", "at": 0.0, "decision": "-"}
+    last_print = {"text": "", "at": 0.0}
+    start_wall = datetime.now()
+    start_mono = monotonic()
+    decision_counters = {
+        "skip_seen": 0,
+        "skip": 0,
+        "recommend_apply": 0,
+        "recommend_maybe": 0,
+    }
+    last_counted_processed_jobs = {"value": -1}
     blue = "\033[94m"
-    red = "\033[91m"
+    yellow = "\033[93m"
     reset = "\033[0m"
 
     logs_dir = resources_dir / "state" / "logs"
@@ -71,11 +91,12 @@ def _progress_callback_from_env(*, resources_dir: Path) -> Callable[[dict[str, A
         job_total = int(progress.get("job_total") or 0)
         job_key = str(progress.get("job_key") or "").strip()
         decision = str(progress.get("decision") or "").strip()
+        outcome = str(progress.get("outcome") or "").strip().lower()
+        processed_jobs = int(progress.get("processed_jobs") or 0)
         job_url = str(progress.get("job_url") or "").strip()
         local_path = str(progress.get("cover_letter_local_path") or "").strip()
         drive_file_id = str(progress.get("cover_letter_drive_file_id") or "").strip()
         drive_folder_id = str(progress.get("cover_letter_drive_folder_id") or "").strip()
-        query_location = str(progress.get("query_location") or "").strip()
         status = str(progress.get("status_line") or "").strip()
 
         try:
@@ -109,28 +130,48 @@ def _progress_callback_from_env(*, resources_dir: Path) -> Callable[[dict[str, A
             match = re.search(r"decision=(.*?)\s+outcome=", status)
             if match:
                 decision = match.group(1).strip()
-        if decision:
-            last_print["decision"] = decision
+        if not outcome and stage == "process_result" and status:
+            match = re.search(r"outcome=([a-zA-Z_]+)", status)
+            if match:
+                outcome = match.group(1).strip().lower()
 
-        query_desc = "-"
-        if query_total > 0 and query_index > 0:
-            query_desc = f"{query_index}/{query_total}"
-            if query_location:
-                query_desc += f" ({query_location})"
-        latest_decision = str(last_print["decision"] or "-")
-        job_desc = "-"
-        if job_total > 0 and job_index > 0:
-            job_desc = f"{job_index}/{job_total}"
-            if job_key:
-                job_desc += f" ({job_key})"
+        if stage == "process_result" and processed_jobs > last_counted_processed_jobs["value"]:
+            lowered_decision = decision.lower()
+            if lowered_decision == "seenskip" or outcome == "already_seen":
+                decision_counters["skip_seen"] += 1
+            elif lowered_decision == "skip":
+                decision_counters["skip"] += 1
+            elif lowered_decision == "recommend apply":
+                decision_counters["recommend_apply"] += 1
+            elif lowered_decision == "recommend maybe":
+                decision_counters["recommend_maybe"] += 1
+            last_counted_processed_jobs["value"] = processed_jobs
+
+        now_mono = monotonic()
+        elapsed_sec = max(0.0, now_mono - start_mono)
+        elapsed_hhmm = _fmt_hhmm_from_seconds(elapsed_sec)
+        expected_total_hhmm = "--:--"
+        projected_end_text = "--:--"
+        if percent > 0.0:
+            expected_total_sec = elapsed_sec * (100.0 / percent)
+            expected_total_hhmm = _fmt_hhmm_from_seconds(expected_total_sec)
+            projected_end = start_wall + timedelta(seconds=expected_total_sec)
+            projected_end_text = _fmt_local_time(projected_end)
+        start_text = _fmt_local_time(start_wall)
 
         lines: list[str] = [
             f"[{_ts()}] indeed_daily_search",
             f"stage: {stage or 'running'}",
             f"progress: {blue}{percent:.1f}%{reset}",
-            f"query: {query_desc}",
-            f"result: {job_desc}",
-            f"latest decision: {red}{latest_decision}{reset}",
+            f"time: elapsed {yellow}{elapsed_hhmm}{reset} / expected {yellow}{expected_total_hhmm}{reset}",
+            f"start/end: {yellow}{start_text}{reset} -> {yellow}{projected_end_text}{reset}",
+            (
+                "decisions:"
+                f" skip_seen={decision_counters['skip_seen']}"
+                f" skip={decision_counters['skip']}"
+                f" recommend_apply={decision_counters['recommend_apply']}"
+                f" recommend_maybe={decision_counters['recommend_maybe']}"
+            ),
             f"log file: {run_log_path}",
         ]
         if local_path:
@@ -140,13 +181,12 @@ def _progress_callback_from_env(*, resources_dir: Path) -> Callable[[dict[str, A
         if drive_folder_id:
             lines.append(f"drive folder id: {drive_folder_id}")
         block = "\n".join(lines)
-        now = monotonic()
-        if block == last_print["text"] and (now - float(last_print["at"])) < 1.0:
+        if block == last_print["text"] and (now_mono - float(last_print["at"])) < 1.0:
             return
         # Rewrite one live dashboard block (no scrolling history).
         print("\033[2J\033[H" + block, end="\n", flush=True)
         last_print["text"] = block
-        last_print["at"] = now
+        last_print["at"] = now_mono
 
     return _callback
 

@@ -73,7 +73,7 @@ This folder is the task-local resource/config package for `indeed_daily_search`.
   - `status_line`
 - Search phase formula follows equal-weight query buckets and equal-weight jobs within each query:
   - `search_fraction = (query_index-1)/query_total + (1/query_total)*(job_index/job_total)`
-- `total_percent` is monotonic and phase-weighted (search + processing), and does not drop between stages.
+- `total_percent` is monotonic and phase-weighted (0.7% search + 99.3% processing), and does not drop between stages.
 
 ## Row Write Resilience
 - For `Recommend Apply` / `Recommend Maybe`, spreadsheet row append is blocked if final `Job Link` resolves to `Not Found`.
