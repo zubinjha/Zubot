@@ -297,6 +297,9 @@ CREATE INDEX IF NOT EXISTS idx_task_profiles_kind_enabled
 CREATE INDEX IF NOT EXISTS idx_task_profiles_queue_group
     ON task_profiles(queue_group);
 
+CREATE INDEX IF NOT EXISTS idx_task_seen_items_task_provider_first_seen
+    ON task_seen_items(task_id, provider, first_seen_at DESC);
+
 CREATE INDEX IF NOT EXISTS idx_job_applications_date_found
     ON job_applications(date_found);
 

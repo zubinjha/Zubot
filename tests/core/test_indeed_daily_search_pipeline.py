@@ -114,12 +114,54 @@ def test_load_recent_seen_job_keys_under_limit_returns_all(tmp_path: Path):
             INSERT INTO task_seen_items(task_id, provider, item_key, metadata_json, first_seen_at, last_seen_at, seen_count)
             VALUES (?, ?, ?, '{}', ?, ?, 1);
             """,
-            ("indeed_daily_search", "indeed", f"k{idx}", "2026-02-01T00:00:00+00:00", f"2026-02-01T00:0{idx}:00+00:00"),
+            (
+                "indeed_daily_search",
+                "indeed",
+                f"k{idx}",
+                f"2026-02-01T00:0{idx}:00+00:00",
+                "2026-02-01T00:00:00+00:00",
+            ),
         )
     conn.commit()
     conn.close()
     out = pipeline.load_recent_seen_job_keys(task_id="indeed_daily_search", db_path=db_path)
     assert out == ["k2", "k1", "k0"]
+
+
+def test_load_recent_seen_job_keys_uses_first_seen_not_last_seen(tmp_path: Path):
+    db_path = tmp_path / "core.db"
+    _init_task_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        INSERT INTO task_seen_items(task_id, provider, item_key, metadata_json, first_seen_at, last_seen_at, seen_count)
+        VALUES (?, ?, ?, '{}', ?, ?, 1);
+        """,
+        (
+            "indeed_daily_search",
+            "indeed",
+            "older_first_seen",
+            "2026-02-01T00:00:00+00:00",
+            "2026-02-02T00:00:00+00:00",
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO task_seen_items(task_id, provider, item_key, metadata_json, first_seen_at, last_seen_at, seen_count)
+        VALUES (?, ?, ?, '{}', ?, ?, 1);
+        """,
+        (
+            "indeed_daily_search",
+            "indeed",
+            "newer_first_seen",
+            "2026-02-01T01:00:00+00:00",
+            "2026-02-01T01:00:00+00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+    out = pipeline.load_recent_seen_job_keys(task_id="indeed_daily_search", db_path=db_path)
+    assert out == ["newer_first_seen", "older_first_seen"]
 
 
 def test_load_recent_seen_job_keys_handles_duplicates_by_primary_key_upsert(tmp_path: Path):

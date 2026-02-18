@@ -416,7 +416,7 @@ def load_recent_seen_job_keys(
             SELECT item_key
             FROM task_seen_items
             WHERE task_id = ? AND provider = ?
-            ORDER BY COALESCE(last_seen_at, first_seen_at) DESC
+            ORDER BY first_seen_at DESC, item_key DESC
             LIMIT ?;
             """,
             (task_id, provider, safe_limit),

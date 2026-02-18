@@ -11,7 +11,8 @@ This folder is the task-local resource/config package for `indeed_daily_search`.
 - `state/`: task-local runtime outputs (cover letters, debug artifacts).
 
 ## Runtime Behavior
-1. Load latest seen job keys from `task_seen_items` (capped by `seen_ids_limit`, default `200`).
+1. Load latest seen job keys from `task_seen_items` (capped by `seen_ids_limit`, default `200` if not configured).
+   - recency policy is first discovery time (`first_seen_at DESC`), not last touch time
 2. Execute all `search_profiles` with HasData Indeed listing API.
 3. Dedupe across:
    - previously seen keys
@@ -83,6 +84,7 @@ This folder is the task-local resource/config package for `indeed_daily_search`.
 ## Task Config Keys
 - `search_profiles[]`: list of `{profile_id, keyword, location}` search definitions used for HasData listing calls.
 - `seen_ids_limit`: max recent seen keys loaded before each run.
+- `task_timeout_sec`: optional predefined-task runtime timeout (seconds) used when task profile timeout is unset (`28800` recommended for full 18-query runs).
 - `extraction_model_alias`: model alias for LLM field extraction (`company/job_title/location/pay_range/job_link`).
 - `decision_model_alias`: model alias for application triage.
 - `cover_letter_model_alias`: model alias for cover-letter body generation.

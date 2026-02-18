@@ -99,6 +99,19 @@ Conceptual behavior:
 - `last_heartbeat_enqueued_count` INTEGER NOT NULL DEFAULT 0
 - `updated_at` TEXT NOT NULL
 
+### `task_seen_items`
+- `task_id` TEXT NOT NULL
+- `provider` TEXT NOT NULL
+- `item_key` TEXT NOT NULL
+- `metadata_json` TEXT NOT NULL
+- `first_seen_at` TEXT NOT NULL
+- `last_seen_at` TEXT NOT NULL
+- `seen_count` INTEGER NOT NULL DEFAULT 1
+- PK: (`task_id`, `provider`, `item_key`)
+
+Used by predefined tasks (including `indeed_daily_search`) as idempotency/recency ledger.
+The current recency contract for seen-key preloading is `first_seen_at DESC`.
+
 ### `day_memory_status`
 - `day` TEXT PK
 - `total_messages` INTEGER NOT NULL DEFAULT 0
@@ -192,6 +205,9 @@ Conceptual behavior:
 - `idx_defined_task_runs_schedule_planned_fire(schedule_id, planned_fire_at)` unique partial index on `defined_task_runs`
 - `idx_defined_task_run_history_status_finished_at(status, finished_at)` on `defined_task_run_history`
 - `idx_defined_task_run_history_profile_finished_at(profile_id, finished_at)` on `defined_task_run_history`
+- `idx_task_profiles_kind_enabled(kind, enabled)` on `task_profiles`
+- `idx_task_profiles_queue_group(queue_group)` on `task_profiles`
+- `idx_task_seen_items_task_provider_first_seen(task_id, provider, first_seen_at DESC)` on `task_seen_items`
 - `idx_day_memory_finalized(is_finalized)`
 - `idx_memory_summary_jobs_status_created(status, created_at, job_id)`
 - `idx_memory_summary_jobs_day_active(day)` with partial predicate `status IN ('queued','running')`

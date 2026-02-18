@@ -59,6 +59,22 @@ def test_task_profile_crud(tmp_path):
     assert deleted["deleted"] == 1
 
 
+def test_task_seen_items_first_seen_index_exists(tmp_path):
+    store = TaskSchedulerStore(db_path=tmp_path / "scheduler.sqlite3")
+    conn = store._connect()  # noqa: SLF001 - schema contract validation
+    try:
+        row = conn.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'index' AND name = 'idx_task_seen_items_task_provider_first_seen';
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+
+
 def test_enqueue_due_runs_and_dedupe(tmp_path):
     store = TaskSchedulerStore(db_path=tmp_path / "scheduler.sqlite3")
     store.sync_schedules(

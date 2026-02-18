@@ -252,3 +252,82 @@ def test_run_profile_script_injects_task_local_config(monkeypatch: pytest.Monkey
     assert json.loads(env["ZUBOT_TASK_PROFILE_JSON"])["resources_path"] == "tasks/script_task"
     assert env["ZUBOT_TASK_RESOURCES_DIR"] == str(resources_dir.resolve())
     clear_config_cache()
+
+
+def test_run_profile_script_uses_task_local_timeout_when_profile_timeout_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    entrypoint = tmp_path / "scripts" / "task.py"
+    entrypoint.parent.mkdir(parents=True, exist_ok=True)
+    entrypoint.write_text("print('ok')\n", encoding="utf-8")
+
+    resources_dir = tmp_path / "tasks" / "script_task"
+    resources_dir.mkdir(parents=True, exist_ok=True)
+    (resources_dir / "task_config.json").write_text(json.dumps({"task_timeout_sec": 7}), encoding="utf-8")
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "task_profiles": {
+                    "tasks": {
+                        "script_task": {
+                            "name": "Script Task",
+                            "kind": "script",
+                            "entrypoint_path": "scripts/task.py",
+                            "resources_path": "tasks/script_task",
+                            "args": [],
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ZUBOT_CONFIG_PATH", str(cfg_path))
+    monkeypatch.setattr("src.zubot.core.task_agent_runner._repo_root", lambda: tmp_path)
+    clear_config_cache()
+
+    class _FakePopen:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            _ = args
+            _ = kwargs
+            self.returncode = None
+            self._terminated = False
+
+        def poll(self):
+            if self._terminated:
+                return self.returncode
+            return None
+
+        def terminate(self):
+            self._terminated = True
+            self.returncode = 143
+
+        def wait(self, timeout=None):
+            _ = timeout
+            return self.returncode
+
+        def kill(self):
+            self._terminated = True
+            self.returncode = 137
+
+        def communicate(self):
+            return ("", "")
+
+    tick = {"value": 0.0}
+
+    def _fake_monotonic() -> float:
+        tick["value"] += 1.0
+        return tick["value"]
+
+    monkeypatch.setattr("src.zubot.core.task_agent_runner.subprocess.Popen", _FakePopen)
+    monkeypatch.setattr("src.zubot.core.task_agent_runner.monotonic", _fake_monotonic)
+    monkeypatch.setattr("src.zubot.core.task_agent_runner.sleep", lambda _sec: None)
+
+    runner = TaskAgentRunner()
+    out = runner.run_profile(profile_id="script_task")
+    assert out["ok"] is False
+    assert out["status"] == "failed"
+    assert "timed out after 7s" in str(out["error"])
+    clear_config_cache()

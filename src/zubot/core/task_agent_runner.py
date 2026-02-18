@@ -126,8 +126,6 @@ class TaskAgentRunner:
 
         args = task_def.get("args")
         arg_list = [str(item) for item in args if isinstance(item, (str, int, float))] if isinstance(args, list) else []
-        timeout_raw = task_def.get("timeout_sec")
-        timeout_sec = int(timeout_raw) if isinstance(timeout_raw, int) and timeout_raw > 0 else 1800
         try:
             resources_dir = TaskAgentRunner._resolve_task_resources_dir(task_id=task_id, task_def=task_def)
         except ValueError as exc:
@@ -145,6 +143,11 @@ class TaskAgentRunner:
                 "attempts_configured": None,
             }
         task_local_config = TaskAgentRunner._load_task_local_config(resources_dir)
+        timeout_raw = task_def.get("timeout_sec")
+        timeout_sec = int(timeout_raw) if isinstance(timeout_raw, int) and timeout_raw > 0 else None
+        if timeout_sec is None:
+            local_timeout = task_local_config.get("task_timeout_sec")
+            timeout_sec = int(local_timeout) if isinstance(local_timeout, int) and local_timeout > 0 else 1800
 
         env = os.environ.copy()
         env["ZUBOT_TASK_ID"] = task_id

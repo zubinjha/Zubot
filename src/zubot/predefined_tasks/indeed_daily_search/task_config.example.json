@@ -1,7 +1,8 @@
 {
   "name": "Indeed Daily Search Routine",
   "notes": "Config-driven Indeed search + decision + cover-letter + sheet upload pipeline.",
-  "seen_ids_limit": 200,
+  "task_timeout_sec": 28800,
+  "seen_ids_limit": 5000,
   "seen_provider": "indeed",
   "extraction_model_alias": "medium",
   "decision_model_alias": "medium",

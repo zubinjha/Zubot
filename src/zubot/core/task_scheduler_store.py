@@ -473,6 +473,8 @@ class TaskSchedulerStore:
                     seen_count INTEGER NOT NULL DEFAULT 1,
                     PRIMARY KEY(task_id, provider, item_key)
                 );
+                CREATE INDEX IF NOT EXISTS idx_task_seen_items_task_provider_first_seen
+                    ON task_seen_items(task_id, provider, first_seen_at DESC);
 
                 CREATE TABLE IF NOT EXISTS job_applications (
                     job_key TEXT PRIMARY KEY,
