@@ -59,6 +59,8 @@ def _progress_callback_from_env() -> Callable[[dict[str, Any]], None] | None:
         decision = str(progress.get("decision") or "").strip()
         job_url = str(progress.get("job_url") or "").strip()
         local_path = str(progress.get("cover_letter_local_path") or "").strip()
+        drive_file_id = str(progress.get("cover_letter_drive_file_id") or "").strip()
+        drive_folder_id = str(progress.get("cover_letter_drive_folder_id") or "").strip()
         status = str(progress.get("status_line") or "").strip()
 
         # Print one per-job block only after decision/outcome exists.
@@ -87,6 +89,10 @@ def _progress_callback_from_env() -> Callable[[dict[str, Any]], None] | None:
 
         if local_path:
             lines.append(f"local_cover_letter_path: {local_path}")
+        if drive_file_id:
+            lines.append(f"cover_letter_drive_file_id: {drive_file_id}")
+        if drive_folder_id:
+            lines.append(f"cover_letter_drive_folder_id: {drive_folder_id}")
         if decision:
             lines.append(f"decision: {red}{decision}{reset}")
         if job_url:

@@ -42,7 +42,7 @@ DEFAULT_SHEET_RETRY_ATTEMPTS = 2
 DEFAULT_SHEET_RETRY_BACKOFF_SEC = 1.0
 DEFAULT_PROJECT_CONTEXT_TOP_N = 3
 DEFAULT_PROJECT_CONTEXT_MAX_CHARS = 2600
-SEARCH_PHASE_WEIGHT = 0.6
+SEARCH_PHASE_WEIGHT = 0.01
 
 DEFAULT_CANDIDATE_CONTEXT_FILES = [
     "context/USER.md",
@@ -1433,7 +1433,7 @@ def run_pipeline(
             "search_fraction": 0.0,
             "processed_jobs": 0,
             "total_jobs_for_processing": total_jobs_to_process,
-            "total_percent": 0.0,
+            "total_percent": _overall_fraction(search_fraction=1.0, processed_jobs=0, total_jobs=total_jobs_to_process) * 100.0,
             "status_line": f"search phase complete, processing {total_jobs_to_process} result(s)...",
         }
     )
@@ -1441,13 +1441,14 @@ def run_pipeline(
     def _emit_job_result(
         *,
         candidate: DiscoveredCandidate,
-        query_fraction: float,
         job_key: str,
         decision: str,
         outcome: str,
         job_url: str | None = None,
         error_reason: str | None = None,
         cover_letter_local_path: str | None = None,
+        cover_letter_drive_file_id: str | None = None,
+        cover_letter_drive_folder_id: str | None = None,
     ) -> None:
         status_line = (
             f"query {candidate.query_index}/{candidate.query_total} "
@@ -1476,10 +1477,17 @@ def run_pipeline(
                 "outcome": outcome,
                 "error_reason": error_reason,
                 "cover_letter_local_path": cover_letter_local_path,
-                "search_fraction": round(query_fraction, 4),
+                "cover_letter_drive_file_id": cover_letter_drive_file_id,
+                "cover_letter_drive_folder_id": cover_letter_drive_folder_id,
+                "search_fraction": 1.0,
                 "processed_jobs": processed_jobs,
                 "total_jobs_for_processing": total_jobs_to_process,
-                "total_percent": query_fraction * 100.0,
+                "total_percent": _overall_fraction(
+                    search_fraction=1.0,
+                    processed_jobs=processed_jobs,
+                    total_jobs=total_jobs_to_process,
+                )
+                * 100.0,
                 "status_line": status_line,
             }
         )
@@ -1488,42 +1496,11 @@ def run_pipeline(
         listing = candidate.job_listing
         job_key = candidate.job_key
         job_url = _extract_job_url(listing)
-        query_fraction = _search_fraction(
-            query_index=candidate.query_index,
-            query_total=candidate.query_total,
-            job_index=candidate.result_index,
-            job_total=candidate.results_total,
-            query_complete_no_jobs=False,
-        )
-        progress.emit(
-            {
-                "stage": "process",
-                "query_index": candidate.query_index,
-                "query_total": candidate.query_total,
-                "query_keyword": candidate.keyword,
-                "query_location": candidate.location,
-                "job_index": candidate.result_index,
-                "job_total": candidate.results_total,
-                "job_key": job_key,
-                "job_url": job_url,
-                "search_fraction": round(query_fraction, 4),
-                "processed_jobs": processed_jobs,
-                "total_jobs_for_processing": total_jobs_to_process,
-                "total_percent": query_fraction * 100.0,
-                "status_line": (
-                    f"query {candidate.query_index}/{candidate.query_total} "
-                    f"({candidate.keyword}, {candidate.location}), "
-                    f"result {candidate.result_index}/{candidate.results_total} ({job_key}) "
-                    f"job_url={job_url or NOT_FOUND_VALUE}"
-                ),
-            }
-        )
         if not candidate.is_new:
             job_results.append({"job_key": job_key, "decision": None, "status": "seen_skip"})
             processed_jobs += 1
             _emit_job_result(
                 candidate=candidate,
-                query_fraction=query_fraction,
                 job_key=job_key,
                 decision="SeenSkip",
                 outcome="already_seen",
@@ -1537,7 +1514,6 @@ def run_pipeline(
             processed_jobs += 1
             _emit_job_result(
                 candidate=candidate,
-                query_fraction=query_fraction,
                 job_key=job_key,
                 decision=DECISION_SKIP,
                 outcome="missing_job_url",
@@ -1554,7 +1530,6 @@ def run_pipeline(
             processed_jobs += 1
             _emit_job_result(
                 candidate=candidate,
-                query_fraction=query_fraction,
                 job_key=job_key,
                 decision=DECISION_SKIP,
                 outcome="detail_fetch_error",
@@ -1615,7 +1590,6 @@ def run_pipeline(
             decision_err = _coerce_text(decision_out.get("error")) or "decision_failed"
             _emit_job_result(
                 candidate=candidate,
-                query_fraction=query_fraction,
                 job_key=job_key,
                 decision=DECISION_SKIP,
                 outcome="decision_error",
@@ -1649,7 +1623,6 @@ def run_pipeline(
             processed_jobs += 1
             _emit_job_result(
                 candidate=candidate,
-                query_fraction=query_fraction,
                 job_key=job_key,
                 decision=decision,
                 outcome="skipped",
@@ -1660,6 +1633,8 @@ def run_pipeline(
         note_suffix_parts: list[str] = []
         cover_link: str | None = None
         cover_letter_local_path: str | None = None
+        cover_letter_drive_file_id: str | None = None
+        cover_letter_drive_folder_id: str | None = None
         letter_out = _generate_cover_letter(
             model_alias=cover_letter_model_alias,
             job_listing=listing,
@@ -1722,16 +1697,27 @@ def run_pipeline(
                 if not upload_out.get("ok"):
                     counts["upload_errors"] += 1
                     err = _coerce_text(upload_out.get("error")) or "unknown"
-                    errors.append(f"cover letter upload failed for `{job_key}`: {err}")
-                    note_suffix_parts.append(f"cover_letter_error=upload_failed:{err}")
+                    src = _coerce_text(upload_out.get("source")) or "google_drive_upload_error"
+                    errors.append(f"cover letter upload failed for `{job_key}`: {src}: {err}")
+                    note_suffix_parts.append(f"cover_letter_error=upload_failed:{src}:{err}")
                 else:
                     cover_link = _coerce_text(upload_out.get("web_view_link"))
+                    cover_letter_drive_file_id = _coerce_text(upload_out.get("drive_file_id")) or None
+                    cover_letter_drive_folder_id = (
+                        _coerce_text(upload_out.get("destination_folder_id"))
+                        or _coerce_text(upload_out.get("drive_folder_id"))
+                        or None
+                    )
                     if not cover_link:
                         drive_file_id = _coerce_text(upload_out.get("drive_file_id"))
                         if drive_file_id:
                             cover_link = f"https://drive.google.com/file/d/{drive_file_id}/view"
                         else:
                             note_suffix_parts.append("cover_letter_error=upload_missing_link")
+                    if destination_folder_id and cover_letter_drive_folder_id and cover_letter_drive_folder_id != destination_folder_id:
+                        mismatch = f"{cover_letter_drive_folder_id}!={destination_folder_id}"
+                        errors.append(f"cover letter upload folder mismatch for `{job_key}`: {mismatch}")
+                        note_suffix_parts.append(f"cover_letter_error=folder_mismatch:{mismatch}")
 
         row = _map_sheet_row(
             job_key=job_key,
@@ -1749,13 +1735,14 @@ def run_pipeline(
             processed_jobs += 1
             _emit_job_result(
                 candidate=candidate,
-                query_fraction=query_fraction,
                 job_key=job_key,
                 decision=decision,
                 outcome="missing_job_link",
                 job_url=job_url,
                 error_reason="missing_job_link",
                 cover_letter_local_path=cover_letter_local_path,
+                cover_letter_drive_file_id=cover_letter_drive_file_id,
+                cover_letter_drive_folder_id=cover_letter_drive_folder_id,
             )
             continue
         append_out = _append_sheet_row_with_retry(
@@ -1770,12 +1757,13 @@ def run_pipeline(
             processed_jobs += 1
             _emit_job_result(
                 candidate=candidate,
-                query_fraction=query_fraction,
                 job_key=job_key,
                 decision=decision,
                 outcome=status,
                 job_url=job_url,
                 cover_letter_local_path=cover_letter_local_path,
+                cover_letter_drive_file_id=cover_letter_drive_file_id,
+                cover_letter_drive_folder_id=cover_letter_drive_folder_id,
             )
             continue
 
@@ -1786,12 +1774,13 @@ def run_pipeline(
             processed_jobs += 1
             _emit_job_result(
                 candidate=candidate,
-                query_fraction=query_fraction,
                 job_key=job_key,
                 decision=decision,
                 outcome="sheet_duplicate",
                 job_url=job_url,
                 cover_letter_local_path=cover_letter_local_path,
+                cover_letter_drive_file_id=cover_letter_drive_file_id,
+                cover_letter_drive_folder_id=cover_letter_drive_folder_id,
             )
             continue
         counts["upload_errors"] += 1
@@ -1800,13 +1789,14 @@ def run_pipeline(
         processed_jobs += 1
         _emit_job_result(
             candidate=candidate,
-            query_fraction=query_fraction,
             job_key=job_key,
             decision=decision,
             outcome="sheet_upload_error",
             job_url=job_url,
             error_reason=err_text or "sheet_upload_error",
             cover_letter_local_path=cover_letter_local_path,
+            cover_letter_drive_file_id=cover_letter_drive_file_id,
+            cover_letter_drive_folder_id=cover_letter_drive_folder_id,
         )
 
     trigger = _coerce_text(payload.get("trigger")) or "scheduled"
@@ -1820,6 +1810,11 @@ def run_pipeline(
     snapshot = {
         "updated_at": _iso_now(),
         "summary": summary,
+        "config": {
+            "cover_letter_destination_path": destination_path,
+            "cover_letter_destination_folder_id": destination_folder_id,
+            "seen_ids_limit": seen_limit,
+        },
         "counts": counts,
         "search_stats": {
             "queries_total": search_stats.get("queries_total"),
