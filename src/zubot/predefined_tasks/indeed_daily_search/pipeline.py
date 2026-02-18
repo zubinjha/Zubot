@@ -386,6 +386,46 @@ def _config_int(cfg: dict[str, Any], key: str, default: int, *, min_value: int =
     return default
 
 
+def _slug_token(value: str) -> str:
+    text = _coerce_text(value).lower()
+    text = _KEY_CHARS_PATTERN.sub("_", text)
+    text = re.sub(r"_+", "_", text).strip("_")
+    return text or "item"
+
+
+def _assemble_search_profiles(cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    # Backward-compatible path: explicit search_profiles list.
+    legacy_profiles = cfg.get("search_profiles")
+    if isinstance(legacy_profiles, list):
+        out = [item for item in legacy_profiles if isinstance(item, dict)]
+        if out:
+            return out
+
+    locations_raw = cfg.get("search_locations")
+    keywords_raw = cfg.get("search_keywords")
+    locations = [str(item).strip() for item in locations_raw if isinstance(item, str) and str(item).strip()] if isinstance(locations_raw, list) else []
+    keywords = [str(item).strip() for item in keywords_raw if isinstance(item, str) and str(item).strip()] if isinstance(keywords_raw, list) else []
+    if not locations or not keywords:
+        return []
+
+    profiles: list[dict[str, Any]] = []
+    seen_profile_ids: dict[str, int] = {}
+    for location in locations:
+        for keyword in keywords:
+            base_id = f"{_slug_token(keyword)}_{_slug_token(location)}"
+            count = seen_profile_ids.get(base_id, 0)
+            seen_profile_ids[base_id] = count + 1
+            profile_id = base_id if count == 0 else f"{base_id}_{count + 1}"
+            profiles.append(
+                {
+                    "profile_id": profile_id,
+                    "keyword": keyword,
+                    "location": location,
+                }
+            )
+    return profiles
+
+
 def _db_path_from_config() -> Path:
     cfg = load_config()
     central = get_central_service_config(cfg)
@@ -1331,10 +1371,12 @@ def run_pipeline(
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     cfg = local_config if isinstance(local_config, dict) else {}
-    search_profiles_raw = cfg.get("search_profiles")
-    search_profiles = [item for item in search_profiles_raw if isinstance(item, dict)] if isinstance(search_profiles_raw, list) else []
+    search_profiles = _assemble_search_profiles(cfg)
     if not search_profiles:
-        return {"ok": False, "error": "task_config.search_profiles is required"}
+        return {
+            "ok": False,
+            "error": "task_config must define either search_profiles[] or both search_locations[] and search_keywords[]",
+        }
 
     seen_limit = _config_int(cfg, "seen_ids_limit", DEFAULT_SEEN_LIMIT, min_value=1)
     provider = _coerce_text(cfg.get("seen_provider")) or DEFAULT_PROVIDER

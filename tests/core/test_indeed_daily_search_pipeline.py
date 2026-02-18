@@ -8,6 +8,45 @@ import zipfile
 from src.zubot.predefined_tasks.indeed_daily_search import pipeline
 
 
+def test_assemble_search_profiles_from_locations_and_keywords():
+    cfg = {
+        "search_locations": ["Columbus, OH", "Denver, CO"],
+        "search_keywords": ["Software Engineer", "Data Engineer"],
+    }
+    out = pipeline._assemble_search_profiles(cfg)
+    assert [item["location"] for item in out] == [
+        "Columbus, OH",
+        "Columbus, OH",
+        "Denver, CO",
+        "Denver, CO",
+    ]
+    assert [item["keyword"] for item in out] == [
+        "Software Engineer",
+        "Data Engineer",
+        "Software Engineer",
+        "Data Engineer",
+    ]
+    assert [item["profile_id"] for item in out] == [
+        "software_engineer_columbus_oh",
+        "data_engineer_columbus_oh",
+        "software_engineer_denver_co",
+        "data_engineer_denver_co",
+    ]
+
+
+def test_assemble_search_profiles_prefers_legacy_search_profiles():
+    cfg = {
+        "search_profiles": [
+            {"profile_id": "manual_1", "keyword": "K1", "location": "L1"},
+            {"profile_id": "manual_2", "keyword": "K2", "location": "L2"},
+        ],
+        "search_locations": ["Columbus, OH"],
+        "search_keywords": ["Software Engineer"],
+    }
+    out = pipeline._assemble_search_profiles(cfg)
+    assert out == cfg["search_profiles"]
+
+
 def _context_bundle() -> pipeline.CandidateContextBundle:
     return pipeline.CandidateContextBundle(base_context={"user": "context"}, project_context={})
 

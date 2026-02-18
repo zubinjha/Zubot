@@ -78,6 +78,7 @@ Operations guidance for long-running mode lives in [docs/src/zubot/operations.md
   - `task.py`
   - `task_config.json`
   - optional `prompts/`, `assets/`, `state/`
+  - recommended runtime log path: `state/logs/run-YYYYMMDD-HHMMSS.log`
 - `indeed_daily_search` now includes an end-to-end pipeline:
   - search + seen-id dedupe (`task_seen_items`)
   - LLM field extraction for sheet columns (`company`, `job_title`, `location`, `pay_range`, `job_link`) with deterministic `Not Found` fallback on model failure

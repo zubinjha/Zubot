@@ -9,11 +9,12 @@ This folder is the task-local resource/config package for `indeed_daily_search`.
 - `prompts/`: decision + cover-letter prompt templates.
 - `assets/`: decision rubric + cover-letter style spec.
 - `state/`: task-local runtime outputs (cover letters, debug artifacts).
+  - `state/logs/`: recommended per-run terminal/debug logs for this task.
 
 ## Runtime Behavior
 1. Load latest seen job keys from `task_seen_items` (capped by `seen_ids_limit`, default `200` if not configured).
    - recency policy is first discovery time (`first_seen_at DESC`), not last touch time
-2. Execute all `search_profiles` with HasData Indeed listing API.
+2. Assemble query definitions from `search_locations[] × search_keywords[]` (or use legacy `search_profiles[]` when present), then execute listing calls with HasData Indeed API.
 3. Dedupe across:
    - previously seen keys
    - current run keys from other query profiles
@@ -82,7 +83,9 @@ This folder is the task-local resource/config package for `indeed_daily_search`.
   - fallback generation adds `cover_letter_fallback=...` marker in `AI Notes`
 
 ## Task Config Keys
-- `search_profiles[]`: list of `{profile_id, keyword, location}` search definitions used for HasData listing calls.
+- `search_locations[]`: ordered list of location strings used for search fanout.
+- `search_keywords[]`: ordered list of job-title/keyword strings used for search fanout.
+- `search_profiles[]` (legacy): explicit list of `{profile_id, keyword, location}` definitions. If provided, it takes precedence over `search_locations[]` + `search_keywords[]`.
 - `seen_ids_limit`: max recent seen keys loaded before each run.
 - `task_timeout_sec`: optional predefined-task runtime timeout (seconds) used when task profile timeout is unset (`28800` recommended for full 18-query runs).
 - `extraction_model_alias`: model alias for LLM field extraction (`company/job_title/location/pay_range/job_link`).

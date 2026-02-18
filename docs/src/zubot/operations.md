@@ -102,6 +102,24 @@ Predefined task note:
   - `task_seen_items` for seen-id dedupe
   - `job_discovery` for run-level triage results
 
+## Task Logs Pattern
+
+Preferred pattern for predefined-task runtime logs:
+- one folder per task under task-local state:
+  - `src/zubot/predefined_tasks/<task_id>/state/logs/`
+- one append-only log file per run:
+  - `run-YYYYMMDD-HHMMSS.log` (UTC timestamp recommended)
+- optional convenience pointer:
+  - `latest.log` (overwrite/symlink to current run)
+
+Design rationale:
+- keeps logs colocated with task runtime artifacts
+- avoids cross-task log mixing during debugging
+- preserves predictable cleanup and gitignore behavior
+
+Repository policy:
+- task-local state outputs (including `state/logs/`) are runtime-generated and should remain untracked.
+
 ## Provider Queue Monitoring (HasData)
 
 HasData-backed tools are serialized through provider queue group `hasdata`.
