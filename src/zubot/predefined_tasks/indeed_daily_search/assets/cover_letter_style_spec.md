@@ -28,6 +28,7 @@
 - Avoid generic filler language.
 - Do not repeat raw posting titles when they are all caps or overly long.
 - Prefer concise role phrasing in natural title case (for example `Application Developer` instead of `APPLICATION DEVELOPER - INFORMATION TECHNOLOGY`).
+- Normalize role titles by dropping level/seniority suffixes and noisy qualifiers (for example `Software Engineer III- DevOps` -> `DevOps Software Engineer`).
 
 ## Body Structure
 - Exactly 4 body paragraphs.

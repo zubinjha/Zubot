@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 from threading import Event
@@ -157,6 +158,34 @@ class TaskAgentRunner:
         env["ZUBOT_TASK_PROFILE_JSON"] = json.dumps(task_def)
         stream_output = str(env.get("ZUBOT_TASK_STREAM_STDOUT", "")).strip().lower() in {"1", "true", "yes", "on"}
 
+        popen_kwargs: dict[str, Any] = {}
+        if os.name == "nt":
+            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            if creationflags:
+                popen_kwargs["creationflags"] = creationflags
+        else:
+            popen_kwargs["preexec_fn"] = os.setsid
+
+        def _terminate_process_group(proc: subprocess.Popen[str], *, force: bool = False) -> None:
+            try:
+                if proc.poll() is not None:
+                    return
+                if os.name != "nt":
+                    try:
+                        pgid = os.getpgid(proc.pid)
+                    except Exception:
+                        pgid = None
+                    if pgid is not None:
+                        sig = signal.SIGKILL if force else signal.SIGTERM
+                        os.killpg(pgid, sig)
+                        return
+                if force:
+                    proc.kill()
+                else:
+                    proc.terminate()
+            except Exception:
+                return
+
         try:
             process = subprocess.Popen(
                 [sys.executable, str(entrypoint), *arg_list],
@@ -165,6 +194,7 @@ class TaskAgentRunner:
                 stderr=None if stream_output else subprocess.PIPE,
                 text=True,
                 env=env,
+                **popen_kwargs,
             )
         except Exception as exc:
             return {
@@ -184,27 +214,35 @@ class TaskAgentRunner:
         started = monotonic()
         timed_out = False
         cancelled = False
-        while True:
-            ret = process.poll()
-            if ret is not None:
-                break
-            if cancel_event is not None and cancel_event.is_set():
-                cancelled = True
-                process.terminate()
-                try:
-                    process.wait(timeout=2.0)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                break
-            if monotonic() - started > timeout_sec:
-                timed_out = True
-                process.terminate()
-                try:
-                    process.wait(timeout=2.0)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                break
-            sleep(0.15)
+        try:
+            while True:
+                ret = process.poll()
+                if ret is not None:
+                    break
+                if cancel_event is not None and cancel_event.is_set():
+                    cancelled = True
+                    _terminate_process_group(process, force=False)
+                    try:
+                        process.wait(timeout=2.0)
+                    except subprocess.TimeoutExpired:
+                        _terminate_process_group(process, force=True)
+                    break
+                if monotonic() - started > timeout_sec:
+                    timed_out = True
+                    _terminate_process_group(process, force=False)
+                    try:
+                        process.wait(timeout=2.0)
+                    except subprocess.TimeoutExpired:
+                        _terminate_process_group(process, force=True)
+                    break
+                sleep(0.15)
+        except KeyboardInterrupt:
+            cancelled = True
+            _terminate_process_group(process, force=False)
+            try:
+                process.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                _terminate_process_group(process, force=True)
 
         stdout, stderr = process.communicate()
         if not isinstance(stdout, str):

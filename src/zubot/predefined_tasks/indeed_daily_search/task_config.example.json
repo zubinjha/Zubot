@@ -2,11 +2,14 @@
   "name": "Indeed Daily Search Routine",
   "notes": "Config-driven Indeed search + decision + cover-letter + sheet upload pipeline.",
   "task_timeout_sec": 28800,
+  "process_workers": 3,
+  "db_queue_maxsize": 128,
+  "sheet_queue_maxsize": 128,
   "seen_ids_limit": 5000,
   "seen_provider": "indeed",
-  "extraction_model_alias": "medium",
-  "decision_model_alias": "medium",
-  "cover_letter_model_alias": "medium",
+  "extraction_model_alias": "low",
+  "decision_model_alias": "low",
+  "cover_letter_model_alias": "low",
   "invalid_schema_retry_limit": 3,
   "project_context_top_n": 3,
   "project_context_max_chars": 2600,
@@ -35,11 +38,8 @@
   ],
   "search_keywords": [
     "Software Engineer",
-    "Data Analytics",
     "AI Engineer",
     "Software Developer",
-    "Data Engineer",
-    "Machine Learning Engineer",
-    "Applied AI Engineer"
+    "Machine Learning Engineer"
   ]
 }

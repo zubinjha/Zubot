@@ -4,6 +4,7 @@ This folder is the task-local resource/config package for `indeed_daily_search`.
 
 - `task.py`: predefined task entrypoint used by central task runner.
 - `pipeline.py`: end-to-end pipeline implementation.
+- `USAGE.md`: terminal run/stop quick reference for this task.
 - `task_config.example.json`: tracked schema/template config with placeholder values.
 - `task_config.json`: local runtime config (queries, model aliases, limits, file mode; gitignored).
 - `prompts/`: decision + cover-letter prompt templates.
@@ -65,6 +66,8 @@ This folder is the task-local resource/config package for `indeed_daily_search`.
   - `stage` (`starting` | `search` | `process` | `done`)
   - `query_index/query_total`
   - `job_index/job_total`
+  - `worker_slots[]` (process-phase slot states for concurrent workers)
+    - per slot: `slot`, `state`, `step_key`, `step_label`, `step_index`, `step_total`, `job_key`, query/result metadata
   - `search_fraction`
   - `search_percent`
   - `overall_percent`
@@ -75,6 +78,7 @@ This folder is the task-local resource/config package for `indeed_daily_search`.
 - `total_percent` is monotonic and phase-weighted (search + processing), and does not drop between stages.
 - Terminal dashboard (`task_cli run`) also shows:
   - current stage/query/result
+  - current worker slot states
   - elapsed/expected runtime and projected local end time
   - rolling decision counters
   - rolling rate for recent non-seen completions (last up to 10)
@@ -92,9 +96,12 @@ This folder is the task-local resource/config package for `indeed_daily_search`.
 ## Task Config Keys
 - `search_locations[]`: list of locations, each paired with every keyword.
 - `search_keywords[]`: list of keywords, each paired with every location.
-- `search_profiles[]`: optional legacy explicit list of `{profile_id, keyword, location}` (used only when the new lists are not both present).
+- `search_profiles[]`: optional explicit list of `{profile_id, keyword, location}`; if present, it takes precedence over generated combinations.
 - `seen_ids_limit`: max recent seen keys loaded before each run.
 - `task_timeout_sec`: optional predefined-task runtime timeout (seconds) used when task profile timeout is unset (`28800` recommended for full 18-query runs).
+- `process_workers`: number of concurrent process-phase workers (`1..12`).
+- `db_queue_maxsize`: bounded queue size for serialized DB discovery writes.
+- `sheet_queue_maxsize`: bounded queue size for serialized spreadsheet append writes.
 - `extraction_model_alias`: model alias for LLM field extraction (`company/job_title/location/pay_range/job_link`).
 - `decision_model_alias`: model alias for application triage.
 - `cover_letter_model_alias`: model alias for cover-letter body generation.

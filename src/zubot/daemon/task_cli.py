@@ -6,6 +6,9 @@ import argparse
 from datetime import datetime
 import json
 import os
+import signal
+from threading import Event
+from time import sleep
 from pathlib import Path
 from typing import Any
 
@@ -189,13 +192,34 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     runner = TaskAgentRunner()
     print(f"[{_ts()}] Running task `{task_id}` from terminal...", flush=True)
+    cancel_event = Event()
+    old_sigint = signal.getsignal(signal.SIGINT)
+    old_sigterm = signal.getsignal(signal.SIGTERM)
+    signal_state = {"count": 0}
+
+    def _request_cancel(_sig: int, _frame: Any) -> None:
+        signal_state["count"] += 1
+        if signal_state["count"] == 1:
+            print(f"[{_ts()}] Cancel requested for `{task_id}`. Waiting for graceful stop...", flush=True)
+            cancel_event.set()
+            return
+        raise KeyboardInterrupt
+
     old_tqdm = os.environ.get("ZUBOT_TASK_ENABLE_TQDM")
     old_stream = os.environ.get("ZUBOT_TASK_STREAM_STDOUT")
     os.environ["ZUBOT_TASK_ENABLE_TQDM"] = "1"
     os.environ["ZUBOT_TASK_STREAM_STDOUT"] = "1"
+    signal.signal(signal.SIGINT, _request_cancel)
+    signal.signal(signal.SIGTERM, _request_cancel)
     try:
-        out = runner.run_profile(profile_id=task_id, payload=payload, profile=profile)
+        out = runner.run_profile(profile_id=task_id, payload=payload, profile=profile, cancel_event=cancel_event)
+    except KeyboardInterrupt:
+        cancel_event.set()
+        print(f"[{_ts()}] Force stop requested for `{task_id}`.", flush=True)
+        return 130
     finally:
+        signal.signal(signal.SIGINT, old_sigint)
+        signal.signal(signal.SIGTERM, old_sigterm)
         if old_tqdm is None:
             os.environ.pop("ZUBOT_TASK_ENABLE_TQDM", None)
         else:
@@ -206,6 +230,79 @@ def _cmd_run(args: argparse.Namespace) -> int:
             os.environ["ZUBOT_TASK_STREAM_STDOUT"] = old_stream
     print(json.dumps(out, ensure_ascii=True, indent=2))
     return 0 if bool(out.get("ok")) else 1
+
+
+def _find_local_task_processes(task_id: str) -> list[dict[str, Any]]:
+    clean = str(task_id or "").strip()
+    if not clean:
+        return []
+    patterns = (
+        f"predefined_tasks/{clean}/task.py",
+        f"predefined_tasks.{clean}.task",
+    )
+    me = os.getpid()
+    out: list[dict[str, Any]] = []
+    try:
+        import subprocess
+
+        raw = subprocess.check_output(["ps", "-axo", "pid,pgid,command"], text=True)
+    except Exception:
+        return out
+    for line in raw.splitlines()[1:]:
+        parts = line.strip().split(maxsplit=2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid = int(parts[0])
+            pgid = int(parts[1])
+        except Exception:
+            continue
+        cmd = parts[2]
+        if pid == me:
+            continue
+        if any(token in cmd for token in patterns):
+            out.append({"pid": pid, "pgid": pgid, "command": cmd})
+    return out
+
+
+def _cmd_stop(args: argparse.Namespace) -> int:
+    task_id = str(args.task_id or "").strip()
+    if not task_id:
+        print("error: task_id is required.")
+        return 2
+    matches = _find_local_task_processes(task_id)
+    if not matches:
+        print(f"[{_ts()}] No local `{task_id}` task processes found.")
+        return 0
+    sig = signal.SIGKILL if bool(args.force) else signal.SIGTERM
+    sig_name = "SIGKILL" if bool(args.force) else "SIGTERM"
+    print(f"[{_ts()}] Stopping {len(matches)} local `{task_id}` process(es) with {sig_name}...", flush=True)
+    for row in matches:
+        pid = int(row["pid"])
+        try:
+            os.kill(pid, sig)
+            print(f"- pid={pid} pgid={int(row['pgid'])} ok", flush=True)
+        except ProcessLookupError:
+            print(f"- pid={pid} already_exited", flush=True)
+        except Exception as exc:
+            print(f"- pid={pid} error={exc}", flush=True)
+    sleep(0.15)
+    survivors: list[int] = []
+    for row in matches:
+        pid = int(row["pid"])
+        try:
+            os.kill(pid, 0)
+            survivors.append(pid)
+        except Exception:
+            continue
+    if survivors and not bool(args.force):
+        print(f"[{_ts()}] Some processes are still running: {survivors}. Re-run with --force.", flush=True)
+        return 1
+    if survivors:
+        print(f"[{_ts()}] Could not stop all processes: {survivors}", flush=True)
+        return 1
+    print(f"[{_ts()}] Local `{task_id}` processes stopped.", flush=True)
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -232,11 +329,21 @@ def main(argv: list[str] | None = None) -> int:
         help="Optional repo-relative or absolute resources folder path.",
     )
 
+    stop = sub.add_parser("stop", help="Stop local task subprocesses by task_id.")
+    stop.add_argument("task_id", help="Task id (for example: indeed_daily_search).")
+    stop.add_argument(
+        "--force",
+        action="store_true",
+        help="Use SIGKILL instead of SIGTERM.",
+    )
+
     args = parser.parse_args(argv)
     if args.command == "list":
         return _cmd_list()
     if args.command == "run":
         return _cmd_run(args)
+    if args.command == "stop":
+        return _cmd_stop(args)
     return 2
 
 

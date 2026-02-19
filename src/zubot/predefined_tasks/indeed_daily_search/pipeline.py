@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
 import json
 from pathlib import Path
+from queue import Queue
 import re
 import sqlite3
+from threading import Event, Lock, Thread
 from time import sleep
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from src.zubot.core.config_loader import get_central_service_config, load_config
+from src.zubot.core.config_loader import get_central_service_config, get_timezone, load_config
 from src.zubot.core.llm_client import call_llm
 from src.zubot.core.task_scheduler_store import resolve_scheduler_db_path
 from src.zubot.tools.kernel.google_drive_docs import upload_file_to_google_drive
@@ -42,7 +46,11 @@ DEFAULT_SHEET_RETRY_ATTEMPTS = 2
 DEFAULT_SHEET_RETRY_BACKOFF_SEC = 1.0
 DEFAULT_PROJECT_CONTEXT_TOP_N = 3
 DEFAULT_PROJECT_CONTEXT_MAX_CHARS = 2600
-SEARCH_PHASE_WEIGHT = 0.01
+DEFAULT_PROCESS_WORKERS = 1
+DEFAULT_DB_QUEUE_MAXSIZE = 128
+DEFAULT_SHEET_QUEUE_MAXSIZE = 128
+MAX_PROCESS_WORKERS = 12
+SEARCH_PHASE_WEIGHT = 0.02
 
 DEFAULT_CANDIDATE_CONTEXT_FILES = [
     "context/USER.md",
@@ -71,6 +79,23 @@ def _utc_now() -> datetime:
 
 def _iso_now() -> str:
     return _utc_now().isoformat()
+
+
+def _local_today_iso() -> str:
+    tz_name = "America/New_York"
+    try:
+        cfg = load_config()
+        configured_tz = get_timezone(cfg)
+        if isinstance(configured_tz, str) and configured_tz.strip():
+            tz_name = configured_tz.strip()
+    except Exception:
+        pass
+    try:
+        return datetime.now(ZoneInfo(tz_name)).date().isoformat()
+    except ZoneInfoNotFoundError:
+        return datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+    except Exception:
+        return _utc_now().date().isoformat()
 
 
 def _coerce_text(value: Any) -> str:
@@ -185,27 +210,7 @@ def _next_profile_id(*, keyword: str, location: str, used: set[str]) -> str:
 
 
 def _assemble_search_profiles(cfg: dict[str, Any]) -> list[dict[str, str]]:
-    raw_locations = cfg.get("search_locations")
-    raw_keywords = cfg.get("search_keywords")
-    locations = _unique_non_empty_texts(raw_locations) if isinstance(raw_locations, list) else []
-    keywords = _unique_non_empty_texts(raw_keywords) if isinstance(raw_keywords, list) else []
-
-    # Prefer the new layout (locations x keywords) when both lists are provided.
-    if locations and keywords:
-        used_ids: set[str] = set()
-        out: list[dict[str, str]] = []
-        for location in locations:
-            for keyword in keywords:
-                out.append(
-                    {
-                        "profile_id": _next_profile_id(keyword=keyword, location=location, used=used_ids),
-                        "keyword": keyword,
-                        "location": location,
-                    }
-                )
-        return out
-
-    # Backward compatibility with explicit profile list.
+    # Backward compatibility first: if explicit profiles are provided, respect them.
     search_profiles_raw = cfg.get("search_profiles")
     search_profiles = [item for item in search_profiles_raw if isinstance(item, dict)] if isinstance(search_profiles_raw, list) else []
     out: list[dict[str, str]] = []
@@ -221,7 +226,30 @@ def _assemble_search_profiles(cfg: dict[str, Any]) -> list[dict[str, str]]:
         else:
             used_ids.add(profile_id)
         out.append({"profile_id": profile_id, "keyword": keyword, "location": location})
-    return out
+    if out:
+        return out
+
+    raw_locations = cfg.get("search_locations")
+    raw_keywords = cfg.get("search_keywords")
+    locations = _unique_non_empty_texts(raw_locations) if isinstance(raw_locations, list) else []
+    keywords = _unique_non_empty_texts(raw_keywords) if isinstance(raw_keywords, list) else []
+
+    # New layout: generate combinations from locations x keywords.
+    if locations and keywords:
+        used_ids: set[str] = set()
+        out: list[dict[str, str]] = []
+        for location in locations:
+            for keyword in keywords:
+                out.append(
+                    {
+                        "profile_id": _next_profile_id(keyword=keyword, location=location, used=used_ids),
+                        "keyword": keyword,
+                        "location": location,
+                    }
+                )
+        return out
+
+    return []
 
 
 def _compact_file_segment(value: str, *, fallback: str, max_words: int = 4, max_chars: int = 28) -> str:
@@ -317,18 +345,47 @@ def _normalize_role_title_for_cover_letter(raw_title: str) -> str:
     if not text:
         return "the role"
     cleaned = re.sub(r"\s+", " ", text).strip(" -|,:")
-    # Drop trailing qualifiers like " - Information Technology".
-    cleaned = re.split(r"\s(?:-|:|\|)\s", cleaned, maxsplit=1)[0].strip() or cleaned
-    # Drop trailing parenthetical qualifiers.
     cleaned = re.sub(r"\s*\([^)]*\)\s*$", "", cleaned).strip() or cleaned
+    cleaned = re.sub(r"\s+[-:|/]\s+", " ", cleaned).strip() or cleaned
+
+    # Remove level/seniority markers that make the title noisy.
+    cleaned = re.sub(r"\b(?:L|Level)\s*\d+\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(?:I|II|III|IV|V|VI|VII|VIII|IX|X)\b", "", cleaned)
+    cleaned = re.sub(r"\b(?:New\s+Grad|Early\s+Career|Campus\s+Hire)\b", "", cleaned, flags=re.IGNORECASE)
+
+    # Remove broad department suffixes.
+    cleaned = re.sub(r"\bInformation\s+Technology\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bWeb\s*(?:&|and)\s*Mobile\s+Dev(?:elopment)?\b", "", cleaned, flags=re.IGNORECASE)
+
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ,:")
+    if not cleaned:
+        return "the role"
 
     alpha_chars = [ch for ch in cleaned if ch.isalpha()]
     uppercase_chars = [ch for ch in alpha_chars if ch.isupper()]
     if alpha_chars and (len(uppercase_chars) / len(alpha_chars)) >= 0.65:
         cleaned = cleaned.title()
 
-    for token in ("Ii", "Iii", "Iv", "Vi", "Vii", "Viii", "Ix"):
-        cleaned = re.sub(rf"\b{token}\b", token.upper(), cleaned)
+    tokens = []
+    for part in cleaned.split():
+        lower = part.lower()
+        if lower == "devops":
+            tokens.append("DevOps")
+            continue
+        if lower in {"ai", "ml", "qa", "ui", "ux", "api", "sql", "sre", "is"}:
+            tokens.append(lower.upper())
+            continue
+        tokens.append(part[:1].upper() + part[1:].lower())
+    cleaned = " ".join(tokens)
+
+    # Prefer concise role wording for common "Software Engineer <specialty>" titles.
+    match = re.match(
+        r"(?i)^Software Engineer\s+(DevOps|Backend|Frontend|Full Stack|Platform|Cloud|Security|Mobile|Automation)$",
+        cleaned,
+    )
+    if match:
+        cleaned = f"{match.group(1)} Software Engineer"
+
     return cleaned or "the role"
 
 
@@ -617,7 +674,7 @@ class ProgressReporter:
         self._task_id = task_id
         self._db_path = db_path
         self._callback = callback
-        self._last_emit_key: tuple[str, int, int, int, int, int, int] | None = None
+        self._last_emit_key: tuple[str, int, int, int, int, int, int, int] | None = None
 
     def emit(self, payload: dict[str, Any]) -> None:
         status_line = _coerce_text(payload.get("status_line")) or "task progress update"
@@ -630,6 +687,7 @@ class ProgressReporter:
         job_total = int(payload.get("job_total") or 0)
         processed_jobs = int(payload.get("processed_jobs") or 0)
         total_jobs_for_processing = int(payload.get("total_jobs_for_processing") or 0)
+        slot_update_seq = int(payload.get("slot_update_seq") or 0)
         emit_key = (
             stage,
             processed_jobs,
@@ -638,6 +696,7 @@ class ProgressReporter:
             query_total,
             job_index,
             job_total,
+            slot_update_seq,
         )
         if emit_key == self._last_emit_key:
             return
@@ -1073,6 +1132,8 @@ def _generate_cover_letter(
         "No dash punctuation in body text.\n"
         "When mentioning the role title, use concise natural wording in title case.\n"
         "Do not copy long all-caps or department-heavy posting titles directly.\n"
+        "Drop level/seniority suffixes like II, III, Level 2, and noisy department qualifiers.\n"
+        "Prefer normalized role wording such as DevOps Software Engineer.\n"
         "Do not use markdown.\n\n"
         f"[RoleTitleRaw]\n{raw_role_title or 'Not Found'}\n\n"
         f"[RoleTitlePreferred]\n{normalized_role_title}\n\n"
@@ -1225,6 +1286,41 @@ class SearchCandidate:
     keyword: str
     location: str
     is_new: bool
+
+
+@dataclass
+class DbWriteRequest:
+    task_id: str
+    job_key: str
+    found_at: str
+    decision: str
+    done: Event
+    result: dict[str, Any] | None = None
+
+
+@dataclass
+class SheetWriteRequest:
+    row: dict[str, Any]
+    attempts: int
+    backoff_sec: float
+    done: Event
+    result: dict[str, Any] | None = None
+
+
+@dataclass
+class ProcessOutcome:
+    candidate: SearchCandidate
+    job_key: str
+    decision: str
+    outcome: str
+    job_url: str | None
+    error_reason: str | None
+    cover_letter_local_path: str | None
+    cover_letter_drive_file_id: str | None
+    cover_letter_drive_folder_id: str | None
+    count_deltas: dict[str, int]
+    job_result: dict[str, Any]
+    errors: list[str]
 
 
 def _collect_new_candidates(
@@ -1408,6 +1504,51 @@ def _collect_new_candidates(
     return discovered, stats, errors
 
 
+def _db_writer_loop(*, db_path: Path, queue: Queue[DbWriteRequest | object], stop_token: object) -> None:
+    while True:
+        item = queue.get()
+        try:
+            if item is stop_token:
+                return
+            assert isinstance(item, DbWriteRequest)
+            try:
+                _upsert_job_discovery(
+                    task_id=item.task_id,
+                    job_key=item.job_key,
+                    found_at=item.found_at,
+                    decision=item.decision,
+                    db_path=db_path,
+                )
+                item.result = {"ok": True}
+            except Exception as exc:  # pragma: no cover - runtime guard
+                item.result = {"ok": False, "error": str(exc)}
+            finally:
+                item.done.set()
+        finally:
+            queue.task_done()
+
+
+def _sheet_writer_loop(*, queue: Queue[SheetWriteRequest | object], stop_token: object) -> None:
+    while True:
+        item = queue.get()
+        try:
+            if item is stop_token:
+                return
+            assert isinstance(item, SheetWriteRequest)
+            try:
+                item.result = _append_sheet_row_with_retry(
+                    row=item.row,
+                    attempts=item.attempts,
+                    backoff_sec=item.backoff_sec,
+                )
+            except Exception as exc:  # pragma: no cover - runtime guard
+                item.result = {"ok": False, "error": str(exc), "source": "sheet_writer_exception"}
+            finally:
+                item.done.set()
+        finally:
+            queue.task_done()
+
+
 def run_pipeline(
     *,
     task_id: str,
@@ -1451,6 +1592,12 @@ def run_pipeline(
     sheet_retry_backoff_sec = float(cfg.get("sheet_retry_backoff_sec")) if isinstance(cfg.get("sheet_retry_backoff_sec"), (int, float)) else DEFAULT_SHEET_RETRY_BACKOFF_SEC
     project_context_top_n = _config_int(cfg, "project_context_top_n", DEFAULT_PROJECT_CONTEXT_TOP_N, min_value=0)
     project_context_max_chars = _config_int(cfg, "project_context_max_chars", DEFAULT_PROJECT_CONTEXT_MAX_CHARS, min_value=300)
+    process_workers = min(
+        MAX_PROCESS_WORKERS,
+        _config_int(cfg, "process_workers", DEFAULT_PROCESS_WORKERS, min_value=1),
+    )
+    db_queue_maxsize = _config_int(cfg, "db_queue_maxsize", DEFAULT_DB_QUEUE_MAXSIZE, min_value=1)
+    sheet_queue_maxsize = _config_int(cfg, "sheet_queue_maxsize", DEFAULT_SHEET_QUEUE_MAXSIZE, min_value=1)
     if file_mode not in {"overwrite", "versioned"}:
         file_mode = DEFAULT_FILE_MODE
 
@@ -1508,9 +1655,109 @@ def run_pipeline(
         "sheet_rows_deduped": 0,
     }
     job_results: list[dict[str, Any]] = []
-    found_at_iso = _utc_now().date().isoformat()
+    found_at_iso = _local_today_iso()
     total_jobs_to_process = len(discovered)
     processed_jobs = 0
+    worker_step_total = 4
+    slot_update_seq = 0
+    slot_lock = Lock()
+
+    def _idle_slot(slot: int) -> dict[str, Any]:
+        return {
+            "slot": slot,
+            "state": "idle",
+            "step_key": "idle",
+            "step_label": "Idle",
+            "step_index": 0,
+            "step_total": worker_step_total,
+            "job_key": "",
+            "query_index": 0,
+            "query_total": 0,
+            "result_index": 0,
+            "result_total": 0,
+            "query_keyword": "",
+            "query_location": "",
+            "summary": "idle",
+            "updated_at": _iso_now(),
+        }
+
+    worker_slots: dict[int, dict[str, Any]] = {slot: _idle_slot(slot) for slot in range(1, process_workers + 1)}
+
+    def _worker_slots_snapshot() -> tuple[int, list[dict[str, Any]]]:
+        with slot_lock:
+            slots = [dict(state) for _slot, state in sorted(worker_slots.items(), key=lambda item: item[0])]
+            seq = int(slot_update_seq)
+        return seq, slots
+
+    def _set_slot_state(
+        *,
+        slot: int,
+        state: str,
+        step_key: str,
+        step_label: str,
+        step_index: int,
+        candidate: SearchCandidate | None = None,
+        job_key: str | None = None,
+        emit_progress: bool = True,
+    ) -> None:
+        nonlocal slot_update_seq
+        with slot_lock:
+            base = dict(worker_slots.get(slot) or _idle_slot(slot))
+            if candidate is not None:
+                base.update(
+                    {
+                        "query_index": candidate.query_index,
+                        "query_total": candidate.query_total,
+                        "result_index": candidate.result_index,
+                        "result_total": candidate.results_total,
+                        "query_keyword": candidate.keyword,
+                        "query_location": candidate.location,
+                    }
+                )
+            if job_key is not None:
+                base["job_key"] = str(job_key)
+            clean_label = _coerce_text(step_label) or "running"
+            base.update(
+                {
+                    "slot": slot,
+                    "state": _coerce_text(state) or "running",
+                    "step_key": _coerce_text(step_key) or "running",
+                    "step_label": clean_label,
+                    "step_index": max(0, min(worker_step_total, int(step_index))),
+                    "step_total": worker_step_total,
+                    "summary": f"{clean_label} ({base.get('job_key') or '-'})",
+                    "updated_at": _iso_now(),
+                }
+            )
+            worker_slots[slot] = base
+            slot_update_seq += 1
+            seq = int(slot_update_seq)
+            slots = [dict(state_row) for _slot, state_row in sorted(worker_slots.items(), key=lambda item: item[0])]
+
+        if not emit_progress:
+            return
+
+        progress.emit(
+            {
+                "stage": "process",
+                "query_index": int(base.get("query_index") or 0),
+                "query_total": int(base.get("query_total") or 0),
+                "query_keyword": _coerce_text(base.get("query_keyword")),
+                "query_location": _coerce_text(base.get("query_location")),
+                "job_index": int(base.get("result_index") or 0),
+                "job_total": int(base.get("result_total") or 0),
+                "job_key": _coerce_text(base.get("job_key")),
+                "search_fraction": 1.0,
+                "processed_jobs": processed_jobs,
+                "total_jobs_for_processing": total_jobs_to_process,
+                "worker_slots": slots,
+                "slot_update_seq": seq,
+                "total_percent": _overall_fraction(search_fraction=1.0, processed_jobs=processed_jobs, total_jobs=total_jobs_to_process)
+                * 100.0,
+                "status_line": f"slot {slot}: {_coerce_text(base.get('summary'))}",
+            }
+        )
+
     progress.emit(
         {
             "stage": "process",
@@ -1521,6 +1768,8 @@ def run_pipeline(
             "search_fraction": 0.0,
             "processed_jobs": 0,
             "total_jobs_for_processing": total_jobs_to_process,
+            "worker_slots": _worker_slots_snapshot()[1],
+            "slot_update_seq": slot_update_seq,
             "total_percent": _overall_fraction(search_fraction=1.0, processed_jobs=0, total_jobs=total_jobs_to_process) * 100.0,
             "status_line": f"search phase complete, processing {total_jobs_to_process} result(s)...",
         }
@@ -1528,7 +1777,7 @@ def run_pipeline(
 
     def _emit_job_result(
         *,
-        candidate: DiscoveredCandidate,
+        candidate: SearchCandidate,
         job_key: str,
         decision: str,
         outcome: str,
@@ -1550,6 +1799,7 @@ def run_pipeline(
             status_line += f" error={error_reason}"
         if cover_letter_local_path:
             status_line += f" cover_letter_local_path={cover_letter_local_path}"
+        seq, slots = _worker_slots_snapshot()
         progress.emit(
             {
                 "stage": "process_result",
@@ -1570,6 +1820,8 @@ def run_pipeline(
                 "search_fraction": 1.0,
                 "processed_jobs": processed_jobs,
                 "total_jobs_for_processing": total_jobs_to_process,
+                "worker_slots": slots,
+                "slot_update_seq": seq,
                 "total_percent": _overall_fraction(
                     search_fraction=1.0,
                     processed_jobs=processed_jobs,
@@ -1579,52 +1831,116 @@ def run_pipeline(
                 "status_line": status_line,
             }
         )
+    db_stop_token = object()
+    sheet_stop_token = object()
+    db_write_queue: Queue[DbWriteRequest | object] = Queue(maxsize=max(1, db_queue_maxsize))
+    sheet_write_queue: Queue[SheetWriteRequest | object] = Queue(maxsize=max(1, sheet_queue_maxsize))
+    db_writer = Thread(
+        target=_db_writer_loop,
+        kwargs={"db_path": db_path, "queue": db_write_queue, "stop_token": db_stop_token},
+        daemon=True,
+        name="indeed_db_writer",
+    )
+    sheet_writer = Thread(
+        target=_sheet_writer_loop,
+        kwargs={"queue": sheet_write_queue, "stop_token": sheet_stop_token},
+        daemon=True,
+        name="indeed_sheet_writer",
+    )
+    db_writer.start()
+    sheet_writer.start()
 
-    for idx, candidate in enumerate(discovered, start=1):
+    def _enqueue_db_write(*, job_key: str, decision: str, out_errors: list[str]) -> None:
+        req = DbWriteRequest(task_id=task_id, job_key=job_key, found_at=found_at_iso, decision=decision, done=Event())
+        db_write_queue.put(req)
+        req.done.wait()
+        result = req.result if isinstance(req.result, dict) else {"ok": False, "error": "unknown_db_writer_error"}
+        if not bool(result.get("ok")):
+            out_errors.append(f"job_discovery write failed for `{job_key}`: {_coerce_text(result.get('error')) or 'unknown'}")
+
+    def _enqueue_sheet_write(*, row: dict[str, Any]) -> dict[str, Any]:
+        req = SheetWriteRequest(
+            row=row,
+            attempts=sheet_retry_attempts,
+            backoff_sec=sheet_retry_backoff_sec,
+            done=Event(),
+        )
+        sheet_write_queue.put(req)
+        req.done.wait()
+        if isinstance(req.result, dict):
+            return req.result
+        return {"ok": False, "error": "unknown_sheet_writer_error", "source": "sheet_writer"}
+
+    def _process_candidate(candidate: SearchCandidate, *, slot: int) -> ProcessOutcome:
         listing = candidate.job_listing
         job_key = candidate.job_key
         job_url = _extract_job_url(listing)
+        deltas = {
+            "recommended_apply": 0,
+            "recommended_maybe": 0,
+            "skipped": 0,
+            "extraction_errors": 0,
+            "decision_errors": 0,
+            "cover_letter_errors": 0,
+            "upload_errors": 0,
+            "sheet_rows_written": 0,
+            "sheet_rows_deduped": 0,
+        }
+        local_errors: list[str] = []
         if not candidate.is_new:
-            job_results.append({"job_key": job_key, "decision": None, "status": "seen_skip"})
-            processed_jobs += 1
-            _emit_job_result(
+            return ProcessOutcome(
                 candidate=candidate,
                 job_key=job_key,
                 decision="SeenSkip",
                 outcome="already_seen",
                 job_url=job_url,
+                error_reason=None,
+                cover_letter_local_path=None,
+                cover_letter_drive_file_id=None,
+                cover_letter_drive_folder_id=None,
+                count_deltas=deltas,
+                job_result={"job_key": job_key, "decision": None, "status": "seen_skip"},
+                errors=local_errors,
             )
-            continue
         if not job_url:
-            counts["skipped"] += 1
-            counts["decision_errors"] += 1
-            errors.append(f"missing job url for `{job_key}`")
-            processed_jobs += 1
-            _emit_job_result(
+            deltas["skipped"] += 1
+            deltas["decision_errors"] += 1
+            local_errors.append(f"missing job url for `{job_key}`")
+            return ProcessOutcome(
                 candidate=candidate,
                 job_key=job_key,
                 decision=DECISION_SKIP,
                 outcome="missing_job_url",
+                job_url=None,
                 error_reason="missing_job_url",
+                cover_letter_local_path=None,
+                cover_letter_drive_file_id=None,
+                cover_letter_drive_folder_id=None,
+                count_deltas=deltas,
+                job_result={"job_key": job_key, "decision": DECISION_SKIP, "status": "missing_job_url"},
+                errors=local_errors,
             )
-            continue
 
         detail = get_indeed_job_detail(url=job_url)
         if not detail.get("ok"):
-            counts["skipped"] += 1
-            counts["decision_errors"] += 1
+            deltas["skipped"] += 1
+            deltas["decision_errors"] += 1
             detail_err = _coerce_text(detail.get("error")) or "detail_fetch_error"
-            errors.append(f"detail fetch failed for `{job_key}`: {detail_err}")
-            processed_jobs += 1
-            _emit_job_result(
+            local_errors.append(f"detail fetch failed for `{job_key}`: {detail_err}")
+            return ProcessOutcome(
                 candidate=candidate,
                 job_key=job_key,
                 decision=DECISION_SKIP,
                 outcome="detail_fetch_error",
                 job_url=job_url,
                 error_reason=detail_err,
+                cover_letter_local_path=None,
+                cover_letter_drive_file_id=None,
+                cover_letter_drive_folder_id=None,
+                count_deltas=deltas,
+                job_result={"job_key": job_key, "decision": DECISION_SKIP, "status": "detail_fetch_error"},
+                errors=local_errors,
             )
-            continue
 
         candidate_context = _assemble_candidate_context_for_job(
             bundle=candidate_context_bundle,
@@ -1647,8 +1963,19 @@ def run_pipeline(
             job_url=job_url,
         )
         if not sheet_extract.get("ok"):
-            counts["extraction_errors"] += 1
-            errors.append(f"field extraction failed for `{job_key}`: {sheet_extract.get('error')}")
+            deltas["extraction_errors"] += 1
+            local_errors.append(f"field extraction failed for `{job_key}`: {sheet_extract.get('error')}")
+
+        _set_slot_state(
+            slot=slot,
+            state="running",
+            step_key="decide",
+            step_label="Decide",
+            step_index=2,
+            candidate=candidate,
+            job_key=job_key,
+            emit_progress=True,
+        )
 
         decision_out = _evaluate_job(
             model_alias=decision_model_alias,
@@ -1659,70 +1986,99 @@ def run_pipeline(
             invalid_retry_limit=invalid_retry_limit,
         )
         if not decision_out.get("ok"):
-            counts["skipped"] += 1
-            counts["decision_errors"] += 1
-            decision_error = f"decision failed for `{job_key}`: {decision_out.get('error')}"
-            errors.append(decision_error)
-            try:
-                _upsert_job_discovery(
-                    task_id=task_id,
-                    job_key=job_key,
-                    found_at=found_at_iso,
-                    decision=DECISION_SKIP,
-                    db_path=db_path,
-                )
-            except Exception as exc:  # pragma: no cover
-                errors.append(f"job_discovery write failed for `{job_key}`: {exc}")
-            job_results.append({"job_key": job_key, "decision": DECISION_SKIP, "status": "decision_error", "error": decision_error})
-            processed_jobs += 1
+            deltas["skipped"] += 1
+            deltas["decision_errors"] += 1
             decision_err = _coerce_text(decision_out.get("error")) or "decision_failed"
-            _emit_job_result(
+            local_errors.append(f"decision failed for `{job_key}`: {decision_err}")
+            _set_slot_state(
+                slot=slot,
+                state="running",
+                step_key="persist",
+                step_label="Persist",
+                step_index=4,
+                candidate=candidate,
+                job_key=job_key,
+                emit_progress=True,
+            )
+            _enqueue_db_write(job_key=job_key, decision=DECISION_SKIP, out_errors=local_errors)
+            return ProcessOutcome(
                 candidate=candidate,
                 job_key=job_key,
                 decision=DECISION_SKIP,
                 outcome="decision_error",
                 job_url=job_url,
                 error_reason=decision_err,
+                cover_letter_local_path=None,
+                cover_letter_drive_file_id=None,
+                cover_letter_drive_folder_id=None,
+                count_deltas=deltas,
+                job_result={"job_key": job_key, "decision": DECISION_SKIP, "status": "decision_error", "error": decision_err},
+                errors=local_errors,
             )
-            continue
 
         decision_payload = decision_out["decision_payload"]
         decision = str(decision_payload["decision"])
         if decision == DECISION_RECOMMEND_APPLY:
-            counts["recommended_apply"] += 1
+            deltas["recommended_apply"] += 1
         elif decision == DECISION_RECOMMEND_MAYBE:
-            counts["recommended_maybe"] += 1
+            deltas["recommended_maybe"] += 1
         else:
-            counts["skipped"] += 1
-
-        try:
-            _upsert_job_discovery(
-                task_id=task_id,
-                job_key=job_key,
-                found_at=found_at_iso,
-                decision=decision,
-                db_path=db_path,
-            )
-        except Exception as exc:  # pragma: no cover
-            errors.append(f"job_discovery write failed for `{job_key}`: {exc}")
+            deltas["skipped"] += 1
 
         if decision == DECISION_SKIP:
-            job_results.append({"job_key": job_key, "decision": decision, "status": "skipped"})
-            processed_jobs += 1
-            _emit_job_result(
+            _set_slot_state(
+                slot=slot,
+                state="running",
+                step_key="cover_letter",
+                step_label="Skip cover letter",
+                step_index=3,
+                candidate=candidate,
+                job_key=job_key,
+                emit_progress=True,
+            )
+            _set_slot_state(
+                slot=slot,
+                state="running",
+                step_key="persist",
+                step_label="Persist",
+                step_index=4,
+                candidate=candidate,
+                job_key=job_key,
+                emit_progress=True,
+            )
+            _enqueue_db_write(job_key=job_key, decision=decision, out_errors=local_errors)
+            return ProcessOutcome(
                 candidate=candidate,
                 job_key=job_key,
                 decision=decision,
                 outcome="skipped",
                 job_url=job_url,
+                error_reason=None,
+                cover_letter_local_path=None,
+                cover_letter_drive_file_id=None,
+                cover_letter_drive_folder_id=None,
+                count_deltas=deltas,
+                job_result={"job_key": job_key, "decision": decision, "status": "skipped"},
+                errors=local_errors,
             )
-            continue
 
         note_suffix_parts: list[str] = []
         cover_link: str | None = None
         cover_letter_local_path: str | None = None
         cover_letter_drive_file_id: str | None = None
         cover_letter_drive_folder_id: str | None = None
+
+        _set_slot_state(
+            slot=slot,
+            state="running",
+            step_key="cover_letter",
+            step_label="Write cover letter",
+            step_index=3,
+            candidate=candidate,
+            job_key=job_key,
+            emit_progress=True,
+        )
+
         letter_out = _generate_cover_letter(
             model_alias=cover_letter_model_alias,
             job_listing=listing,
@@ -1732,9 +2088,9 @@ def run_pipeline(
             invalid_retry_limit=invalid_retry_limit,
         )
         if not letter_out.get("ok"):
-            counts["cover_letter_errors"] += 1
+            deltas["cover_letter_errors"] += 1
             err = _coerce_text(letter_out.get("error")) or "unknown"
-            errors.append(f"cover letter generation failed for `{job_key}`: {err}")
+            local_errors.append(f"cover letter generation failed for `{job_key}`: {err}")
             note_suffix_parts.append(f"cover_letter_error={err}")
         else:
             if bool(letter_out.get("fallback_used")):
@@ -1769,8 +2125,8 @@ def run_pipeline(
                     linkedin_label=linkedin_label,
                 )
             except Exception as exc:
-                counts["cover_letter_errors"] += 1
-                errors.append(f"cover letter render failed for `{job_key}`: {exc}")
+                deltas["cover_letter_errors"] += 1
+                local_errors.append(f"cover letter render failed for `{job_key}`: {exc}")
                 note_suffix_parts.append("cover_letter_error=render_failed")
             else:
                 cover_letter_local_path = str(relative_output_path)
@@ -1783,10 +2139,10 @@ def run_pipeline(
                     backoff_sec=cover_letter_upload_retry_backoff_sec,
                 )
                 if not upload_out.get("ok"):
-                    counts["upload_errors"] += 1
+                    deltas["upload_errors"] += 1
                     err = _coerce_text(upload_out.get("error")) or "unknown"
                     src = _coerce_text(upload_out.get("source")) or "google_drive_upload_error"
-                    errors.append(f"cover letter upload failed for `{job_key}`: {src}: {err}")
+                    local_errors.append(f"cover letter upload failed for `{job_key}`: {src}: {err}")
                     note_suffix_parts.append(f"cover_letter_error=upload_failed:{src}:{err}")
                 else:
                     cover_link = _coerce_text(upload_out.get("web_view_link"))
@@ -1804,8 +2160,20 @@ def run_pipeline(
                             note_suffix_parts.append("cover_letter_error=upload_missing_link")
                     if destination_folder_id and cover_letter_drive_folder_id and cover_letter_drive_folder_id != destination_folder_id:
                         mismatch = f"{cover_letter_drive_folder_id}!={destination_folder_id}"
-                        errors.append(f"cover letter upload folder mismatch for `{job_key}`: {mismatch}")
+                        local_errors.append(f"cover letter upload folder mismatch for `{job_key}`: {mismatch}")
                         note_suffix_parts.append(f"cover_letter_error=folder_mismatch:{mismatch}")
+
+        _set_slot_state(
+            slot=slot,
+            state="running",
+            step_key="persist",
+            step_label="Persist",
+            step_index=4,
+            candidate=candidate,
+            job_key=job_key,
+            emit_progress=True,
+        )
+        _enqueue_db_write(job_key=job_key, decision=decision, out_errors=local_errors)
 
         row = _map_sheet_row(
             job_key=job_key,
@@ -1817,11 +2185,9 @@ def run_pipeline(
             note_suffix="; ".join(note_suffix_parts) if note_suffix_parts else None,
         )
         if _is_not_found(row.get("Job Link")):
-            counts["upload_errors"] += 1
-            errors.append(f"sheet row missing job link for `{job_key}`; row skipped")
-            job_results.append({"job_key": job_key, "decision": decision, "status": "missing_job_link"})
-            processed_jobs += 1
-            _emit_job_result(
+            deltas["upload_errors"] += 1
+            local_errors.append(f"sheet row missing job link for `{job_key}`; row skipped")
+            return ProcessOutcome(
                 candidate=candidate,
                 job_key=job_key,
                 decision=decision,
@@ -1831,51 +2197,51 @@ def run_pipeline(
                 cover_letter_local_path=cover_letter_local_path,
                 cover_letter_drive_file_id=cover_letter_drive_file_id,
                 cover_letter_drive_folder_id=cover_letter_drive_folder_id,
+                count_deltas=deltas,
+                job_result={"job_key": job_key, "decision": decision, "status": "missing_job_link"},
+                errors=local_errors,
             )
-            continue
-        append_out = _append_sheet_row_with_retry(
-            row=row,
-            attempts=sheet_retry_attempts,
-            backoff_sec=sheet_retry_backoff_sec,
-        )
+
+        append_out = _enqueue_sheet_write(row=row)
         if append_out.get("ok"):
-            counts["sheet_rows_written"] += 1
+            deltas["sheet_rows_written"] += 1
             status = "uploaded" if cover_link else "uploaded_without_cover_letter"
-            job_results.append({"job_key": job_key, "decision": decision, "status": status, "cover_letter": cover_link})
-            processed_jobs += 1
-            _emit_job_result(
+            return ProcessOutcome(
                 candidate=candidate,
                 job_key=job_key,
                 decision=decision,
                 outcome=status,
                 job_url=job_url,
+                error_reason=None,
                 cover_letter_local_path=cover_letter_local_path,
                 cover_letter_drive_file_id=cover_letter_drive_file_id,
                 cover_letter_drive_folder_id=cover_letter_drive_folder_id,
+                count_deltas=deltas,
+                job_result={"job_key": job_key, "decision": decision, "status": status, "cover_letter": cover_link},
+                errors=local_errors,
             )
-            continue
 
         err_text = _coerce_text(append_out.get("error"))
         if "Duplicate JobKey" in err_text:
-            counts["sheet_rows_deduped"] += 1
-            job_results.append({"job_key": job_key, "decision": decision, "status": "sheet_duplicate", "cover_letter": cover_link})
-            processed_jobs += 1
-            _emit_job_result(
+            deltas["sheet_rows_deduped"] += 1
+            return ProcessOutcome(
                 candidate=candidate,
                 job_key=job_key,
                 decision=decision,
                 outcome="sheet_duplicate",
                 job_url=job_url,
+                error_reason=None,
                 cover_letter_local_path=cover_letter_local_path,
                 cover_letter_drive_file_id=cover_letter_drive_file_id,
                 cover_letter_drive_folder_id=cover_letter_drive_folder_id,
+                count_deltas=deltas,
+                job_result={"job_key": job_key, "decision": decision, "status": "sheet_duplicate", "cover_letter": cover_link},
+                errors=local_errors,
             )
-            continue
-        counts["upload_errors"] += 1
-        errors.append(f"sheet upload failed for `{job_key}`: {err_text or append_out.get('source')}")
-        job_results.append({"job_key": job_key, "decision": decision, "status": "sheet_upload_error"})
-        processed_jobs += 1
-        _emit_job_result(
+
+        deltas["upload_errors"] += 1
+        local_errors.append(f"sheet upload failed for `{job_key}`: {err_text or append_out.get('source')}")
+        return ProcessOutcome(
             candidate=candidate,
             job_key=job_key,
             decision=decision,
@@ -1885,7 +2251,116 @@ def run_pipeline(
             cover_letter_local_path=cover_letter_local_path,
             cover_letter_drive_file_id=cover_letter_drive_file_id,
             cover_letter_drive_folder_id=cover_letter_drive_folder_id,
+            count_deltas=deltas,
+            job_result={"job_key": job_key, "decision": decision, "status": "sheet_upload_error"},
+            errors=local_errors,
         )
+
+    if total_jobs_to_process > 0:
+        available_slots: list[int] = list(range(1, process_workers + 1))
+        outstanding: dict[Future[ProcessOutcome], tuple[SearchCandidate, int]] = {}
+        next_idx = 0
+
+        def _submit_until_full(executor: ThreadPoolExecutor) -> None:
+            nonlocal next_idx
+            while next_idx < total_jobs_to_process and len(outstanding) < process_workers and available_slots:
+                slot = available_slots.pop(0)
+                cand = discovered[next_idx]
+                next_idx += 1
+                _set_slot_state(
+                    slot=slot,
+                    state="running",
+                    step_key="gather_info",
+                    step_label="Gather info",
+                    step_index=1,
+                    candidate=cand,
+                    job_key=cand.job_key,
+                    emit_progress=True,
+                )
+                fut = executor.submit(_process_candidate, cand, slot=slot)
+                outstanding[fut] = (cand, slot)
+
+        try:
+            with ThreadPoolExecutor(max_workers=process_workers, thread_name_prefix="indeed-process") as executor:
+                _submit_until_full(executor)
+                while outstanding:
+                    done, _ = wait(set(outstanding.keys()), return_when=FIRST_COMPLETED)
+                    for fut in done:
+                        fallback_candidate, slot = outstanding.pop(fut)
+                        try:
+                            outcome = fut.result()
+                        except Exception as exc:  # pragma: no cover - defensive runtime guard
+                            err = f"worker exception for `{fallback_candidate.job_key}`: {exc}"
+                            outcome = ProcessOutcome(
+                                candidate=fallback_candidate,
+                                job_key=fallback_candidate.job_key,
+                                decision=DECISION_SKIP,
+                                outcome="worker_exception",
+                                job_url=_extract_job_url(fallback_candidate.job_listing),
+                                error_reason="worker_exception",
+                                cover_letter_local_path=None,
+                                cover_letter_drive_file_id=None,
+                                cover_letter_drive_folder_id=None,
+                                count_deltas={
+                                    "recommended_apply": 0,
+                                    "recommended_maybe": 0,
+                                    "skipped": 1,
+                                    "extraction_errors": 0,
+                                    "decision_errors": 1,
+                                    "cover_letter_errors": 0,
+                                    "upload_errors": 0,
+                                    "sheet_rows_written": 0,
+                                    "sheet_rows_deduped": 0,
+                                },
+                                job_result={"job_key": fallback_candidate.job_key, "decision": DECISION_SKIP, "status": "worker_exception"},
+                                errors=[err],
+                            )
+                        for key, value in outcome.count_deltas.items():
+                            if key in counts:
+                                counts[key] += int(value)
+                        errors.extend(outcome.errors)
+                        job_results.append(outcome.job_result)
+                        processed_jobs += 1
+                        _set_slot_state(
+                            slot=slot,
+                            state="idle",
+                            step_key="idle",
+                            step_label="Idle",
+                            step_index=0,
+                            candidate=None,
+                            job_key="",
+                            emit_progress=False,
+                        )
+                        available_slots.append(slot)
+                        available_slots.sort()
+                        _emit_job_result(
+                            candidate=outcome.candidate,
+                            job_key=outcome.job_key,
+                            decision=outcome.decision,
+                            outcome=outcome.outcome,
+                            job_url=outcome.job_url,
+                            error_reason=outcome.error_reason,
+                            cover_letter_local_path=outcome.cover_letter_local_path,
+                            cover_letter_drive_file_id=outcome.cover_letter_drive_file_id,
+                            cover_letter_drive_folder_id=outcome.cover_letter_drive_folder_id,
+                        )
+                    _submit_until_full(executor)
+        finally:
+            db_write_queue.join()
+            sheet_write_queue.join()
+            db_write_queue.put(db_stop_token)
+            sheet_write_queue.put(sheet_stop_token)
+            db_write_queue.join()
+            sheet_write_queue.join()
+            db_writer.join(timeout=2.0)
+            sheet_writer.join(timeout=2.0)
+    else:
+        db_write_queue.put(db_stop_token)
+        sheet_write_queue.put(sheet_stop_token)
+        db_write_queue.join()
+        sheet_write_queue.join()
+        db_writer.join(timeout=2.0)
+        sheet_writer.join(timeout=2.0)
 
     trigger = _coerce_text(payload.get("trigger")) or "scheduled"
     summary = (
@@ -1925,6 +2400,7 @@ def run_pipeline(
     except Exception as exc:  # pragma: no cover
         errors.append(f"failed to persist last_run_snapshot: {exc}")
 
+    final_slot_seq, final_slots = _worker_slots_snapshot()
     progress.emit(
         {
             "stage": "done",
@@ -1935,6 +2411,8 @@ def run_pipeline(
             "search_fraction": 1.0,
             "processed_jobs": processed_jobs,
             "total_jobs_for_processing": total_jobs_to_process,
+            "worker_slots": final_slots,
+            "slot_update_seq": final_slot_seq,
             "total_percent": 100.0,
             "status_line": summary,
         }

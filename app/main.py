@@ -957,6 +957,39 @@ def index() -> HTMLResponse:
       word-break: break-word;
     }
 
+    .progress-live {
+      display: grid;
+      gap: 8px;
+      white-space: normal;
+    }
+
+    .progress-summary {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.75rem;
+      color: var(--muted);
+      display: grid;
+      gap: 2px;
+    }
+
+    .worker-lines {
+      display: grid;
+      gap: 4px;
+      margin-top: 4px;
+    }
+
+    .worker-line {
+      padding-left: 14px;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.73rem;
+      color: var(--muted);
+      overflow-wrap: anywhere;
+    }
+
+    .worker-frac {
+      color: #b3261e;
+      font-weight: 700;
+    }
+
     .control-item {
       border: 1px solid var(--line);
       border-radius: 10px;
@@ -2436,11 +2469,89 @@ def index() -> HTMLResponse:
       progressEl.textContent = `Completed (${route})\nTools: ${chain}`;
     }
 
+    function safeInt(value, fallback = 0) {
+      const parsed = Number.parseInt(String(value == null ? '' : value), 10);
+      return Number.isFinite(parsed) ? parsed : fallback;
+    }
+
+    function clampPercent(value) {
+      const num = Number(value);
+      if (!Number.isFinite(num)) return 0;
+      return Math.max(0, Math.min(100, num));
+    }
+
+    function renderLiveTaskProgress(taskId, payload, updatedAt) {
+      if (!payload || typeof payload !== 'object') {
+        progressEl.textContent = 'Idle';
+        return;
+      }
+
+      const stage = String(payload.stage || 'idle');
+      const percent = clampPercent(payload.overall_percent != null ? payload.overall_percent : payload.total_percent);
+      const queryIdx = safeInt(payload.query_index, 0);
+      const queryTotal = safeInt(payload.query_total, 0);
+      const jobIdx = safeInt(payload.job_index, 0);
+      const jobTotal = safeInt(payload.job_total, 0);
+      const statusLine = payload.status_line ? String(payload.status_line) : '';
+      const slots = Array.isArray(payload.worker_slots) ? payload.worker_slots : [];
+
+      const summaryLines = [
+        `<div>task: ${escapeHtml(taskId || 'indeed_daily_search')}</div>`,
+        `<div>stage: ${escapeHtml(stage)} | overall: ${escapeHtml(percent.toFixed(1))}%</div>`,
+        `<div>query: ${escapeHtml(String(queryIdx))}/${escapeHtml(String(queryTotal))} | result: ${escapeHtml(String(jobIdx))}/${escapeHtml(String(jobTotal))}</div>`,
+      ];
+      if (updatedAt) {
+        summaryLines.push(`<div>updated: ${escapeHtml(String(updatedAt))}</div>`);
+      }
+      if (statusLine) {
+        summaryLines.push(`<div>status: ${escapeHtml(statusLine)}</div>`);
+      }
+
+      const workerLines = slots.map((slot) => {
+        const slotId = safeInt(slot && slot.slot, 0);
+        const state = slot && slot.state ? String(slot.state) : 'idle';
+        const stepLabel = slot && slot.step_label ? String(slot.step_label) : 'Idle';
+        const stepIndex = safeInt(slot && slot.step_index, 0);
+        const stepTotalRaw = safeInt(slot && slot.step_total, 4);
+        const stepTotal = stepTotalRaw > 0 ? stepTotalRaw : 4;
+        const jobKey = slot && slot.job_key ? String(slot.job_key) : '';
+        const queryIndex = safeInt(slot && slot.query_index, 0);
+        const queryTotalLocal = safeInt(slot && slot.query_total, 0);
+        const queryKeyword = slot && slot.query_keyword ? String(slot.query_keyword) : '';
+        const queryLocation = slot && slot.query_location ? String(slot.query_location) : '';
+        const queryLabel = queryIndex > 0 && queryTotalLocal > 0
+          ? `${queryIndex}/${queryTotalLocal}`
+          : '-';
+        const queryContext = queryKeyword || queryLocation
+          ? ` (${queryKeyword}${queryKeyword && queryLocation ? ', ' : ''}${queryLocation})`
+          : '';
+        const shortJob = jobKey ? jobKey.slice(0, 8) : '-';
+        return `
+          <div class="worker-line">
+            worker ${escapeHtml(String(slotId || '?'))}: <span class="worker-frac">${escapeHtml(String(stepIndex))}/${escapeHtml(String(stepTotal))}</span>
+            ${escapeHtml(stepLabel)} | ${escapeHtml(state)} | query ${escapeHtml(queryLabel)}${escapeHtml(queryContext)} | job ${escapeHtml(shortJob)}
+          </div>
+        `;
+      }).join('');
+
+      progressEl.innerHTML = `
+        <div class="progress-live">
+          <div class="progress-summary">
+            ${summaryLines.join('')}
+          </div>
+          <div class="worker-lines">
+            ${workerLines || '<div class="worker-meta">No worker slot state reported.</div>'}
+          </div>
+        </div>
+      `;
+    }
+
     function renderCentralStatus(statusPayload, runsPayload) {
       const service = statusPayload && statusPayload.service ? statusPayload.service : {};
       const runtime = statusPayload && statusPayload.runtime ? statusPayload.runtime : {};
       const taskSlots = statusPayload && Array.isArray(statusPayload.task_slots) ? statusPayload.task_slots : [];
       const recentRuns = runsPayload && Array.isArray(runsPayload.runs) ? runsPayload.runs : [];
+      let activeTaskId = 'indeed_daily_search';
 
       const lines = [
         `service_running=${!!service.running} enabled_in_config=${!!service.enabled_in_config}`,
@@ -2462,6 +2573,15 @@ def index() -> HTMLResponse:
           const runId = slot && slot.run_id ? slot.run_id : '-';
           const taskId = slot && slot.task_id ? slot.task_id : '-';
           const taskName = slot && slot.task_name ? slot.task_name : '-';
+          if (
+            slot &&
+            slot.task_id &&
+            state !== 'free' &&
+            state !== 'disabled' &&
+            activeTaskId === 'indeed_daily_search'
+          ) {
+            activeTaskId = String(slot.task_id);
+          }
           lines.push(`- ${slotId} enabled=${enabled} state=${state} run_id=${runId} task_id=${taskId} task_name=${taskName}`);
           if (slot && slot.last_result && slot.last_result.status) {
             lines.push(`  last=${slot.last_result.status}`);
@@ -2477,6 +2597,19 @@ def index() -> HTMLResponse:
       }
 
       centralStatusEl.textContent = lines.join('\\n');
+      return activeTaskId;
+    }
+
+    async function fetchTaskLiveProgress(taskId) {
+      const res = await fetch('/api/central/task_state/get', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          task_id: taskId || 'indeed_daily_search',
+          state_key: 'live_progress',
+        }),
+      });
+      return res.json();
     }
 
     async function refreshCentralStatus() {
@@ -2488,7 +2621,17 @@ def index() -> HTMLResponse:
         const statusPayload = await statusRes.json();
         const runsPayload = await runsRes.json();
         if (statusPayload && statusPayload.ok) {
-          renderCentralStatus(statusPayload, runsPayload);
+          const activeTaskId = renderCentralStatus(statusPayload, runsPayload);
+          try {
+            const liveState = await fetchTaskLiveProgress(activeTaskId || 'indeed_daily_search');
+            renderLiveTaskProgress(
+              activeTaskId || 'indeed_daily_search',
+              liveState && liveState.ok ? liveState.value : null,
+              liveState && liveState.updated_at ? liveState.updated_at : null,
+            );
+          } catch (_liveErr) {
+            // Keep current progress panel state on task-state fetch errors.
+          }
           return;
         }
       } catch (_err) {

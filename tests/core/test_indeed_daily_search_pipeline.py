@@ -953,7 +953,7 @@ def test_generate_cover_letter_short_payload_triggers_fallback(monkeypatch):
 
 def test_normalize_role_title_for_cover_letter():
     assert pipeline._normalize_role_title_for_cover_letter("APPLICATION DEVELOPER - INFORMATION TECHNOLOGY") == "Application Developer"
-    assert pipeline._normalize_role_title_for_cover_letter("IS Systems Programmer II - Web & Mobile Dev") == "IS Systems Programmer II"
+    assert pipeline._normalize_role_title_for_cover_letter("IS Systems Programmer II - Web & Mobile Dev") == "IS Systems Programmer"
 
 
 def test_generate_cover_letter_rewrites_raw_role_title_mentions(monkeypatch):
