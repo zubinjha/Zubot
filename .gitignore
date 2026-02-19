@@ -22,3 +22,5 @@ src/zubot/predefined_tasks/indeed_daily_search/state/cover_letters/
 src/zubot/predefined_tasks/*/state/logs/
 src/zubot/predefined_tasks/indeed_daily_search/task_config*.json
 !src/zubot/predefined_tasks/indeed_daily_search/task_config.example.json
+src/zubot/predefined_tasks/indeed_daily_search/assets/cover_letter_style_spec.md
+src/zubot/predefined_tasks/indeed_daily_search/assets/decision_rubric.md
